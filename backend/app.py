@@ -74,26 +74,34 @@ def get_items(host_id: str):
 
     def fetch():
         pbs = PBSClient(host)
-        restic = ResticClient(host)
         pve = PVEClient(host)
 
         pve_meta = pve.get_vms_and_lxcs()
-        pbs_snaps = pbs.get_snapshots()       # [{pve_id, backup_type, snapshots:[...local]}]
-        restic_snaps = restic.get_snapshots() # [{pve_id, backup_type, date, ...cloud}]
+        pbs_snaps = pbs.get_snapshots()
         storage = pbs.get_storage_info()
-        cloud_stats = restic.get_stats()
 
-        # Build per-vmid snapshot lists
+        # Restic is optional — skip if not configured or unavailable
+        restic_snaps = []
+        cloud_stats = {"cloud_used": 0}
+        if host.restic_repo:
+            try:
+                restic = ResticClient(host)
+                restic_snaps = restic.get_snapshots()
+                cloud_stats = restic.get_stats()
+            except Exception as e:
+                app.logger.warning("restic unavailable: %s", e)
+
+        # Build per-vmid snapshot lists from PBS
         snap_map: dict[int, list] = {}
         for group in pbs_snaps:
             vid = group["pve_id"]
             snap_map.setdefault(vid, []).extend(group["snapshots"])
 
-        # Merge restic snapshots
+        # Merge restic snapshots — match by date, otherwise mark whole-datastore
+        # snapshots as covering all tagged VMs
         for rs in restic_snaps:
             vid = rs["pve_id"]
             existing = snap_map.setdefault(vid, [])
-            # Try to match by date; if found, mark cloud=True
             matched = False
             for s in existing:
                 if s["date"] == rs["date"]:

@@ -73,7 +73,7 @@ class PBSClient:
                     "date": dt.strftime("%Y-%m-%d %H:%M"),
                     "size_bytes": size_bytes,
                     "size": _fmt_size(size_bytes),
-                    "incremental": snap.get("protected", False) is False,  # approximation
+                    "incremental": True,  # PBS always uses incremental chunking
                     "local": True,
                     "cloud": False,
                 })

@@ -14,7 +14,7 @@ class PVEClient:
         self._base = host.pve_url.rstrip("/")
         self._session = requests.Session()
         self._session.verify = host.verify_ssl
-        ticket, csrf = self._authenticate(host.pbs_user, host.pbs_password)
+        ticket, csrf = self._authenticate(host.pve_user, host.pve_password)
         self._session.headers["CSRFPreventionToken"] = csrf
         self._session.cookies["PVEAuthCookie"] = ticket
 
