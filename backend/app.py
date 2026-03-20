@@ -171,6 +171,122 @@ def get_storage(host_id: str):
     return jsonify(_cached(f"storage:{host_id}", fetch))
 
 
+@app.get("/api/host/<host_id>/ha/sensors")
+def get_ha_sensors(host_id: str):
+    """HA-friendly flat sensor dict — abstracts PBS/restic as local/cloud."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+
+    def fetch():
+        pbs = PBSClient(host)
+        pve = PVEClient(host)
+        pve_meta = pve.get_vms_and_lxcs()
+        pbs_snaps = pbs.get_snapshots()
+        storage = pbs.get_storage_info()
+
+        restic_snaps = []
+        cloud_stats = {"cloud_used": 0, "cloud_total": None, "cloud_quota_used": None}
+        if host.restic_repo:
+            try:
+                restic = ResticClient(host)
+                restic_snaps = restic.get_snapshots()
+                cloud_stats.update(restic.get_stats())
+            except Exception as e:
+                app.logger.warning("restic unavailable for HA sensors: %s", e)
+
+        # Build snap_map same as items endpoint
+        snap_map: dict[int, list] = {}
+        for group in pbs_snaps:
+            vid = group["pve_id"]
+            snap_map.setdefault(vid, []).extend(group["snapshots"])
+        for rs in restic_snaps:
+            vid = rs["pve_id"]
+            existing = snap_map.setdefault(vid, [])
+            matched = False
+            for s in existing:
+                if s["date"] == rs["date"]:
+                    s["cloud"] = True
+                    matched = True
+                    break
+            if not matched:
+                existing.append(rs)
+
+        now_ts = time.time()
+        out = {}
+
+        # ── Global storage ────────────────────────────────────────────────────
+        local_pct = round(storage["local_used"] / storage["local_total"] * 100) \
+            if storage["local_total"] else 0
+        out["storage_local_used_pct"] = local_pct
+        out["storage_local_used_gb"]  = storage["local_used"]
+        out["storage_local_total_gb"] = storage["local_total"]
+
+        if cloud_stats.get("cloud_total"):
+            cloud_pct = round(
+                cloud_stats["cloud_quota_used"] / cloud_stats["cloud_total"] * 100
+            )
+            out["storage_cloud_used_pct"]   = cloud_pct
+            out["storage_cloud_used_gb"]    = cloud_stats["cloud_quota_used"]
+            out["storage_cloud_total_gb"]   = cloud_stats["cloud_total"]
+        else:
+            out["storage_cloud_used_pct"] = None
+            out["storage_cloud_used_gb"]  = cloud_stats.get("cloud_used", 0)
+            out["storage_cloud_total_gb"] = None
+
+        # ── Per VM/LXC sensors ────────────────────────────────────────────────
+        all_ages_h = []
+        total_local = 0
+        total_cloud = 0
+        unprotected = 0
+
+        all_vmids = set(pve_meta.keys()) | set(snap_map.keys())
+        for vmid in sorted(all_vmids):
+            meta  = pve_meta.get(vmid, {"name": f"id-{vmid}", "type": "vm"})
+            snaps = snap_map.get(vmid, [])
+            snaps.sort(key=lambda s: s["backup_time"], reverse=True)
+
+            key = meta["name"].lower().replace("-", "_").replace(" ", "_")
+
+            local_snaps = [s for s in snaps if s.get("local")]
+            cloud_snaps = [s for s in snaps if s.get("cloud")]
+            has_local   = len(local_snaps) > 0
+            has_cloud   = len(cloud_snaps) > 0
+
+            total_local += len(local_snaps)
+            total_cloud += len(cloud_snaps)
+            if not has_cloud:
+                unprotected += 1
+
+            if snaps:
+                age_h = round((now_ts - snaps[0]["backup_time"]) / 3600, 1)
+                all_ages_h.append(age_h)
+                status = "ok" if age_h < 26 and has_local else \
+                         "warning" if age_h < 48 else "error"
+            else:
+                age_h  = None
+                status = "error"
+
+            out[f"{key}_age_hours"]    = age_h
+            out[f"{key}_has_local"]    = has_local
+            out[f"{key}_has_cloud"]    = has_cloud
+            out[f"{key}_local_count"]  = len(local_snaps)
+            out[f"{key}_cloud_count"]  = len(cloud_snaps)
+            out[f"{key}_status"]       = status
+
+        # ── Global summary ────────────────────────────────────────────────────
+        out["oldest_backup_age_hours"]  = round(max(all_ages_h), 1) if all_ages_h else None
+        out["newest_backup_age_hours"]  = round(min(all_ages_h), 1) if all_ages_h else None
+        out["unprotected_count"]        = unprotected
+        out["total_local_count"]        = total_local
+        out["total_cloud_count"]        = total_cloud
+        out["all_protected"]            = unprotected == 0
+
+        return out
+
+    return jsonify(_cached(f"ha:{host_id}", fetch))
+
+
 @app.get("/api/host/<host_id>/info")
 def get_info(host_id: str):
     host = HOSTS.get(host_id)
