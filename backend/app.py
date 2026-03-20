@@ -248,13 +248,14 @@ def get_ha_sensors(host_id: str):
 
             key = meta["name"].lower().replace("-", "_").replace(" ", "_")
 
-            local_snaps = [s for s in snaps if s.get("local")]
-            cloud_snaps = [s for s in snaps if s.get("cloud")]
-            has_local   = len(local_snaps) > 0
-            has_cloud   = len(cloud_snaps) > 0
+            has_local  = any(s.get("local") for s in snaps)
+            has_cloud  = any(s.get("cloud") for s in snaps)
+            n_local    = sum(1 for s in snaps if s.get("local"))
+            n_cloud    = sum(1 for s in snaps if s.get("cloud"))
+            n_both     = sum(1 for s in snaps if s.get("local") and s.get("cloud"))
 
-            total_local += len(local_snaps)
-            total_cloud += len(cloud_snaps)
+            total_local += n_local
+            total_cloud += n_cloud
             if not has_cloud:
                 unprotected += 1
 
@@ -267,17 +268,20 @@ def get_ha_sensors(host_id: str):
                 age_h  = None
                 status = "error"
 
-            out[f"{key}_age_hours"]    = age_h
-            out[f"{key}_has_local"]    = has_local
-            out[f"{key}_has_cloud"]    = has_cloud
-            out[f"{key}_local_count"]  = len(local_snaps)
-            out[f"{key}_cloud_count"]  = len(cloud_snaps)
-            out[f"{key}_status"]       = status
+            out[f"{key}_age_hours"]      = age_h
+            out[f"{key}_has_local"]      = has_local
+            out[f"{key}_has_cloud"]      = has_cloud
+            out[f"{key}_snapshot_count"] = len(snaps)
+            out[f"{key}_local_count"]    = n_local
+            out[f"{key}_cloud_count"]    = n_cloud
+            out[f"{key}_both_count"]     = n_both
+            out[f"{key}_status"]         = status
 
         # ── Global summary ────────────────────────────────────────────────────
         out["oldest_backup_age_hours"]  = round(max(all_ages_h), 1) if all_ages_h else None
         out["newest_backup_age_hours"]  = round(min(all_ages_h), 1) if all_ages_h else None
         out["unprotected_count"]        = unprotected
+        out["total_snapshot_count"]     = sum(len(s) for s in snap_map.values())
         out["total_local_count"]        = total_local
         out["total_cloud_count"]        = total_cloud
         out["all_protected"]            = unprotected == 0
