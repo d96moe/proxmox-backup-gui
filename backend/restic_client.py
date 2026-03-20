@@ -25,7 +25,7 @@ class ResticClient:
             env=self._env,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=15,
         )
         if result.returncode != 0:
             raise RuntimeError(f"restic error: {result.stderr.strip()}")
