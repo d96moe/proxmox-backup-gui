@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Proxmox Backup Manager</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:      #0e0f11;
+    --surface: #161719;
+    --border:  #2a2c30;
+    --border2: #363840;
+    --text:    #d4d6db;
+    --muted:   #5a5e6a;
+    --accent:  #4a9eff;
+    --accent2: #2d7dd2;
+    --green:   #3ecf8e;
+    --yellow:  #f5c542;
+    --red:     #f05252;
+    --orange:  #fb923c;
+    --purple:  #a78bfa;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; min-height: 100vh; }
+
+  /* Topbar */
+  .topbar { display:flex; align-items:center; justify-content:space-between; padding:0 28px; height:52px; background:var(--surface); border-bottom:1px solid var(--border); }
+  .topbar-left { display:flex; align-items:center; gap:12px; }
+  .logo-mark { width:28px; height:28px; background:var(--accent); border-radius:6px; display:flex; align-items:center; justify-content:center; font-family:'IBM Plex Mono',monospace; font-weight:600; font-size:13px; color:#fff; letter-spacing:-1px; }
+  .logo-text { font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:500; color:var(--text); letter-spacing:0.02em; }
+  .logo-text span { color:var(--muted); font-weight:300; }
+  .status-pill { display:flex; align-items:center; gap:6px; font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); }
+  .status-dot { width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 6px var(--green); animation:pulse 2s infinite; }
+  .status-dot.error { background:var(--red); box-shadow:0 0 6px var(--red); }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+  /* Layout */
+  .layout { display:grid; grid-template-columns:220px 1fr; min-height:calc(100vh - 52px); }
+
+  /* Sidebar */
+  .sidebar { background:var(--surface); border-right:1px solid var(--border); padding:20px 0; }
+  .sidebar-section { padding:0 16px; margin-bottom:24px; }
+  .sidebar-label { font-family:'IBM Plex Mono',monospace; font-size:10px; font-weight:500; color:var(--muted); letter-spacing:.12em; text-transform:uppercase; margin-bottom:8px; padding:0 4px; }
+  .nav-item { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:6px; cursor:pointer; color:var(--muted); font-size:13px; transition:all .12s; border:1px solid transparent; }
+  .nav-item:hover { background:var(--border); color:var(--text); }
+  .nav-item.active { background:rgba(74,158,255,.08); color:var(--accent); border-color:rgba(74,158,255,.2); }
+  .nav-item.host-item { font-family:'IBM Plex Mono',monospace; font-size:12px; }
+  .nav-icon { font-size:15px; width:18px; text-align:center; }
+  .storage-meter { margin-bottom:8px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:8px; }
+  .meter-label { display:flex; justify-content:space-between; font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); margin-bottom:8px; }
+  .meter-label span:last-child { color:var(--text); }
+  .meter-bar { height:4px; background:var(--border2); border-radius:2px; overflow:hidden; }
+  .meter-fill { height:100%; border-radius:2px; }
+
+  /* Main */
+  .main { padding:28px 32px 60px; overflow-y:auto; }
+  .page-header { display:flex; align-items:flex-end; justify-content:space-between; margin-bottom:20px; }
+  .page-title { font-family:'IBM Plex Mono',monospace; font-size:20px; font-weight:500; color:var(--text); letter-spacing:-.02em; }
+  .page-subtitle { font-size:12px; color:var(--muted); margin-top:4px; font-family:'IBM Plex Mono',monospace; }
+  .toolbar { display:flex; gap:8px; align-items:center; }
+  .btn { padding:7px 14px; border-radius:6px; border:1px solid var(--border2); background:var(--surface); color:var(--text); font-family:'IBM Plex Mono',monospace; font-size:11px; cursor:pointer; transition:all .15s; display:flex; align-items:center; gap:6px; }
+  .btn:hover { border-color:var(--accent); color:var(--accent); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .btn-primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .btn-primary:hover { background:var(--accent2); border-color:var(--accent2); color:#fff; }
+
+  /* Section headers */
+  .section-header { display:flex; align-items:center; gap:10px; margin:24px 0 10px; }
+  .section-title { font-family:'IBM Plex Mono',monospace; font-size:11px; font-weight:500; color:var(--muted); letter-spacing:.1em; text-transform:uppercase; }
+  .section-line { flex:1; height:1px; background:var(--border); }
+  .section-count { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); background:var(--border); padding:2px 7px; border-radius:10px; }
+
+  /* Legend */
+  .legend { display:flex; gap:16px; align-items:center; margin-bottom:20px; padding:10px 16px; background:var(--surface); border:1px solid var(--border); border-radius:8px; width:fit-content; }
+  .legend-item { display:flex; align-items:center; gap:6px; font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); }
+
+  /* VM/LXC cards */
+  .vm-grid { display:flex; flex-direction:column; gap:10px; }
+  .vm-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; transition:border-color .15s; }
+  .vm-card:hover { border-color:var(--border2); }
+  .vm-header { display:grid; grid-template-columns:36px 1fr auto auto; align-items:center; gap:14px; padding:14px 18px; cursor:pointer; user-select:none; }
+
+  .vm-icon { width:36px; height:36px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-family:'IBM Plex Mono',monospace; font-size:10px; font-weight:700; letter-spacing:.02em; flex-shrink:0; text-transform:uppercase; }
+  .vm-icon.vm-windows  { background:rgba(74,158,255,.15);  color:#4a9eff; }
+  .vm-icon.vm-linux    { background:rgba(62,207,142,.12);  color:#3ecf8e; }
+  .vm-icon.vm-haos     { background:rgba(245,197,66,.12);  color:#f5c542; }
+  .vm-icon.vm-macos    { background:rgba(167,139,250,.12); color:#a78bfa; }
+  .vm-icon.lxc-default { background:rgba(251,146,60,.12);  color:#fb923c; }
+
+  .vm-info { min-width:0; }
+  .vm-name { font-family:'IBM Plex Mono',monospace; font-size:13px; font-weight:500; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .vm-meta { font-size:11px; color:var(--muted); margin-top:2px; font-family:'IBM Plex Mono',monospace; }
+
+  /* Location badges */
+  .loc-badge { display:flex; align-items:center; gap:5px; padding:4px 9px; border-radius:20px; font-family:'IBM Plex Mono',monospace; font-size:10px; font-weight:500; letter-spacing:.04em; white-space:nowrap; }
+  .loc-badge.local { background:rgba(62,207,142,.1);  color:var(--green);  border:1px solid rgba(62,207,142,.2); }
+  .loc-badge.cloud { background:rgba(74,158,255,.1);  color:var(--accent); border:1px solid rgba(74,158,255,.2); }
+  .loc-badge.both  { background:rgba(167,139,250,.1); color:var(--purple); border:1px solid rgba(167,139,250,.2); }
+  .loc-badge.none  { background:rgba(90,94,106,.1);   color:var(--muted);  border:1px solid rgba(90,94,106,.2); }
+  .loc-dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+
+  .expand-btn { width:28px; height:28px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--muted); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:12px; transition:all .15s; flex-shrink:0; }
+  .expand-btn:hover { border-color:var(--border2); color:var(--text); }
+  .expand-btn.open { color:var(--accent); border-color:rgba(74,158,255,.3); }
+
+  /* Snapshots */
+  .snapshots { border-top:1px solid var(--border); display:none; }
+  .snapshots.open { display:block; }
+  .snapshot-header-row { display:grid; grid-template-columns:1fr 90px 90px 130px 90px; gap:16px; padding:7px 18px 7px 68px; background:var(--bg); border-bottom:1px solid var(--border); }
+  .snapshot-row { display:grid; grid-template-columns:1fr 90px 90px 130px 90px; align-items:center; gap:16px; padding:10px 18px 10px 68px; border-bottom:1px solid var(--border); transition:background .1s; }
+  .snapshot-row:last-child { border-bottom:none; }
+  .snapshot-row:hover { background:rgba(255,255,255,.025); }
+  .col-label { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; }
+  .snap-date { font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--text); }
+  .snap-age  { font-size:11px; color:var(--muted); font-family:'IBM Plex Mono',monospace; margin-top:1px; }
+  .snap-size { font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--text); }
+  .snap-type { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); }
+  .no-backups { padding:16px 18px 16px 68px; font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--muted); }
+  .restore-btn { padding:5px 12px; border-radius:5px; border:1px solid var(--border2); background:transparent; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:11px; cursor:pointer; transition:all .15s; white-space:nowrap; }
+  .restore-btn:hover { background:rgba(74,158,255,.1); border-color:var(--accent); color:var(--accent); }
+
+  /* Error/loading states */
+  .state-msg { padding:40px; text-align:center; font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--muted); }
+  .state-msg.error { color:var(--red); }
+
+  /* Modal */
+  .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex; align-items:center; justify-content:center; z-index:100; backdrop-filter:blur(4px); opacity:0; pointer-events:none; transition:opacity .2s; }
+  .modal-overlay.open { opacity:1; pointer-events:all; }
+  .modal { background:var(--surface); border:1px solid var(--border2); border-radius:12px; width:480px; overflow:hidden; transform:translateY(12px); transition:transform .2s; box-shadow:0 24px 80px rgba(0,0,0,.6); }
+  .modal-overlay.open .modal { transform:translateY(0); }
+  .modal-header { padding:20px 24px 16px; border-bottom:1px solid var(--border); display:flex; align-items:flex-start; justify-content:space-between; }
+  .modal-title { font-family:'IBM Plex Mono',monospace; font-size:15px; font-weight:500; color:var(--text); }
+  .modal-subtitle { font-size:12px; color:var(--muted); margin-top:3px; font-family:'IBM Plex Mono',monospace; }
+  .modal-close { width:28px; height:28px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--muted); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:16px; transition:all .15s; }
+  .modal-close:hover { border-color:var(--border2); color:var(--text); }
+  .modal-body { padding:20px 24px; }
+  .modal-info-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:20px; }
+  .modal-info-item { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; }
+  .modal-info-label { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; margin-bottom:4px; }
+  .modal-info-value { font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--text); font-weight:500; }
+  .modal-source-select { margin-bottom:20px; }
+  .source-label { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); margin-bottom:8px; letter-spacing:.06em; text-transform:uppercase; }
+  .source-options { display:flex; gap:8px; }
+  .source-opt { flex:1; padding:10px; border-radius:8px; border:1px solid var(--border); background:var(--bg); cursor:pointer; text-align:center; transition:all .15s; }
+  .source-opt.selected { border-color:var(--accent); background:rgba(74,158,255,.08); }
+  .source-opt-icon { font-size:18px; margin-bottom:4px; }
+  .source-opt-name { font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--text); }
+  .source-opt-desc { font-size:10px; color:var(--muted); margin-top:2px; font-family:'IBM Plex Mono',monospace; }
+  .modal-warning { display:flex; gap:10px; padding:12px; background:rgba(245,197,66,.06); border:1px solid rgba(245,197,66,.2); border-radius:8px; margin-bottom:20px; font-size:12px; color:var(--yellow); font-family:'IBM Plex Mono',monospace; line-height:1.5; }
+  .modal-footer { display:flex; justify-content:flex-end; gap:8px; padding:16px 24px; border-top:1px solid var(--border); background:var(--bg); }
+  .btn-danger { background:var(--red); border-color:var(--red); color:#fff; }
+  .btn-danger:hover { background:#c0392b; border-color:#c0392b; color:#fff; }
+
+  /* Footer */
+  .footer { position:fixed; bottom:0; left:0; right:0; height:30px; background:var(--surface); border-top:1px solid var(--border); display:flex; align-items:center; padding:0 20px; gap:24px; }
+  .footer-item { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); display:flex; align-items:center; gap:6px; }
+  .footer-dot { width:5px; height:5px; border-radius:50%; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-left">
+    <div class="logo-mark">pb</div>
+    <span class="logo-text">proxmox-backup <span>/ restore · <span id="hostname-label">—</span></span></span>
+  </div>
+  <div class="status-pill">
+    <div class="status-dot" id="status-dot"></div>
+    <span id="sync-status">connecting…</span>
+  </div>
+</div>
+
+<div class="layout">
+  <div class="sidebar">
+    <div class="sidebar-section" id="hosts-section">
+      <div class="sidebar-label">Hosts</div>
+      <!-- populated by JS -->
+    </div>
+    <div class="sidebar-section">
+      <div class="sidebar-label">Storage</div>
+      <div class="storage-meter">
+        <div class="meter-label"><span>local · pbs</span><span id="local-usage">— GB</span></div>
+        <div class="meter-bar"><div class="meter-fill" id="local-bar" style="background:linear-gradient(90deg,var(--green),var(--accent));width:0%"></div></div>
+      </div>
+      <div class="storage-meter">
+        <div class="meter-label"><span>gdrive · restic</span><span id="cloud-usage">— GB</span></div>
+        <div class="meter-bar"><div class="meter-fill" id="cloud-bar" style="background:linear-gradient(90deg,var(--accent),var(--purple));width:0%"></div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="page-header">
+      <div>
+        <div class="page-title">Backups</div>
+        <div class="page-subtitle" id="page-subtitle">loading…</div>
+      </div>
+      <div class="toolbar">
+        <button class="btn" id="refresh-btn" onclick="loadData()">⟳ Refresh</button>
+      </div>
+    </div>
+
+    <div class="legend">
+      <div class="legend-item"><div class="loc-badge local"><div class="loc-dot"></div>local</div> PBS only</div>
+      <div class="legend-item"><div class="loc-badge cloud"><div class="loc-dot"></div>cloud</div> Google Drive only</div>
+      <div class="legend-item"><div class="loc-badge both"><div class="loc-dot"></div>local + cloud</div> Both</div>
+      <div class="legend-item"><div class="loc-badge none"><div class="loc-dot"></div>none</div> No backups</div>
+    </div>
+
+    <div id="content"><div class="state-msg">loading…</div></div>
+  </div>
+</div>
+
+<div class="footer">
+  <div class="footer-item"><div class="footer-dot" style="background:var(--green)"></div><span id="footer-pbs">PBS —</span></div>
+  <div class="footer-item"><div class="footer-dot" style="background:var(--accent)"></div><span id="footer-restic">restic —</span></div>
+</div>
+
+<!-- Restore Modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">Restore snapshot</div>
+        <div class="modal-subtitle" id="modal-subtitle"></div>
+      </div>
+      <button class="modal-close" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-info-grid">
+        <div class="modal-info-item"><div class="modal-info-label">Name</div><div class="modal-info-value" id="modal-vm"></div></div>
+        <div class="modal-info-item"><div class="modal-info-label">Date</div><div class="modal-info-value" id="modal-date"></div></div>
+        <div class="modal-info-item"><div class="modal-info-label">Size</div><div class="modal-info-value" id="modal-size"></div></div>
+        <div class="modal-info-item"><div class="modal-info-label">Est. time</div><div class="modal-info-value" id="modal-time"></div></div>
+      </div>
+      <div class="modal-source-select">
+        <div class="source-label">Restore from</div>
+        <div class="source-options" id="modal-sources"></div>
+      </div>
+      <div class="modal-warning">⚠ &nbsp;The target will be stopped and overwritten. This cannot be undone.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger">Restore now</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────
+// Config — point this at your Flask instance
+// ─────────────────────────────────────────────
+const API_BASE = window.location.origin;  // same host when served by Flask
+
+// ─────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────
+let currentHost = null;
+let hosts = [];
+
+// ─────────────────────────────────────────────
+// Init
+// ─────────────────────────────────────────────
+async function init() {
+  try {
+    const res = await fetch(`${API_BASE}/api/hosts`);
+    if (!res.ok) throw new Error(res.statusText);
+    hosts = await res.json();
+  } catch (err) {
+    setStatus('error', 'backend unreachable');
+    document.getElementById('content').innerHTML =
+      `<div class="state-msg error">Cannot reach backend: ${err.message}</div>`;
+    return;
+  }
+
+  renderHostNav();
+  if (hosts.length > 0) {
+    selectHost(hosts[0].id);
+  }
+}
+
+function renderHostNav() {
+  const section = document.getElementById('hosts-section');
+  section.innerHTML = `<div class="sidebar-label">Hosts</div>` +
+    hosts.map(h => `
+      <div class="nav-item host-item" id="nav-${h.id}" onclick="selectHost('${h.id}')">
+        <span class="nav-icon">⬡</span> ${h.label}
+      </div>`).join('');
+}
+
+function selectHost(id) {
+  currentHost = id;
+  hosts.forEach(h => {
+    const el = document.getElementById(`nav-${h.id}`);
+    if (el) el.classList.toggle('active', h.id === id);
+  });
+  const host = hosts.find(h => h.id === id);
+  document.getElementById('hostname-label').textContent = host?.label ?? id;
+  loadData();
+  loadInfo();
+}
+
+// ─────────────────────────────────────────────
+// Data loading
+// ─────────────────────────────────────────────
+async function loadData() {
+  if (!currentHost) return;
+  const btn = document.getElementById('refresh-btn');
+  btn.disabled = true;
+  btn.textContent = '⟳ Loading…';
+  setStatus('loading', 'syncing…');
+
+  try {
+    const res = await fetch(`${API_BASE}/api/host/${currentHost}/items`);
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    renderData(data);
+    setStatus('ok', `last sync just now`);
+  } catch (err) {
+    document.getElementById('content').innerHTML =
+      `<div class="state-msg error">Error: ${err.message}</div>`;
+    setStatus('error', 'sync failed');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '⟳ Refresh';
+  }
+}
+
+async function loadInfo() {
+  if (!currentHost) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/host/${currentHost}/info`);
+    if (!res.ok) return;
+    const info = await res.json();
+    document.getElementById('footer-pbs').textContent = `PBS ${info.pbs ?? '—'}`;
+    document.getElementById('footer-restic').textContent = `restic ${info.restic ?? '—'}`;
+  } catch (_) {}
+}
+
+// ─────────────────────────────────────────────
+// Render
+// ─────────────────────────────────────────────
+function renderData(data) {
+  const { vms, lxcs, storage } = data;
+
+  document.getElementById('page-subtitle').textContent =
+    `${vms.length} VMs · ${lxcs.length} LXCs`;
+
+  // Storage meters
+  if (storage) {
+    const localPct = storage.local_total > 0
+      ? Math.round(storage.local_used / storage.local_total * 100) : 0;
+    document.getElementById('local-usage').textContent =
+      `${storage.local_used} / ${storage.local_total} GB`;
+    document.getElementById('cloud-usage').textContent =
+      `${storage.cloud_used} GB used`;
+    document.getElementById('local-bar').style.width = localPct + '%';
+    // Cloud bar: assume 1TB total as reference
+    document.getElementById('cloud-bar').style.width =
+      Math.min(Math.round(storage.cloud_used / 1000 * 100), 100) + '%';
+  }
+
+  let html = '';
+
+  if (vms.length > 0) {
+    html += `<div class="section-header">
+      <span class="section-title">Virtual Machines</span>
+      <div class="section-line"></div>
+      <span class="section-count">${vms.length}</span>
+    </div>
+    <div class="vm-grid">${vms.map(renderCard).join('')}</div>`;
+  }
+
+  if (lxcs.length > 0) {
+    html += `<div class="section-header">
+      <span class="section-title">Containers</span>
+      <div class="section-line"></div>
+      <span class="section-count">${lxcs.length}</span>
+    </div>
+    <div class="vm-grid">${lxcs.map(renderCard).join('')}</div>`;
+  }
+
+  if (!html) {
+    html = `<div class="state-msg">No VMs or containers found.</div>`;
+  }
+
+  document.getElementById('content').innerHTML = html;
+}
+
+// ─────────────────────────────────────────────
+// Location badge helper
+// ─────────────────────────────────────────────
+function locBadge(local, cloud) {
+  if (local && cloud) return `<div class="loc-badge both"><div class="loc-dot"></div>local + cloud</div>`;
+  if (local)          return `<div class="loc-badge local"><div class="loc-dot"></div>local</div>`;
+  if (cloud)          return `<div class="loc-badge cloud"><div class="loc-dot"></div>cloud</div>`;
+  return `<div class="loc-badge none"><div class="loc-dot"></div>none</div>`;
+}
+
+function itemLocBadge(item) {
+  const hasLocal = item.snapshots.some(s => s.local);
+  const hasCloud = item.snapshots.some(s => s.cloud);
+  return locBadge(hasLocal, hasCloud);
+}
+
+function iconClass(item) {
+  if (item.type === 'lxc') return 'lxc-default';
+  return 'vm-' + item.os;
+}
+
+function iconLabel(item) {
+  if (item.type === 'lxc') return 'LXC';
+  const map = { windows:'WIN', linux:'LNX', haos:'HA', macos:'OSX' };
+  return map[item.os] || 'VM';
+}
+
+// ─────────────────────────────────────────────
+// Card rendering
+// ─────────────────────────────────────────────
+function renderCard(item) {
+  const latestAge = item.snapshots[0]?.age ?? '—';
+  const snapCount = item.snapshots.length;
+  const typeLabel = item.type.toUpperCase();
+  const statusColor = item.status === 'running' ? 'var(--green)' : 'var(--muted)';
+
+  const snapshotRows = snapCount === 0
+    ? `<div class="no-backups">No backups found</div>`
+    : item.snapshots.map(s => `
+        <div class="snapshot-row">
+          <div><div class="snap-date">${s.date}</div><div class="snap-age">${s.age}</div></div>
+          <div class="snap-size">${s.size}</div>
+          <div class="snap-type">${s.incremental ? 'incremental' : 'full'}</div>
+          ${locBadge(s.local, s.cloud)}
+          <button class="restore-btn"
+            onclick="openModal(${JSON.stringify(item.name)},${JSON.stringify(s.date)},${JSON.stringify(s.size)},${s.local},${s.cloud})">
+            Restore →
+          </button>
+        </div>`).join('');
+
+  return `
+    <div class="vm-card">
+      <div class="vm-header" onclick="toggleSnaps(this)">
+        <div class="vm-icon ${iconClass(item)}">${iconLabel(item)}</div>
+        <div class="vm-info">
+          <div class="vm-name">
+            ${item.name}
+            <span style="color:var(--muted);font-weight:300;font-size:11px">
+              · ${typeLabel} ${item.id}
+            </span>
+            <span style="color:${statusColor};font-size:10px;margin-left:4px">●</span>
+          </div>
+          <div class="vm-meta">${snapCount} snapshot${snapCount !== 1 ? 's' : ''} · latest ${latestAge}</div>
+        </div>
+        <div>${itemLocBadge(item)}</div>
+        <button class="expand-btn" onclick="event.stopPropagation();toggleSnaps(this.closest('.vm-header'))">▾</button>
+      </div>
+      <div class="snapshots">
+        <div class="snapshot-header-row">
+          <span class="col-label">Date</span>
+          <span class="col-label">Size</span>
+          <span class="col-label">Type</span>
+          <span class="col-label">Location</span>
+          <span class="col-label"></span>
+        </div>
+        ${snapshotRows}
+      </div>
+    </div>`;
+}
+
+// ─────────────────────────────────────────────
+// Toggle expand
+// ─────────────────────────────────────────────
+function toggleSnaps(header) {
+  const card = header.closest('.vm-card');
+  const snaps = card.querySelector('.snapshots');
+  const btn = card.querySelector('.expand-btn');
+  snaps.classList.toggle('open');
+  btn.classList.toggle('open');
+  btn.textContent = snaps.classList.contains('open') ? '▴' : '▾';
+}
+
+// ─────────────────────────────────────────────
+// Status pill
+// ─────────────────────────────────────────────
+function setStatus(state, msg) {
+  const dot = document.getElementById('status-dot');
+  dot.className = 'status-dot' + (state === 'error' ? ' error' : '');
+  document.getElementById('sync-status').textContent = msg;
+}
+
+// ─────────────────────────────────────────────
+// Modal
+// ─────────────────────────────────────────────
+function openModal(name, date, size, hasLocal, hasCloud) {
+  document.getElementById('modal-vm').textContent = name;
+  document.getElementById('modal-date').textContent = date;
+  document.getElementById('modal-size').textContent = size;
+  document.getElementById('modal-subtitle').textContent = name + ' · ' + date;
+
+  const sources = [];
+  if (hasLocal) sources.push({ icon: '💾', name: 'Local', desc: 'PBS · fast', time: '~5 min' });
+  if (hasCloud) sources.push({ icon: '☁', name: 'Google Drive', desc: 'restic · slow', time: '~2–4 hours' });
+
+  document.getElementById('modal-time').textContent = sources[0]?.time ?? '—';
+  document.getElementById('modal-sources').innerHTML = sources.map((s, i) => `
+    <div class="source-opt ${i === 0 ? 'selected' : ''}" onclick="selectSource(this, '${s.time}')">
+      <div class="source-opt-icon">${s.icon}</div>
+      <div class="source-opt-name">${s.name}</div>
+      <div class="source-opt-desc">${s.desc}</div>
+    </div>`).join('');
+
+  document.getElementById('modal').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+}
+
+function selectSource(el, time) {
+  el.closest('.source-options').querySelectorAll('.source-opt')
+    .forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+  document.getElementById('modal-time').textContent = time;
+}
+
+document.getElementById('modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('modal')) closeModal();
+});
+
+// ─────────────────────────────────────────────
+// Start
+// ─────────────────────────────────────────────
+init();
+</script>
+</body>
+</html>
