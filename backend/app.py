@@ -80,13 +80,14 @@ def get_items(host_id: str):
         pbs_snaps = pbs.get_snapshots()
         storage = pbs.get_storage_info()
 
-        # Restic coverage: {pve_id: latest_restic_backup_ts}
-        # A PBS snapshot is cloud-covered if restic ran after it was created.
-        restic_coverage: dict[int, int] = {}
+        # Restic: per-VM snapshot timestamps + untagged (full-datastore) latest
+        restic_by_vm: dict[int, list[dict]] = {}
+        untagged_latest: int = 0
+        untagged_id: str | None = None
         if host.restic_repo:
             try:
                 restic = ResticClient(host)
-                restic_coverage = restic.get_coverage()
+                restic_by_vm, untagged_latest, untagged_id = restic.get_snapshots_by_vm()
             except Exception as e:
                 app.logger.warning("restic unavailable: %s", e)
 
@@ -94,11 +95,41 @@ def get_items(host_id: str):
         snap_map: dict[int, list] = {}
         for group in pbs_snaps:
             vid = group["pve_id"]
-            latest_restic = restic_coverage.get(vid, 0)
+            entries = restic_by_vm.get(vid, [])
+            latest_restic = max([e["ts"] for e in entries] + [untagged_latest], default=0)
             for snap in group["snapshots"]:
+                snap["local"] = True
                 if latest_restic > snap["backup_time"]:
                     snap["cloud"] = True
             snap_map.setdefault(vid, []).extend(group["snapshots"])
+
+        # Add cloud-only restic snapshots (no matching PBS snapshot locally)
+        pbs_times: dict[int, set[int]] = {
+            vid: {s["backup_time"] for s in snaps}
+            for vid, snaps in snap_map.items()
+        }
+        all_restic_vmids = set(restic_by_vm.keys()) | (
+            set(pve_meta.keys()) if untagged_latest else set()
+        )
+        for vid in all_restic_vmids:
+            entries = restic_by_vm.get(vid, [
+                {"ts": untagged_latest, "id": untagged_id, "short_id": untagged_id}
+            ] if untagged_latest else [])
+            known = pbs_times.get(vid, set())
+            for e in entries:
+                ts = e["ts"]
+                if not any(abs(ts - p) < 7200 for p in known):
+                    dt = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    snap_map.setdefault(vid, []).append({
+                        "backup_time": ts,
+                        "date": dt,
+                        "local": False,
+                        "cloud": True,
+                        "incremental": False,
+                        "size": "—",
+                        "restic_id": e.get("id"),
+                        "restic_short_id": e.get("short_id"),
+                    })
 
         # Sort snapshots newest-first per vm
         for snaps in snap_map.values():
@@ -179,11 +210,12 @@ def get_ha_sensors(host_id: str):
         storage = pbs.get_storage_info()
 
         restic_coverage: dict[int, int] = {}
+        untagged_latest: int = 0
         cloud_stats = {"cloud_used": 0, "cloud_total": None, "cloud_quota_used": None}
         if host.restic_repo:
             try:
                 restic = ResticClient(host)
-                restic_coverage = restic.get_coverage()
+                restic_coverage, untagged_latest = restic.get_coverage()
                 cloud_stats.update(restic.get_stats())
             except Exception as e:
                 app.logger.warning("restic unavailable for HA sensors: %s", e)
@@ -192,7 +224,7 @@ def get_ha_sensors(host_id: str):
         snap_map: dict[int, list] = {}
         for group in pbs_snaps:
             vid = group["pve_id"]
-            latest_restic = restic_coverage.get(vid, 0)
+            latest_restic = max(restic_coverage.get(vid, 0), untagged_latest)
             for snap in group["snapshots"]:
                 if latest_restic > snap["backup_time"]:
                     snap["cloud"] = True

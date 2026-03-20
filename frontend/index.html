@@ -184,8 +184,9 @@
         <div class="meter-bar"><div class="meter-fill" id="local-bar" style="background:linear-gradient(90deg,var(--green),var(--accent));width:0%"></div></div>
       </div>
       <div class="storage-meter">
-        <div class="meter-label"><span>gdrive · restic</span><span id="cloud-usage">— GB</span></div>
+        <div class="meter-label"><span>gdrive · family</span><span id="cloud-usage">— GB</span></div>
         <div class="meter-bar"><div class="meter-fill" id="cloud-bar" style="background:linear-gradient(90deg,var(--accent),var(--purple));width:0%"></div></div>
+        <div class="meter-label" style="margin-top:4px;font-size:11px;color:var(--muted)"><span>backups · restic</span><span id="cloud-backup-size">—</span></div>
       </div>
     </div>
   </div>
@@ -347,6 +348,9 @@ async function loadStorage() {
       document.getElementById('cloud-bar').style.width =
         Math.min(Math.round(s.cloud_used / 1000 * 100), 100) + '%';
     }
+    if (s.cloud_used > 0) {
+      document.getElementById('cloud-backup-size').textContent = `${s.cloud_used} GB`;
+    }
   } catch (_) {}
 }
 
@@ -370,19 +374,6 @@ function renderData(data) {
   document.getElementById('page-subtitle').textContent =
     `${vms.length} VMs · ${lxcs.length} LXCs`;
 
-  // Storage meters
-  if (storage) {
-    const localPct = storage.local_total > 0
-      ? Math.round(storage.local_used / storage.local_total * 100) : 0;
-    document.getElementById('local-usage').textContent =
-      `${storage.local_used} / ${storage.local_total} GB`;
-    document.getElementById('cloud-usage').textContent =
-      `${storage.cloud_used} GB used`;
-    document.getElementById('local-bar').style.width = localPct + '%';
-    // Cloud bar: assume 1TB total as reference
-    document.getElementById('cloud-bar').style.width =
-      Math.min(Math.round(storage.cloud_used / 1000 * 100), 100) + '%';
-  }
 
   let html = '';
 
@@ -451,7 +442,7 @@ function renderCard(item) {
     ? `<div class="no-backups">No backups found</div>`
     : item.snapshots.map(s => `
         <div class="snapshot-row">
-          <div><div class="snap-date">${s.date}</div><div class="snap-age">${s.age}</div></div>
+          <div><div class="snap-date">${s.date}</div><div class="snap-age">${s.age}${s.restic_short_id ? ` · <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted)">${s.restic_short_id}</span>` : ''}</div></div>
           <div class="snap-size">${s.size}</div>
           <div class="snap-type">${s.incremental ? 'incremental' : 'full'}</div>
           ${locBadge(s.local, s.cloud)}

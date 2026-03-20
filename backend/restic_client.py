@@ -24,7 +24,7 @@ class ResticClient:
 
     def _run(self, *args: str) -> list | dict:
         result = subprocess.run(
-            ["restic", *args, "--json"],
+            ["restic", *args, "--json", "--no-lock"],
             env=self._env,
             capture_output=True,
             text=True,
@@ -34,38 +34,70 @@ class ResticClient:
             raise RuntimeError(f"restic error: {result.stderr.strip()}")
         return json.loads(result.stdout)
 
-    def get_coverage(self) -> dict[int, int]:
-        """Returns {pve_id: latest_restic_backup_timestamp}.
+    def get_snapshots_by_vm(self) -> tuple[dict[int, list[dict]], int]:
+        """Returns ({pve_id: [{ts, id, short_id}]}, untagged_latest_ts).
 
-        Since restic backs up the whole PBS datastore (not individual VMs),
-        each tagged snapshot covers all VMs present at that time.
-        We return the latest restic run time per VM so app.py can mark
-        any PBS snapshot taken before that time as cloud=True.
+        Tagged snapshots (vm-N/ct-N) map to specific VMs.
+        Untagged snapshots are full-datastore backups — returned as untagged_latest
+        so callers can treat them as covering all known VMs.
         """
         raw = self._run("snapshots")
-        coverage: dict[int, int] = {}
+        by_vm: dict[int, list[dict]] = {}
+        untagged_latest = 0
+        untagged_id = None
+
         for snap in raw:
             tags = snap.get("tags") or []
             dt = datetime.fromisoformat(snap["time"].replace("Z", "+00:00"))
             ts = int(dt.timestamp())
-            for tag in tags:
-                pve_id = None
-                if tag.startswith("vm-") and tag[3:].isdigit():
+            snap_id = snap.get("id", "")
+            short_id = snap.get("short_id", snap_id[:8] if snap_id else "")
+
+            vm_tags = [t for t in tags if
+                       (t.startswith("vm-") and t[3:].isdigit()) or
+                       (t.startswith("ct-") and t[3:].isdigit())]
+
+            if vm_tags:
+                for tag in vm_tags:
                     pve_id = int(tag[3:])
-                elif tag.startswith("ct-") and tag[3:].isdigit():
-                    pve_id = int(tag[3:])
-                if pve_id is not None:
-                    coverage[pve_id] = max(coverage.get(pve_id, 0), ts)
-        return coverage
+                    by_vm.setdefault(pve_id, []).append(
+                        {"ts": ts, "id": snap_id, "short_id": short_id}
+                    )
+            else:
+                if ts > untagged_latest:
+                    untagged_latest = ts
+                    untagged_id = short_id
+
+        return by_vm, untagged_latest, untagged_id
+
+    def get_coverage(self) -> tuple[dict[int, int], int]:
+        """Returns ({pve_id: latest_restic_ts}, untagged_latest) for cloud marking."""
+        by_vm, untagged_latest, _ = self.get_snapshots_by_vm()
+        coverage = {vid: max(e["ts"] for e in entries) for vid, entries in by_vm.items()}
+        return coverage, untagged_latest
 
     def get_stats(self) -> dict:
         """Returns restic repo size + Google Drive quota via rclone about."""
         result = {"cloud_used": 0, "cloud_total": None}
+
+        # Actual backup folder size via rclone size (fast — Drive API, no restic dedup calc)
         try:
-            data = self._run("stats")
-            result["cloud_used"] = round(data.get("total_size", 0) / 1024**3, 1)
+            # repo = "rclone:gdrive:bu/proxmox_home" → path = "gdrive:bu/proxmox_home"
+            repo_path = ":".join(self._repo.split(":")[1:])
+            r = subprocess.run(
+                ["rclone", "size", repo_path, "--json"],
+                env=self._env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if r.returncode == 0:
+                size_data = json.loads(r.stdout)
+                result["cloud_used"] = round(size_data.get("bytes", 0) / 1024**3, 1)
         except Exception:
             pass
+
+        # Family quota via rclone about
         try:
             r = subprocess.run(
                 ["rclone", "about", f"{self._gdrive_remote}:", "--json"],
@@ -78,9 +110,10 @@ class ResticClient:
                 about = json.loads(r.stdout)
                 total = about.get("total", 0)
                 used = about.get("used", 0)
+                other = about.get("other", 0)  # other family members' usage
                 if total:
                     result["cloud_total"] = round(total / 1024**3, 1)
-                    result["cloud_quota_used"] = round(used / 1024**3, 1)
+                    result["cloud_quota_used"] = round((used + other) / 1024**3, 1)
         except Exception:
             pass
         return result
