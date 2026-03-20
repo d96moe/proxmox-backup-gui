@@ -34,40 +34,29 @@ class ResticClient:
             raise RuntimeError(f"restic error: {result.stderr.strip()}")
         return json.loads(result.stdout)
 
-    def get_snapshots(self) -> list[dict]:
-        """Returns snapshots grouped by hostname+path tag."""
+    def get_coverage(self) -> dict[int, int]:
+        """Returns {pve_id: latest_restic_backup_timestamp}.
+
+        Since restic backs up the whole PBS datastore (not individual VMs),
+        each tagged snapshot covers all VMs present at that time.
+        We return the latest restic run time per VM so app.py can mark
+        any PBS snapshot taken before that time as cloud=True.
+        """
         raw = self._run("snapshots")
-        result = []
+        coverage: dict[int, int] = {}
         for snap in raw:
-            # Extract PVE VM/CT id from tags or hostname
             tags = snap.get("tags") or []
-            pve_id = None
-            backup_type = None
-            for tag in tags:
-                if tag.startswith("vm-"):
-                    pve_id = int(tag[3:])
-                    backup_type = "vm"
-                elif tag.startswith("ct-"):
-                    pve_id = int(tag[3:])
-                    backup_type = "ct"
-
-            if pve_id is None:
-                continue
-
             dt = datetime.fromisoformat(snap["time"].replace("Z", "+00:00"))
-            size_bytes = snap.get("summary", {}).get("data_added", 0)
-            result.append({
-                "snapshot_id": snap["id"][:8],
-                "pve_id": pve_id,
-                "backup_type": backup_type,
-                "date": dt.strftime("%Y-%m-%d %H:%M"),
-                "backup_time": int(dt.timestamp()),
-                "size_bytes": size_bytes,
-                "size": _fmt_size(size_bytes),
-                "cloud": True,
-                "local": False,
-            })
-        return result
+            ts = int(dt.timestamp())
+            for tag in tags:
+                pve_id = None
+                if tag.startswith("vm-") and tag[3:].isdigit():
+                    pve_id = int(tag[3:])
+                elif tag.startswith("ct-") and tag[3:].isdigit():
+                    pve_id = int(tag[3:])
+                if pve_id is not None:
+                    coverage[pve_id] = max(coverage.get(pve_id, 0), ts)
+        return coverage
 
     def get_stats(self) -> dict:
         """Returns restic repo size + Google Drive quota via rclone about."""

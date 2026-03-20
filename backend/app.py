@@ -80,34 +80,25 @@ def get_items(host_id: str):
         pbs_snaps = pbs.get_snapshots()
         storage = pbs.get_storage_info()
 
-        # Restic snapshots (fast — just lists metadata, no stats)
-        restic_snaps = []
+        # Restic coverage: {pve_id: latest_restic_backup_ts}
+        # A PBS snapshot is cloud-covered if restic ran after it was created.
+        restic_coverage: dict[int, int] = {}
         if host.restic_repo:
             try:
                 restic = ResticClient(host)
-                restic_snaps = restic.get_snapshots()
+                restic_coverage = restic.get_coverage()
             except Exception as e:
-                app.logger.warning("restic snapshots unavailable: %s", e)
+                app.logger.warning("restic unavailable: %s", e)
 
-        # Build per-vmid snapshot lists from PBS
+        # Build per-vmid snapshot lists from PBS, mark cloud where covered
         snap_map: dict[int, list] = {}
         for group in pbs_snaps:
             vid = group["pve_id"]
+            latest_restic = restic_coverage.get(vid, 0)
+            for snap in group["snapshots"]:
+                if latest_restic > snap["backup_time"]:
+                    snap["cloud"] = True
             snap_map.setdefault(vid, []).extend(group["snapshots"])
-
-        # Merge restic snapshots — match by date, otherwise mark whole-datastore
-        # snapshots as covering all tagged VMs
-        for rs in restic_snaps:
-            vid = rs["pve_id"]
-            existing = snap_map.setdefault(vid, [])
-            matched = False
-            for s in existing:
-                if s["date"] == rs["date"]:
-                    s["cloud"] = True
-                    matched = True
-                    break
-            if not matched:
-                existing.append(rs)
 
         # Sort snapshots newest-first per vm
         for snaps in snap_map.values():
@@ -163,7 +154,9 @@ def get_storage(host_id: str):
         if host.restic_repo:
             try:
                 restic = ResticClient(host)
-                result.update(restic.get_stats())
+                stats = restic.get_stats()
+                app.logger.info("restic stats: %s", stats)
+                result.update(stats)
             except Exception as e:
                 app.logger.warning("restic stats unavailable: %s", e)
         return result
@@ -185,32 +178,25 @@ def get_ha_sensors(host_id: str):
         pbs_snaps = pbs.get_snapshots()
         storage = pbs.get_storage_info()
 
-        restic_snaps = []
+        restic_coverage: dict[int, int] = {}
         cloud_stats = {"cloud_used": 0, "cloud_total": None, "cloud_quota_used": None}
         if host.restic_repo:
             try:
                 restic = ResticClient(host)
-                restic_snaps = restic.get_snapshots()
+                restic_coverage = restic.get_coverage()
                 cloud_stats.update(restic.get_stats())
             except Exception as e:
                 app.logger.warning("restic unavailable for HA sensors: %s", e)
 
-        # Build snap_map same as items endpoint
+        # Build snap_map, mark cloud where restic ran after PBS snapshot
         snap_map: dict[int, list] = {}
         for group in pbs_snaps:
             vid = group["pve_id"]
+            latest_restic = restic_coverage.get(vid, 0)
+            for snap in group["snapshots"]:
+                if latest_restic > snap["backup_time"]:
+                    snap["cloud"] = True
             snap_map.setdefault(vid, []).extend(group["snapshots"])
-        for rs in restic_snaps:
-            vid = rs["pve_id"]
-            existing = snap_map.setdefault(vid, [])
-            matched = False
-            for s in existing:
-                if s["date"] == rs["date"]:
-                    s["cloud"] = True
-                    matched = True
-                    break
-            if not matched:
-                existing.append(rs)
 
         now_ts = time.time()
         out = {}
