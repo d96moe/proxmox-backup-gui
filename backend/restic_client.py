@@ -12,6 +12,9 @@ from config import HostConfig
 class ResticClient:
     def __init__(self, host: HostConfig) -> None:
         self._repo = host.restic_repo
+        # Extract rclone remote name (e.g. "rclone:gdrive:bu/x" → "gdrive")
+        parts = host.restic_repo.split(":")
+        self._gdrive_remote = parts[1] if len(parts) >= 2 else "gdrive"
         self._env = {
             **os.environ,
             "RESTIC_REPOSITORY": host.restic_repo,
@@ -67,13 +70,31 @@ class ResticClient:
         return result
 
     def get_stats(self) -> dict:
-        """Returns total size used in the restic repo (GB)."""
+        """Returns restic repo size + Google Drive quota via rclone about."""
+        result = {"cloud_used": 0, "cloud_total": None}
         try:
             data = self._run("stats")
-            total_bytes = data.get("total_size", 0)
-            return {"cloud_used": round(total_bytes / 1024**3, 1)}
+            result["cloud_used"] = round(data.get("total_size", 0) / 1024**3, 1)
         except Exception:
-            return {"cloud_used": 0}
+            pass
+        try:
+            r = subprocess.run(
+                ["rclone", "about", f"{self._gdrive_remote}:", "--json"],
+                env=self._env,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if r.returncode == 0:
+                about = json.loads(r.stdout)
+                total = about.get("total", 0)
+                used = about.get("used", 0)
+                if total:
+                    result["cloud_total"] = round(total / 1024**3, 1)
+                    result["cloud_quota_used"] = round(used / 1024**3, 1)
+        except Exception:
+            pass
+        return result
 
     def get_version(self) -> str:
         try:

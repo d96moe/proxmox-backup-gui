@@ -336,10 +336,17 @@ async function loadStorage() {
     const s = await res.json();
     const localPct = s.local_total > 0 ? Math.round(s.local_used / s.local_total * 100) : 0;
     document.getElementById('local-usage').textContent = `${s.local_used} / ${s.local_total} GB`;
-    document.getElementById('cloud-usage').textContent = `${s.cloud_used} GB used`;
     document.getElementById('local-bar').style.width = localPct + '%';
-    document.getElementById('cloud-bar').style.width =
-      Math.min(Math.round(s.cloud_used / 1000 * 100), 100) + '%';
+    if (s.cloud_total) {
+      const cloudPct = Math.min(Math.round(s.cloud_quota_used / s.cloud_total * 100), 100);
+      document.getElementById('cloud-usage').textContent =
+        `${s.cloud_quota_used} / ${s.cloud_total} GB`;
+      document.getElementById('cloud-bar').style.width = cloudPct + '%';
+    } else {
+      document.getElementById('cloud-usage').textContent = `${s.cloud_used} GB used`;
+      document.getElementById('cloud-bar').style.width =
+        Math.min(Math.round(s.cloud_used / 1000 * 100), 100) + '%';
+    }
   } catch (_) {}
 }
 
