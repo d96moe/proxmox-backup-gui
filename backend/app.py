@@ -155,7 +155,7 @@ def get_storage(host_id: str):
             try:
                 restic = ResticClient(host)
                 stats = restic.get_stats()
-                app.logger.info("restic stats: %s", stats)
+                app.logger.warning("restic stats: %s", stats)
                 result.update(stats)
             except Exception as e:
                 app.logger.warning("restic stats unavailable: %s", e)
