@@ -80,16 +80,14 @@ def get_items(host_id: str):
         pbs_snaps = pbs.get_snapshots()
         storage = pbs.get_storage_info()
 
-        # Restic is optional — skip if not configured or unavailable
+        # Restic snapshots (fast — just lists metadata, no stats)
         restic_snaps = []
-        cloud_stats = {"cloud_used": 0}
         if host.restic_repo:
             try:
                 restic = ResticClient(host)
                 restic_snaps = restic.get_snapshots()
-                cloud_stats = restic.get_stats()
             except Exception as e:
-                app.logger.warning("restic unavailable: %s", e)
+                app.logger.warning("restic snapshots unavailable: %s", e)
 
         # Build per-vmid snapshot lists from PBS
         snap_map: dict[int, list] = {}
@@ -143,12 +141,34 @@ def get_items(host_id: str):
                 vms.append(item)
 
         return {
-            "storage": {**storage, **cloud_stats},
+            "storage": {**storage, "cloud_used": 0},
             "vms": vms,
             "lxcs": lxcs,
         }
 
     return jsonify(_cached(f"items:{host_id}", fetch))
+
+
+@app.get("/api/host/<host_id>/storage")
+def get_storage(host_id: str):
+    """PBS + restic storage sizes. Restic stats can be slow — called async by frontend."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+
+    def fetch():
+        pbs = PBSClient(host)
+        result = pbs.get_storage_info()
+        result["cloud_used"] = 0
+        if host.restic_repo:
+            try:
+                restic = ResticClient(host)
+                result.update(restic.get_stats())
+            except Exception as e:
+                app.logger.warning("restic stats unavailable: %s", e)
+        return result
+
+    return jsonify(_cached(f"storage:{host_id}", fetch))
 
 
 @app.get("/api/host/<host_id>/info")

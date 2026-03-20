@@ -299,6 +299,7 @@ function selectHost(id) {
   document.getElementById('hostname-label').textContent = host?.label ?? id;
   loadData();
   loadInfo();
+  loadStorage();
 }
 
 // ─────────────────────────────────────────────
@@ -325,6 +326,21 @@ async function loadData() {
     btn.disabled = false;
     btn.textContent = '⟳ Refresh';
   }
+}
+
+async function loadStorage() {
+  if (!currentHost) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/host/${currentHost}/storage`);
+    if (!res.ok) return;
+    const s = await res.json();
+    const localPct = s.local_total > 0 ? Math.round(s.local_used / s.local_total * 100) : 0;
+    document.getElementById('local-usage').textContent = `${s.local_used} / ${s.local_total} GB`;
+    document.getElementById('cloud-usage').textContent = `${s.cloud_used} GB used`;
+    document.getElementById('local-bar').style.width = localPct + '%';
+    document.getElementById('cloud-bar').style.width =
+      Math.min(Math.round(s.cloud_used / 1000 * 100), 100) + '%';
+  } catch (_) {}
 }
 
 async function loadInfo() {
