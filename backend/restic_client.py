@@ -23,17 +23,28 @@ class ResticClient:
         }
 
     def _is_locked(self) -> bool:
-        """Return True if a restic backup is in progress (lock files present in repo)."""
+        """Return True only if a recent lock exists (< 8h old = active backup).
+        Stale locks from crashed backups are ignored so the GUI is not permanently blocked.
+        """
         try:
+            from datetime import timedelta
             repo_path = ":".join(self._repo.split(":")[1:])
             r = subprocess.run(
-                ["rclone", "ls", f"{repo_path}/locks"],
+                ["rclone", "lsjson", f"{repo_path}/locks"],
                 env=self._env,
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
-            return bool(r.stdout.strip())
+            if r.returncode != 0 or not r.stdout.strip():
+                return False
+            locks = json.loads(r.stdout)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=8)
+            return any(
+                datetime.fromisoformat(lock["ModTime"].replace("Z", "+00:00")) > cutoff
+                for lock in locks
+                if lock.get("ModTime")
+            )
         except Exception:
             return False
 
