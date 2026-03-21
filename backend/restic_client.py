@@ -22,7 +22,24 @@ class ResticClient:
             **host.restic_env,
         }
 
+    def _is_locked(self) -> bool:
+        """Return True if a restic backup is in progress (lock files present in repo)."""
+        try:
+            repo_path = ":".join(self._repo.split(":")[1:])
+            r = subprocess.run(
+                ["rclone", "ls", f"{repo_path}/locks"],
+                env=self._env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return bool(r.stdout.strip())
+        except Exception:
+            return False
+
     def _run(self, *args: str) -> list | dict:
+        if self._is_locked():
+            raise RuntimeError("restic repo is locked — backup in progress, skipping")
         result = subprocess.run(
             ["restic", *args, "--json", "--no-lock"],
             env=self._env,
