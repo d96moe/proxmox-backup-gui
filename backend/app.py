@@ -82,14 +82,15 @@ def get_items(host_id: str):
 
         # Restic: per-VM snapshot timestamps + untagged (full-datastore) latest
         restic_by_vm: dict[int, list[dict]] = {}
-        untagged_latest: int = 0
-        untagged_id: str | None = None
+        untagged_snaps: list[dict] = []
         if host.restic_repo:
             try:
                 restic = ResticClient(host)
-                restic_by_vm, untagged_latest, untagged_id = restic.get_snapshots_by_vm()
+                restic_by_vm, untagged_snaps = restic.get_snapshots_by_vm()
             except Exception as e:
                 app.logger.warning("restic unavailable: %s", e)
+
+        untagged_latest = max((e["ts"] for e in untagged_snaps), default=0)
 
         # Build per-vmid snapshot lists from PBS, mark cloud where covered
         snap_map: dict[int, list] = {}
@@ -103,29 +104,31 @@ def get_items(host_id: str):
                     snap["cloud"] = True
             snap_map.setdefault(vid, []).extend(group["snapshots"])
 
-        # Add cloud-only restic snapshots (no matching PBS snapshot locally)
+        # Add cloud-only restic snapshots (contain PBS snapshots pruned locally)
         pbs_times: dict[int, set[int]] = {
             vid: {s["backup_time"] for s in snaps}
             for vid, snaps in snap_map.items()
         }
         all_restic_vmids = set(restic_by_vm.keys()) | (
-            set(pve_meta.keys()) if untagged_latest else set()
+            set(pve_meta.keys()) if untagged_snaps else set()
         )
         for vid in all_restic_vmids:
-            entries = restic_by_vm.get(vid, [
-                {"ts": untagged_latest, "id": untagged_id, "short_id": untagged_id}
-            ] if untagged_latest else [])
+            # Tagged entries per VM + all untagged (full-datastore) snapshots
+            entries = restic_by_vm.get(vid, []) + untagged_snaps
             known = pbs_times.get(vid, set())
+            oldest_local = min(known) if known else None
             for e in entries:
                 ts = e["ts"]
-                if not any(abs(ts - p) < 7200 for p in known):
+                # Only add cloud-only entry if restic snapshot is OLDER than oldest local PBS
+                # snapshot — meaning it contains PBS snapshots that have since been pruned.
+                if oldest_local is None or ts < oldest_local:
                     dt = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                     snap_map.setdefault(vid, []).append({
                         "backup_time": ts,
                         "date": dt,
                         "local": False,
                         "cloud": True,
-                        "incremental": False,
+                        "incremental": True,
                         "size": "—",
                         "restic_id": e.get("id"),
                         "restic_short_id": e.get("short_id"),

@@ -62,17 +62,16 @@ class ResticClient:
             raise RuntimeError(f"restic error: {result.stderr.strip()}")
         return json.loads(result.stdout)
 
-    def get_snapshots_by_vm(self) -> tuple[dict[int, list[dict]], int]:
-        """Returns ({pve_id: [{ts, id, short_id}]}, untagged_latest_ts).
+    def get_snapshots_by_vm(self) -> tuple[dict[int, list[dict]], list[dict]]:
+        """Returns ({pve_id: [{ts, id, short_id}]}, untagged_snaps).
 
         Tagged snapshots (vm-N/ct-N) map to specific VMs.
-        Untagged snapshots are full-datastore backups — returned as untagged_latest
-        so callers can treat them as covering all known VMs.
+        Untagged snapshots are full-datastore backups covering all VMs — all returned
+        so old pruned-local snapshots can appear as cloud-only entries.
         """
         raw = self._run("snapshots")
         by_vm: dict[int, list[dict]] = {}
-        untagged_latest = 0
-        untagged_id = None
+        untagged: list[dict] = []
 
         for snap in raw:
             tags = snap.get("tags") or []
@@ -92,11 +91,16 @@ class ResticClient:
                         {"ts": ts, "id": snap_id, "short_id": short_id}
                     )
             else:
-                if ts > untagged_latest:
-                    untagged_latest = ts
-                    untagged_id = short_id
+                untagged.append({"ts": ts, "id": snap_id, "short_id": short_id})
 
-        return by_vm, untagged_latest, untagged_id
+        return by_vm, untagged
+
+    def get_coverage(self) -> tuple[dict[int, int], int]:
+        """Returns ({pve_id: latest_restic_ts}, untagged_latest) for cloud marking."""
+        by_vm, untagged = self.get_snapshots_by_vm()
+        coverage = {vid: max(e["ts"] for e in entries) for vid, entries in by_vm.items()}
+        untagged_latest = max((e["ts"] for e in untagged), default=0)
+        return coverage, untagged_latest
 
     def get_coverage(self) -> tuple[dict[int, int], int]:
         """Returns ({pve_id: latest_restic_ts}, untagged_latest) for cloud marking."""
