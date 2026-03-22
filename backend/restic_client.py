@@ -102,12 +102,6 @@ class ResticClient:
         untagged_latest = max((e["ts"] for e in untagged), default=0)
         return coverage, untagged_latest
 
-    def get_coverage(self) -> tuple[dict[int, int], int]:
-        """Returns ({pve_id: latest_restic_ts}, untagged_latest) for cloud marking."""
-        by_vm, untagged_latest, _ = self.get_snapshots_by_vm()
-        coverage = {vid: max(e["ts"] for e in entries) for vid, entries in by_vm.items()}
-        return coverage, untagged_latest
-
     def get_stats(self) -> dict:
         """Returns restic repo size + Google Drive quota via rclone about."""
         result = {"cloud_used": 0, "cloud_total": None}

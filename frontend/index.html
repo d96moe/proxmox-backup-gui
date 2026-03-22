@@ -259,6 +259,7 @@ const API_BASE = window.location.origin;  // same host when served by Flask
 // ─────────────────────────────────────────────
 let currentHost = null;
 let hosts = [];
+let _abortController = null;
 
 // ─────────────────────────────────────────────
 // Init
@@ -291,6 +292,10 @@ function renderHostNav() {
 }
 
 function selectHost(id) {
+  // Abort any in-flight requests from the previous host
+  if (_abortController) _abortController.abort();
+  _abortController = new AbortController();
+
   currentHost = id;
   hosts.forEach(h => {
     const el = document.getElementById(`nav-${h.id}`);
@@ -298,42 +303,57 @@ function selectHost(id) {
   });
   const host = hosts.find(h => h.id === id);
   document.getElementById('hostname-label').textContent = host?.label ?? id;
-  loadData();
-  loadInfo();
-  loadStorage();
+  // Clear stale content immediately
+  document.getElementById('content').innerHTML = '<div class="state-msg">Loading…</div>';
+  document.getElementById('page-subtitle').textContent = '—';
+  document.getElementById('local-usage').textContent = '— GB';
+  document.getElementById('cloud-usage').textContent = '— GB';
+  document.getElementById('local-bar').style.width = '0%';
+  document.getElementById('cloud-bar').style.width = '0%';
+  loadData(_abortController.signal);
+  loadInfo(_abortController.signal);
+  loadStorage(_abortController.signal);
 }
 
 // ─────────────────────────────────────────────
 // Data loading
 // ─────────────────────────────────────────────
-async function loadData() {
+async function loadData(signal) {
   if (!currentHost) return;
+  const host = currentHost;
   const btn = document.getElementById('refresh-btn');
   btn.disabled = true;
   btn.textContent = '⟳ Loading…';
   setStatus('loading', 'syncing…');
 
   try {
-    const res = await fetch(`${API_BASE}/api/host/${currentHost}/items`);
+    const res = await fetch(`${API_BASE}/api/host/${host}/items`, { signal });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
+    if (currentHost !== host) return;  // host switched while fetching
     renderData(data);
     setStatus('ok', `last sync just now`);
   } catch (err) {
+    if (err.name === 'AbortError') return;
+    if (currentHost !== host) return;
     document.getElementById('content').innerHTML =
       `<div class="state-msg error">Error: ${err.message}</div>`;
     setStatus('error', 'sync failed');
   } finally {
-    btn.disabled = false;
-    btn.textContent = '⟳ Refresh';
+    if (currentHost === host) {
+      btn.disabled = false;
+      btn.textContent = '⟳ Refresh';
+    }
   }
 }
 
-async function loadStorage() {
+async function loadStorage(signal) {
   if (!currentHost) return;
+  const host = currentHost;
   try {
-    const res = await fetch(`${API_BASE}/api/host/${currentHost}/storage`);
+    const res = await fetch(`${API_BASE}/api/host/${host}/storage`, { signal });
     if (!res.ok) return;
+    if (currentHost !== host) return;
     const s = await res.json();
     const localPct = s.local_total > 0 ? Math.round(s.local_used / s.local_total * 100) : 0;
     document.getElementById('local-usage').textContent = `${s.local_used} / ${s.local_total} GB`;
@@ -351,14 +371,16 @@ async function loadStorage() {
     if (s.cloud_used > 0) {
       document.getElementById('cloud-backup-size').textContent = `${s.cloud_used} GB`;
     }
-  } catch (_) {}
+  } catch (err) { if (err.name !== 'AbortError') {} }
 }
 
-async function loadInfo() {
+async function loadInfo(signal) {
   if (!currentHost) return;
+  const host = currentHost;
   try {
-    const res = await fetch(`${API_BASE}/api/host/${currentHost}/info`);
+    const res = await fetch(`${API_BASE}/api/host/${host}/info`, { signal });
     if (!res.ok) return;
+    if (currentHost !== host) return;
     const info = await res.json();
     document.getElementById('footer-pbs').textContent = `PBS ${info.pbs ?? '—'}`;
     document.getElementById('footer-restic').textContent = `restic ${info.restic ?? '—'}`;
