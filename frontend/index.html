@@ -243,7 +243,7 @@
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-danger">Restore now</button>
+      <button class="btn btn-danger" onclick="alert('Restore is not yet implemented.\n\nComing soon: one-click restore from both local PBS and cloud (restic) snapshots.')">Restore now</button>
     </div>
   </div>
 </div>
@@ -447,7 +447,12 @@ function renderCard(item) {
           <div class="snap-type">${s.incremental ? 'incremental' : 'full'}</div>
           ${locBadge(s.local, s.cloud)}
           <button class="restore-btn"
-            onclick="openModal(${JSON.stringify(item.name)},${JSON.stringify(s.date)},${JSON.stringify(s.size)},${s.local},${s.cloud})">
+            data-vm="${item.name.replace(/"/g,'&quot;')}"
+            data-date="${(s.date||'').replace(/"/g,'&quot;')}"
+            data-size="${(s.size||'—').replace(/"/g,'&quot;')}"
+            data-local="${s.local}"
+            data-cloud="${s.cloud}"
+            onclick="const d=this.dataset;openModal(d.vm,d.date,d.size,d.local==='true',d.cloud==='true')">
             Restore →
           </button>
         </div>`).join('');
