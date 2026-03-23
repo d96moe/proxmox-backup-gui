@@ -25,7 +25,7 @@ pipeline {
                     python3 -m venv .venv
                     .venv/bin/pip install -q -r requirements.txt
                     .venv/bin/pip install -q pytest playwright
-                    .venv/bin/playwright install chromium --with-deps
+                    .venv/bin/playwright install chromium
                 '''
             }
         }
