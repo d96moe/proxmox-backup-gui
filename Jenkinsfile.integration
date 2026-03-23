@@ -1,0 +1,149 @@
+// =============================================================================
+// Proxmox Backup GUI — Integration pipeline
+// Trigger : Nightly (02:00) + manual "Build Now"
+// Runtime : ~8-12 min
+//
+// Spins up a fresh clone of template 9000 (PVE + backup-gui LXC + minimal PBS),
+// pushes latest code, runs Playwright against the REAL Flask backend,
+// then destroys the VM.
+//
+// Nothing touches prod (LXC 199).
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    triggers {
+        cron('H 2 * * *')   // nightly, randomised minute to avoid thundering herd
+    }
+
+    environment {
+        PVE_HOST      = '192.168.0.200'
+        TEMPLATE_ID   = '9000'
+        SSH_KEY       = '/var/lib/jenkins/.ssh/id_ed25519'
+        SSH_OPTS      = '-o StrictHostKeyChecking=no -o BatchMode=yes'
+    }
+
+    stages {
+        stage('Clone VM') {
+            steps {
+                script {
+                    // Use build number to get a unique VM ID (9100–9199)
+                    env.VM_ID = "91${String.format('%02d', BUILD_NUMBER.toInteger() % 100)}"
+                    env.VM_NAME = "ci-gui-${BUILD_ID}"
+                }
+                sh '''
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} \
+                        "qm clone ${TEMPLATE_ID} ${VM_ID} --name ${VM_NAME} --full 1"
+                    echo "Cloned template ${TEMPLATE_ID} → VM ${VM_ID}"
+                '''
+            }
+        }
+
+        stage('Start VM + wait') {
+            steps {
+                sh '''
+                    # Assign a static IP based on VM_ID to avoid DHCP detection
+                    # Range: 192.168.0.150-199 mapped from build number mod 50
+                    OCTET=$((150 + (BUILD_NUMBER % 50)))
+                    VM_IP="192.168.0.${OCTET}"
+                    echo "${VM_IP}" > vm_ip.txt
+
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} \
+                        "qm set ${VM_ID} --ipconfig0 ip=${VM_IP}/24,gw=192.168.0.1 --nameserver 8.8.8.8"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "qm start ${VM_ID}"
+
+                    echo "VM IP: ${VM_IP} — waiting for SSH (max 120s)..."
+                    for i in $(seq 1 24); do
+                        ssh ${SSH_OPTS} -i ${SSH_KEY} -o ConnectTimeout=5 root@${VM_IP} true 2>/dev/null && { echo "SSH ready"; break; }
+                        sleep 5; echo "  attempt ${i}/24..."
+                    done
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} true || { echo "ERROR: VM not reachable"; exit 1; }
+                '''
+            }
+        }
+
+        stage('Deploy latest code') {
+            steps {
+                sh '''
+                    VM_IP=$(cat vm_ip.txt)
+
+                    # Push latest backend + frontend to PVE host, then into LXC
+                    scp ${SSH_OPTS} -i ${SSH_KEY} \
+                        backend/app.py backend/config.py \
+                        backend/pbs_client.py backend/pve_client.py \
+                        backend/restic_client.py requirements.txt \
+                        root@${VM_IP}:/tmp/gui-update/
+
+                    scp ${SSH_OPTS} -i ${SSH_KEY} \
+                        frontend/index.html \
+                        root@${VM_IP}:/tmp/gui-update/
+
+                    # Push into LXC 300 and restart service
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'EOF'
+                        for f in app.py config.py pbs_client.py pve_client.py restic_client.py; do
+                            pct push 300 /tmp/gui-update/${f} /opt/proxmox-backup-gui/backend/${f}
+                        done
+                        pct push 300 /tmp/gui-update/requirements.txt \
+                            /opt/proxmox-backup-gui/requirements.txt
+                        pct push 300 /tmp/gui-update/index.html \
+                            /opt/proxmox-backup-gui/frontend/index.html
+                        pct exec 300 -- systemctl restart proxmox-backup-gui
+                        sleep 3
+                        pct exec 300 -- systemctl is-active proxmox-backup-gui
+EOF
+                '''
+            }
+        }
+
+        stage('Integration tests') {
+            steps {
+                sh '''
+                    VM_IP=$(cat vm_ip.txt)
+
+                    # Run Playwright tests on the VM (it can reach LXC 10.10.0.100:5000)
+                    # Pass BACKEND_URL so tests hit real backend instead of mock
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'EOF'
+                        source /etc/profile.d/ci-venv.sh
+                        mkdir -p /tmp/test-results
+                        cd /opt/ci/proxmox-backup-gui
+                        BACKEND_URL=http://10.10.0.100:5000 \
+                        pytest tests/test_frontend.py \
+                            -v --tb=short \
+                            --junit-xml=/tmp/test-results/integration.xml \
+                            2>&1 | tee /tmp/test-results/integration.log
+EOF
+                    # Pull results back to Jenkins
+                    mkdir -p test-results
+                    scp ${SSH_OPTS} -i ${SSH_KEY} \
+                        root@${VM_IP}:/tmp/test-results/integration.xml \
+                        test-results/integration.xml
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            junit allowEmptyResults: true, testResults: 'test-results/integration.xml'
+
+            // Destroy VM regardless of outcome
+            sh '''
+                echo "Destroying VM ${VM_ID}..."
+                ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} \
+                    "qm stop ${VM_ID} 2>/dev/null; qm destroy ${VM_ID} --purge 1" \
+                    || echo "WARNING: VM cleanup failed — destroy manually: qm destroy ${VM_ID} --purge 1"
+                rm -f vm_ip.txt
+            '''
+            cleanWs()
+        }
+        success { echo "Integration tests passed" }
+        failure { echo "Integration tests FAILED — check test-results/integration.xml" }
+    }
+}
