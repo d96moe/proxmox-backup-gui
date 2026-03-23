@@ -49,43 +49,16 @@ pipeline {
         stage('Start VM + wait') {
             steps {
                 sh '''
-                    # Find a free IP in range 192.168.0.150-199
-                    # Use nmap ARP scan (layer 2, works even if ICMP is blocked)
-                    VM_IP=""
-                    for OCTET in $(seq $((150 + (BUILD_NUMBER % 50))) 199) $(seq 150 $((149 + (BUILD_NUMBER % 50)))); do
-                        CANDIDATE="192.168.0.${OCTET}"
-                        if ! nmap -sn -PR --max-retries 1 -T4 "${CANDIDATE}" 2>/dev/null | grep -q "Host is up"; then
-                            VM_IP="${CANDIDATE}"
-                            echo "Selected free IP: ${VM_IP}"
-                            break
-                        else
-                            echo "IP ${CANDIDATE} is in use — skipping"
-                        fi
-                    done
-                    [ -n "${VM_IP}" ] || { echo "ERROR: no free IP in range 192.168.0.150-199"; exit 1; }
+                    # The template bakes in a fixed CI IP (192.168.0.250) via PVE's
+                    # /etc/network/interfaces. cloud-init IP assignment via ipconfig0
+                    # does not work reliably after PVE is installed (PVE owns the
+                    # network config). disableConcurrentBuilds() ensures only one CI
+                    # VM is running at a time, so the fixed IP is never in conflict.
+                    VM_IP="192.168.0.250"
                     echo "${VM_IP}" > vm_ip.txt
 
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} \
-                        "qm set ${VM_ID} --ipconfig0 ip=${VM_IP}/24,gw=192.168.0.1 --nameserver 8.8.8.8"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "qm start ${VM_ID}"
 
-                    # Wait for QEMU guest agent to report a non-loopback IP (max 120s)
-                    echo "Waiting for guest agent to report VM IP..."
-                    GET_IP_PY='import json,sys; d=json.load(sys.stdin); ips=[a["ip-address"] for i in d.get("result",[]) for a in i.get("ip-addresses",[]) if a.get("ip-address-type")=="ipv4" and not a["ip-address"].startswith("127")]; print(ips[0] if ips else "")'
-                    for i in $(seq 1 24); do
-                        AGENT_IP=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} \
-                            "qm agent ${VM_ID} network-get-interfaces 2>/dev/null | python3 -c '${GET_IP_PY}'" \
-                            2>/dev/null || true)
-                        if [ -n "${AGENT_IP}" ]; then
-                            echo "Guest agent reports IP: ${AGENT_IP}"
-                            echo "${AGENT_IP}" > vm_ip.txt
-                            VM_IP="${AGENT_IP}"
-                            break
-                        fi
-                        sleep 5; echo "  waiting for guest agent... ${i}/24"
-                    done
-
-                    VM_IP=$(cat vm_ip.txt)
                     echo "VM IP: ${VM_IP} — waiting for SSH (max 150s)..."
                     for i in $(seq 1 30); do
                         ssh ${SSH_OPTS} -i ${SSH_KEY} -o ConnectTimeout=5 root@${VM_IP} true 2>/dev/null && { echo "SSH ready"; break; }
