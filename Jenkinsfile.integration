@@ -74,7 +74,9 @@ pipeline {
                 sh '''
                     VM_IP=$(cat vm_ip.txt)
 
-                    # Push latest backend + frontend to PVE host, then into LXC
+                    # Push latest backend + frontend to VM
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "mkdir -p /tmp/gui-update/tests"
+
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
                         backend/app.py backend/config.py \
                         backend/pbs_client.py backend/pve_client.py \
@@ -84,6 +86,11 @@ pipeline {
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
                         frontend/index.html \
                         root@${VM_IP}:/tmp/gui-update/
+
+                    # Push latest test file to VM (so we always run the current test suite)
+                    scp ${SSH_OPTS} -i ${SSH_KEY} \
+                        tests/test_frontend.py \
+                        root@${VM_IP}:/tmp/gui-update/tests/
 
                     # Push into LXC 300 and restart service
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'EOF'
@@ -97,6 +104,11 @@ pipeline {
                         pct exec 300 -- systemctl restart proxmox-backup-gui
                         sleep 3
                         pct exec 300 -- systemctl is-active proxmox-backup-gui
+
+                        # Update test file in place
+                        mkdir -p /opt/ci/proxmox-backup-gui/tests
+                        cp /tmp/gui-update/tests/test_frontend.py \
+                            /opt/ci/proxmox-backup-gui/tests/test_frontend.py
 EOF
                 '''
             }
