@@ -85,10 +85,10 @@ pipeline {
                     done
 
                     VM_IP=$(cat vm_ip.txt)
-                    echo "VM IP: ${VM_IP} — waiting for SSH (max 60s)..."
-                    for i in $(seq 1 12); do
+                    echo "VM IP: ${VM_IP} — waiting for SSH (max 150s)..."
+                    for i in $(seq 1 30); do
                         ssh ${SSH_OPTS} -i ${SSH_KEY} -o ConnectTimeout=5 root@${VM_IP} true 2>/dev/null && { echo "SSH ready"; break; }
-                        sleep 5; echo "  attempt ${i}/12..."
+                        sleep 5; echo "  attempt ${i}/30..."
                     done
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} true || { echo "ERROR: VM not reachable at ${VM_IP}"; exit 1; }
                 '''
