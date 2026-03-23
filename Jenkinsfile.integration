@@ -50,10 +50,11 @@ pipeline {
             steps {
                 sh '''
                     # Find a free IP in range 192.168.0.150-199
+                    # Use nmap ARP scan (layer 2, works even if ICMP is blocked)
                     VM_IP=""
                     for OCTET in $(seq $((150 + (BUILD_NUMBER % 50))) 199) $(seq 150 $((149 + (BUILD_NUMBER % 50)))); do
                         CANDIDATE="192.168.0.${OCTET}"
-                        if ! ping -c1 -W1 "${CANDIDATE}" > /dev/null 2>&1; then
+                        if ! nmap -sn -PR --max-retries 1 -T4 "${CANDIDATE}" 2>/dev/null | grep -q "Host is up"; then
                             VM_IP="${CANDIDATE}"
                             echo "Selected free IP: ${VM_IP}"
                             break
