@@ -70,18 +70,13 @@ pipeline {
 
                     # Wait for QEMU guest agent to report a non-loopback IP (max 120s)
                     echo "Waiting for guest agent to report VM IP..."
+                    GET_IP_PY='import json,sys; d=json.load(sys.stdin); ips=[a["ip-address"] for i in d.get("result",[]) for a in i.get("ip-addresses",[]) if a.get("ip-address-type")=="ipv4" and not a["ip-address"].startswith("127")]; print(ips[0] if ips else "")'
                     for i in $(seq 1 24); do
                         AGENT_IP=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} \
-                            "qm agent ${VM_ID} network-get-interfaces 2>/dev/null \
-                            | python3 -c \"
-import json,sys
-data=json.load(sys.stdin)
-ips=[a['ip-address'] for iface in data.get('result',[]) for a in iface.get('ip-addresses',[]) if a.get('ip-address-type')=='ipv4' and not a['ip-address'].startswith('127')]
-print(ips[0] if ips else '')
-\" 2>/dev/null" || true)
+                            "qm agent ${VM_ID} network-get-interfaces 2>/dev/null | python3 -c '${GET_IP_PY}'" \
+                            2>/dev/null || true)
                         if [ -n "${AGENT_IP}" ]; then
                             echo "Guest agent reports IP: ${AGENT_IP}"
-                            # Use agent-reported IP if cloud-init set a different one
                             echo "${AGENT_IP}" > vm_ip.txt
                             VM_IP="${AGENT_IP}"
                             break
