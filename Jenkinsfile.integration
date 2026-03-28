@@ -51,7 +51,10 @@ pipeline {
                 script {
                     // Use build number to get a unique VM ID (9100–9199)
                     env.VM_ID = "91${String.format('%02d', BUILD_NUMBER.toInteger() % 100)}"
-                    env.VM_NAME = "ci-gui-${BUILD_ID}"
+                    // Must clone with the same name as the template's internal hostname
+                    // (gui-ci) so cloud-init preserves it. PVE stores LXC configs under
+                    // nodes/<hostname>/; if the hostname changes, pct can't find LXC 300.
+                    env.VM_NAME = "gui-ci"
                 }
                 sh '''
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} \
@@ -93,14 +96,8 @@ pipeline {
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} << 'FIXHOSTS'
 sed -i '/^127[.]0[.]1[.]1/d' /etc/hosts
 echo "192.168.0.250 $(hostname)" >> /etc/hosts
-echo "=== /etc/hosts after fix ==="
-cat /etc/hosts
-echo "=== starting pve-cluster (reset-failed first) ==="
 systemctl reset-failed pve-cluster
 systemctl start pve-cluster || true
-sleep 5
-echo "=== pve-cluster status ==="
-systemctl is-active pve-cluster || journalctl -u pve-cluster --no-pager -n 15
 FIXHOSTS
 
                     # Now wait for pve-cluster (and pct) to become operational
