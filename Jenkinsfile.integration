@@ -86,8 +86,15 @@ pipeline {
                     done
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} true || { echo "ERROR: VM not reachable at ${VM_IP}"; exit 1; }
 
-                    # Wait for PVE daemons to be ready (pct relies on pvedaemon socket)
-                    echo "Waiting for PVE daemons on ${VM_IP}..."
+                    # cloud-init maps the hostname to 127.0.1.1 (loopback).
+                    # pve-cluster (pmxcfs) refuses to start on a loopback address,
+                    # so we must rewrite the hosts entry before restarting it.
+                    echo "Fixing /etc/hosts for pve-cluster..."
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "sed -i 's|^127\.0\.1\.1 .*|${VM_IP} \$(hostname)|' /etc/hosts && systemctl restart pve-cluster"
+
+                    # Now wait for pve-cluster (and pct) to become operational
+                    echo "Waiting for PVE cluster daemon on ${VM_IP}..."
                     for i in $(seq 1 24); do
                         ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "pct list" >/dev/null 2>&1 && { echo "PVE ready"; break; }
                         sleep 5; echo "  pve attempt ${i}/24..."
@@ -124,16 +131,8 @@ pipeline {
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'EOF'
                         set -e
 
-                        # Ensure PVE daemon (pvestatd) is ready — pct push/exec need it
-                        echo "Waiting for pvestatd..."
-                        for i in $(seq 1 24); do
-                            systemctl is-active pvestatd >/dev/null 2>&1 && break
-                            echo "  pvestatd attempt ${i}/24..."
-                            sleep 5
-                        done
-                        systemctl is-active pvestatd || { echo "ERROR: pvestatd not ready"; exit 1; }
-
-                        # Ensure LXC 300 is running (may not autostart immediately)
+                        # pve-guests may not have auto-started LXC 300 (it depends on
+                        # pve-cluster which was just fixed above). Start it now if needed.
                         pct status 300 | grep -q running || pct start 300
                         echo "LXC 300 status: $(pct status 300)"
 
