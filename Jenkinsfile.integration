@@ -138,9 +138,9 @@ FIXHOSTS
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'EOF'
                         set -e
 
-                        # pve-guests may not have auto-started LXC 300 (it depends on
-                        # pve-cluster which was just fixed above). Start it now if needed.
-                        pct status 300 | grep -q running || pct start 300
+                        # Ensure LXC 300 is running (pct start returns non-zero if
+                        # already running, so || true prevents set -e from exiting).
+                        pct start 300 || true
                         echo "LXC 300 status: $(pct status 300)"
 
                         for f in app.py config.py pbs_client.py pve_client.py restic_client.py jobs.py; do
