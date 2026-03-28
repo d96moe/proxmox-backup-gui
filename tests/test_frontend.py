@@ -99,6 +99,9 @@ class ServerConfig:
     # Per-host overrides (takes precedence over global)
     host_items_delay: dict[str, float] = {}
     host_items_status: dict[str, int] = {}
+    # Job state for /api/job/<id>
+    job_status: str = "done"
+    job_logs: list = None   # None → default
 
 
 cfg = ServerConfig()
@@ -148,6 +151,11 @@ class MockHandler(BaseHTTPRequestHandler):
             if path == f"/api/host/{host_id}/info":
                 return self._json(INFO.get(host_id, INFO["home"]))
 
+        if path.startswith("/api/job/"):
+            logs = cfg.job_logs if cfg.job_logs is not None else ["Operation complete."]
+            return self._json({"id": path.split("/")[-1], "status": cfg.job_status,
+                               "logs": logs, "label": "test"})
+
         # Serve frontend
         import os
         frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
@@ -161,6 +169,20 @@ class MockHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
+        self._error(404)
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        # Consume request body
+        length = int(self.headers.get("Content-Length", 0))
+        if length:
+            self.rfile.read(length)
+
+        for host_id in ("home", "cabin"):
+            if path in (f"/api/host/{host_id}/backup/pbs",
+                        f"/api/host/{host_id}/restore"):
+                return self._json({"job_id": "mock-job-1"})
 
         self._error(404)
 
@@ -195,6 +217,8 @@ def reset_server_config():
     cfg.hosts_status = 200
     cfg.host_items_delay = {}
     cfg.host_items_status = {}
+    cfg.job_status = "done"
+    cfg.job_logs = None
     yield
 
 
@@ -241,6 +265,25 @@ def content_text(pg: Page) -> str:
 # DEPLOY — the tests that would have caught the actual prod bug
 # ─────────────────────────────────────────────────────────────────────────────
 
+def test_deploy_has_job_modal_elements(mock_server):
+    """Job modal DOM elements must be present in the served HTML."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    for el_id in ("job-modal", "job-log", "job-badge", "job-close-btn", "job-title"):
+        assert f'id="{el_id}"' in html or f"id='{el_id}'" in html, \
+            f"#{el_id} missing from served HTML — job modal not deployed!"
+
+def test_deploy_has_job_functions(mock_server):
+    """openJobModal, closeJobModal, _pollJob must be present in the served HTML."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    for fn in ("openJobModal", "closeJobModal", "_pollJob"):
+        assert fn in html, f"{fn}() missing from served HTML"
+
+def test_deploy_refresh_btn_disable_in_open_job_modal(mock_server):
+    """openJobModal must contain code to disable the refresh button."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "refresh-btn" in html and "disabled" in html, \
+        "refresh-btn disable logic not found in HTML"
+
 def test_deploy_js_has_abort_controller(mock_server):
     """Served index.html must contain AbortController — proves correct file is deployed."""
     import urllib.request
@@ -272,6 +315,7 @@ REQUIRED_IDS = [
     "content", "hostname-label", "page-subtitle",
     "local-usage", "local-bar", "cloud-usage", "cloud-bar",
     "refresh-btn", "hosts-section",
+    "job-modal", "job-close-btn", "job-badge", "job-log",
 ]
 
 def test_dom_required_elements_exist(page: Page):
@@ -694,6 +738,112 @@ def test_concurrent_backend_cache_shared_not_duplicated(mock_server):
     assert len(results) == 5, f"Not all requests completed: {len(results)}/5"
     for uid, (duration, data) in results.items():
         assert "vms" in data, f"Request {uid} got corrupt data: {str(data)[:100]}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB — backup/restore job modal behaviour
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_job_refresh_btn_disabled_while_modal_open(page: Page):
+    """Refresh button must be disabled while a job modal is open."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Starting..."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    assert page.locator("#refresh-btn").is_disabled(), \
+        "Refresh button should be disabled while job modal is open"
+
+def test_job_refresh_btn_re_enabled_after_close(page: Page):
+    """Refresh button must be re-enabled after the job modal is closed."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Starting..."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.evaluate("closeJobModal()")
+    assert not page.locator("#refresh-btn").is_disabled(), \
+        "Refresh button should be enabled after closing the job modal"
+
+def test_job_close_btn_enabled_when_done(page: Page):
+    """Close button must become enabled once the job reports status 'done'."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled",
+        timeout=6000,
+    )
+    assert not page.locator("#job-close-btn").is_disabled(), \
+        "Close button should be enabled when job is done"
+
+def test_job_close_btn_enabled_when_error(page: Page):
+    """Close button must also be enabled when the job ends with an error."""
+    cfg.job_status = "error"
+    cfg.job_logs = ["ERROR: something went wrong"]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled",
+        timeout=6000,
+    )
+    assert not page.locator("#job-close-btn").is_disabled(), \
+        "Close button should be enabled when job errors"
+
+def test_job_modal_shows_log_lines(page: Page):
+    """Log lines returned by /api/job/ must appear in the job-log div."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Step 1 done", "Step 2 running"]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => document.getElementById('job-log').innerText.includes('Step 1')",
+        timeout=6000,
+    )
+    log_text = page.locator("#job-log").inner_text()
+    assert "Step 1 done" in log_text
+    assert "Step 2 running" in log_text
+
+def test_job_badge_shows_error_status(page: Page):
+    """Job badge text must change to 'error' when job reports error status."""
+    cfg.job_status = "error"
+    cfg.job_logs = ["ERROR: restore failed"]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => document.getElementById('job-badge').textContent === 'error'",
+        timeout=6000,
+    )
+    assert page.locator("#job-badge").inner_text() == "error"
+
+def test_job_badge_shows_done_status(page: Page):
+    """Job badge text must change to 'done' when job completes successfully."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => document.getElementById('job-badge').textContent === 'done'",
+        timeout=6000,
+    )
+    assert page.locator("#job-badge").inner_text() == "done"
+
+def test_job_no_js_errors_open_close(page: Page):
+    """No JS errors when opening and closing the job modal."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Done."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled",
+        timeout=6000,
+    )
+    page.evaluate("closeJobModal()")
+    assert page._js_errors == [], f"JS errors during job modal lifecycle: {page._js_errors}"
+
+def test_job_refresh_btn_enabled_after_done_and_close(page: Page):
+    """Full lifecycle: open → done → close must leave refresh button enabled."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled",
+        timeout=6000,
+    )
+    page.evaluate("closeJobModal()")
+    assert not page.locator("#refresh-btn").is_disabled(), \
+        "Refresh button should be enabled after job done + modal closed"
 
 
 def test_concurrent_no_js_errors_under_load(mock_server):

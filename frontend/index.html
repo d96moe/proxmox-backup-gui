@@ -703,12 +703,15 @@ function openJobModal(title, jobId) {
   document.getElementById('job-badge').textContent = 'running';
   document.getElementById('job-close-btn').disabled = true;
   document.getElementById('job-modal').classList.add('open');
+  // Disable refresh button while a job is running (PBS may be offline during cloud restore)
+  document.getElementById('refresh-btn').disabled = true;
   _pollJob(jobId);
 }
 
 function closeJobModal() {
   document.getElementById('job-modal').classList.remove('open');
   if (_jobPollInterval) { clearInterval(_jobPollInterval); _jobPollInterval = null; }
+  document.getElementById('refresh-btn').disabled = false;
 }
 
 async function _pollJob(jobId) {

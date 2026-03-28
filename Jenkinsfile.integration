@@ -13,6 +13,11 @@
 pipeline {
     agent any
 
+    parameters {
+        string(name: 'BRANCH', defaultValue: 'main',
+               description: 'Branch to test (e.g. main, feature/backup-restore)')
+    }
+
     options {
         timeout(time: 30, unit: 'MINUTES')
         disableConcurrentBuilds()
@@ -31,6 +36,16 @@ pipeline {
     }
 
     stages {
+        stage('Checkout') {
+            steps {
+                checkout scmGit(
+                    branches: [[name: "${params.BRANCH}"]],
+                    userRemoteConfigs: scm.userRemoteConfigs
+                )
+                echo "Testing branch: ${params.BRANCH}"
+            }
+        }
+
         stage('Clone VM') {
             steps {
                 script {
@@ -80,21 +95,21 @@ pipeline {
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
                         backend/app.py backend/config.py \
                         backend/pbs_client.py backend/pve_client.py \
-                        backend/restic_client.py requirements.txt \
+                        backend/restic_client.py backend/jobs.py requirements.txt \
                         root@${VM_IP}:/tmp/gui-update/
 
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
                         frontend/index.html \
                         root@${VM_IP}:/tmp/gui-update/
 
-                    # Push latest test file to VM (so we always run the current test suite)
+                    # Push latest test files to VM (so we always run the current test suite)
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
-                        tests/test_frontend.py \
+                        tests/test_frontend.py tests/test_restore.py \
                         root@${VM_IP}:/tmp/gui-update/tests/
 
                     # Push into LXC 300 and restart service
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'EOF'
-                        for f in app.py config.py pbs_client.py pve_client.py restic_client.py; do
+                        for f in app.py config.py pbs_client.py pve_client.py restic_client.py jobs.py; do
                             pct push 300 /tmp/gui-update/${f} /opt/proxmox-backup-gui/backend/${f}
                         done
                         pct push 300 /tmp/gui-update/requirements.txt \
@@ -105,10 +120,12 @@ pipeline {
                         sleep 3
                         pct exec 300 -- systemctl is-active proxmox-backup-gui
 
-                        # Update test file in place
+                        # Update test files in place
                         mkdir -p /opt/ci/proxmox-backup-gui/tests
                         cp /tmp/gui-update/tests/test_frontend.py \
                             /opt/ci/proxmox-backup-gui/tests/test_frontend.py
+                        cp /tmp/gui-update/tests/test_restore.py \
+                            /opt/ci/proxmox-backup-gui/tests/test_restore.py
 EOF
                 '''
             }
@@ -126,7 +143,7 @@ EOF
                         mkdir -p /tmp/test-results
                         cd /opt/ci/proxmox-backup-gui
                         BACKEND_URL=http://10.10.0.100:5000 \
-                        pytest tests/test_frontend.py \
+                        pytest tests/ \
                             -v --tb=short \
                             --junit-xml=/tmp/test-results/integration.xml \
                             2>&1 | tee /tmp/test-results/integration.log

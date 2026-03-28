@@ -7,9 +7,11 @@ Endpoints:
 """
 from __future__ import annotations
 
+import shlex
+import subprocess
 import time
-from functools import lru_cache
 from pathlib import Path
+from urllib.parse import urlparse
 
 from datetime import timezone, datetime
 from flask import Flask, jsonify, send_from_directory, abort, request
@@ -42,6 +44,57 @@ def _cached(key: str, fn):
     val = fn()
     _cache[key] = (now, val)
     return val
+
+
+# ──────────────────────────────────────────────
+# SSH helpers (for PVE-host operations)
+# ──────────────────────────────────────────────
+
+def _pve_ssh_host(host: HostConfig) -> str:
+    """Return the SSH-reachable hostname/IP for the PVE node."""
+    if host.pve_ssh_host:
+        return host.pve_ssh_host
+    return urlparse(host.pve_url).hostname or host.pve_url
+
+
+def _ssh_stream(ssh_host: str, remote_cmd: str, log) -> None:
+    """Run remote_cmd on ssh_host via SSH, streaming output line-by-line through log().
+    Raises RuntimeError if the remote command exits non-zero.
+    """
+    proc = subprocess.Popen(
+        ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+         f"root@{ssh_host}", remote_cmd],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    for line in proc.stdout:
+        log(line.rstrip())
+    proc.wait()
+    if proc.returncode != 0:
+        raise RuntimeError(f"SSH command on {ssh_host} failed (exit {proc.returncode})")
+
+
+def _cloud_restore_cmd(host: HostConfig, restic_id: str) -> str:
+    """Build the remote shell command that stops PBS, runs restic restore, then restarts PBS."""
+    env_vars = {
+        "RESTIC_REPOSITORY": host.restic_repo,
+        "RESTIC_PASSWORD":   host.restic_password,
+        **host.restic_env,
+    }
+    env_prefix = " ".join(f"{k}={shlex.quote(v)}" for k, v in env_vars.items())
+    target = shlex.quote(host.pbs_datastore_path)
+    snap   = shlex.quote(restic_id)
+    return (
+        "echo 'Stopping PBS...' 2>&1; "
+        "systemctl stop proxmox-backup proxmox-backup-proxy 2>&1 || true; "
+        "RESTIC_EXIT=0; "
+        f"echo 'Running restic restore...' 2>&1; "
+        f"{env_prefix} restic restore {snap} --target / --no-lock 2>&1 || RESTIC_EXIT=$?; "
+        "echo 'Starting PBS...' 2>&1; "
+        "systemctl start proxmox-backup proxmox-backup-proxy 2>&1 || true; "
+        "exit $RESTIC_EXIT"
+    )
 
 
 # ──────────────────────────────────────────────
@@ -405,22 +458,13 @@ def restore(host_id: str):
         if source == "cloud":
             if not restic_id:
                 raise ValueError("restic_id required for cloud restore")
-            restic = ResticClient(host)
             log(f"Starting restic restore of snapshot {restic_id} → {host.pbs_datastore_path}")
             log("WARNING: This will overwrite the current PBS datastore.")
-            # Stop PBS before restore
-            import subprocess
-            log("Stopping PBS...")
-            subprocess.run(["systemctl", "stop", "proxmox-backup", "proxmox-backup-proxy"],
-                           check=True)
-            try:
-                restic.restore_datastore(restic_id, "/", log)
-            finally:
-                log("Starting PBS...")
-                subprocess.run(["systemctl", "start", "proxmox-backup", "proxmox-backup-proxy"])
+            ssh_host = _pve_ssh_host(host)
+            log(f"Connecting to PVE host {ssh_host} via SSH...")
+            _ssh_stream(ssh_host, _cloud_restore_cmd(host, restic_id), log)
             log("Restic restore complete. PBS restarted.")
             # Give PBS a moment to initialize
-            import time
             time.sleep(5)
             # Use latest PBS snapshot for this VM after datastore restore
             pbs = PBSClient(host)

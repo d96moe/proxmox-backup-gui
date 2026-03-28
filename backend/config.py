@@ -18,6 +18,7 @@ class HostConfig:
     pbs_datastore: str     # e.g. local-store
     pbs_storage_id: str = "pbs-local"   # PVE storage ID for PBS (used in vzdump/restore)
     pbs_datastore_path: str = "/mnt/pbs" # Local path to PBS datastore (for restic restore target)
+    pve_ssh_host: str = ""              # SSH host for PVE node; if empty, extracted from pve_url
     restic_repo: str = ""               # e.g. rclone:gdrive:bu/proxmox_home
     restic_password: str = ""
     restic_env: dict = field(default_factory=dict)
