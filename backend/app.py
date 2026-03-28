@@ -73,8 +73,14 @@ def get_items(host_id: str):
         abort(404, f"Host '{host_id}' not configured")
 
     def fetch():
-        pbs = PBSClient(host)
-        pve = PVEClient(host)
+        try:
+            pbs = PBSClient(host)
+        except Exception as e:
+            abort(503, f"PBS unavailable — restic backup may be running ({e})")
+        try:
+            pve = PVEClient(host)
+        except Exception as e:
+            abort(503, f"PVE unavailable ({e})")
 
         pve_meta = pve.get_vms_and_lxcs()
         pbs_snaps = pbs.get_snapshots()
