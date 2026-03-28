@@ -72,6 +72,11 @@ pipeline {
                     VM_IP="192.168.0.250"
                     echo "${VM_IP}" > vm_ip.txt
 
+                    # Clear any stale known_hosts entry for this IP (each CI VM clone
+                    # gets a fresh host key, so the old fingerprint would cause
+                    # StrictHostKeyChecking=no to still reject key-based auth)
+                    ssh-keygen -f "/var/lib/jenkins/.ssh/known_hosts" -R "${VM_IP}" 2>/dev/null || true
+
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "qm start ${VM_ID}"
 
                     echo "VM IP: ${VM_IP} — waiting for SSH (max 150s)..."
@@ -80,6 +85,14 @@ pipeline {
                         sleep 5; echo "  attempt ${i}/30..."
                     done
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} true || { echo "ERROR: VM not reachable at ${VM_IP}"; exit 1; }
+
+                    # Wait for PVE daemons to be ready (pct relies on pvedaemon socket)
+                    echo "Waiting for PVE daemons on ${VM_IP}..."
+                    for i in $(seq 1 24); do
+                        ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "pct list" >/dev/null 2>&1 && { echo "PVE ready"; break; }
+                        sleep 5; echo "  pve attempt ${i}/24..."
+                    done
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "pct list" || { echo "ERROR: PVE not ready"; exit 1; }
                 '''
             }
         }
@@ -120,12 +133,17 @@ pipeline {
                         sleep 3
                         pct exec 300 -- systemctl is-active proxmox-backup-gui
 
-                        # Update test files in place
+                        # Update test files and frontend in CI working dir
+                        # (mock server in test_frontend.py reads frontend/index.html
+                        # relative to the working dir — must match deployed version)
                         mkdir -p /opt/ci/proxmox-backup-gui/tests
+                        mkdir -p /opt/ci/proxmox-backup-gui/frontend
                         cp /tmp/gui-update/tests/test_frontend.py \
                             /opt/ci/proxmox-backup-gui/tests/test_frontend.py
                         cp /tmp/gui-update/tests/test_restore.py \
                             /opt/ci/proxmox-backup-gui/tests/test_restore.py
+                        cp /tmp/gui-update/index.html \
+                            /opt/ci/proxmox-backup-gui/frontend/index.html
 EOF
                 '''
             }
