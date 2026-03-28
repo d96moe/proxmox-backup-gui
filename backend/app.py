@@ -158,6 +158,7 @@ def get_items(host_id: str):
                 "type": meta["type"],
                 "os": meta["os"],
                 "status": meta["status"],
+                "template": meta.get("template", False),
                 "snapshots": snap_map.get(vmid, []),
             }
             if meta["type"] == "lxc":

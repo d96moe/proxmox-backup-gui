@@ -45,6 +45,7 @@ class PVEClient:
                     "type": "vm",
                     "os": _guess_os(vm.get("name", "")),
                     "status": vm.get("status", "unknown"),
+                    "template": bool(vm.get("template", 0)),
                 }
             for ct in self._get(f"/nodes/{nname}/lxc"):
                 result[ct["vmid"]] = {

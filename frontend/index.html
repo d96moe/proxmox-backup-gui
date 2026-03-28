@@ -98,6 +98,7 @@
   .loc-badge.cloud { background:rgba(74,158,255,.1);  color:var(--accent); border:1px solid rgba(74,158,255,.2); }
   .loc-badge.both  { background:rgba(167,139,250,.1); color:var(--purple); border:1px solid rgba(167,139,250,.2); }
   .loc-badge.none  { background:rgba(90,94,106,.1);   color:var(--muted);  border:1px solid rgba(90,94,106,.2); }
+  .template-badge { display:inline-block; padding:1px 6px; border-radius:4px; font-family:'IBM Plex Mono',monospace; font-size:9px; font-weight:600; letter-spacing:.06em; background:rgba(251,146,60,.12); color:#fb923c; border:1px solid rgba(251,146,60,.25); vertical-align:middle; margin-left:6px; }
   .loc-dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
 
   .expand-btn { width:28px; height:28px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--muted); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:12px; transition:all .15s; flex-shrink:0; }
@@ -490,6 +491,7 @@ function renderCard(item) {
               · ${typeLabel} ${item.id}
             </span>
             <span style="color:${statusColor};font-size:10px;margin-left:4px">●</span>
+            ${item.template ? '<span class="template-badge">TMPL</span>' : ''}
           </div>
           <div class="vm-meta">${snapCount} snapshot${snapCount !== 1 ? 's' : ''} · latest ${latestAge}</div>
         </div>
