@@ -8,17 +8,18 @@ Endpoints:
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from flask import Flask, jsonify, send_from_directory, abort
+from datetime import timezone, datetime
+from flask import Flask, jsonify, send_from_directory, abort, request
 from flask_cors import CORS
 
 from config import load_hosts, HostConfig
 from pbs_client import PBSClient
 from restic_client import ResticClient
 from pve_client import PVEClient
+from jobs import create_job, get_job, run_job
 
 
 app = Flask(__name__, static_folder=None)
@@ -331,6 +332,140 @@ def get_info(host_id: str):
         return {**pbs.get_versions(), "restic": restic.get_version()}
 
     return jsonify(_cached(f"info:{host_id}", fetch))
+
+
+# ──────────────────────────────────────────────
+# Backup / Restore
+# ──────────────────────────────────────────────
+
+@app.post("/api/host/<host_id>/backup/pbs")
+def backup_pbs(host_id: str):
+    """Trigger an immediate PBS backup of a single VM/LXC."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    body = request.get_json() or {}
+    vmid    = int(body.get("vmid", 0))
+    vm_type = body.get("type", "vm")   # vm or ct
+    if not vmid:
+        abort(400, "vmid required")
+
+    job_id = create_job(f"PBS backup {vm_type}/{vmid}")
+
+    def work(log):
+        pve = PVEClient(host)
+        nodes = pve.get_nodes()
+        node = nodes[0]
+        log(f"Triggering PBS backup: {vm_type}/{vmid} on node {node}")
+        upid = pve.backup_vm(vmid, vm_type, host.pbs_storage_id, node)
+        log(f"Task started: {upid}")
+        ok = pve.wait_for_task(node, upid, log)
+        if not ok:
+            raise RuntimeError("PBS backup task failed")
+        log("Backup complete.")
+        _cache.pop(f"items:{host_id}", None)
+
+    run_job(job_id, work)
+    return jsonify({"job_id": job_id})
+
+
+@app.post("/api/host/<host_id>/restore")
+def restore(host_id: str):
+    """Restore a VM/LXC from PBS (local) or restic (cloud).
+
+    Body:
+      vmid            int
+      type            "vm" | "ct"
+      backup_time     int  (unix timestamp — for local PBS restore)
+      source          "local" | "cloud"
+      restic_id       str  (restic snapshot id — for cloud restore)
+      run_backup_after bool (default false)
+    """
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    body = request.get_json() or {}
+    vmid             = int(body.get("vmid", 0))
+    vm_type          = body.get("type", "vm")
+    backup_time      = body.get("backup_time")
+    source           = body.get("source", "local")
+    restic_id        = body.get("restic_id")
+    run_backup_after = body.get("run_backup_after", False)
+
+    if not vmid:
+        abort(400, "vmid required")
+
+    job_id = create_job(f"Restore {vm_type}/{vmid} from {source}")
+
+    def work(log):
+        pve = PVEClient(host)
+        nodes = pve.get_nodes()
+        node = nodes[0]
+
+        if source == "cloud":
+            if not restic_id:
+                raise ValueError("restic_id required for cloud restore")
+            restic = ResticClient(host)
+            log(f"Starting restic restore of snapshot {restic_id} → {host.pbs_datastore_path}")
+            log("WARNING: This will overwrite the current PBS datastore.")
+            # Stop PBS before restore
+            import subprocess
+            log("Stopping PBS...")
+            subprocess.run(["systemctl", "stop", "proxmox-backup", "proxmox-backup-proxy"],
+                           check=True)
+            try:
+                restic.restore_datastore(restic_id, "/", log)
+            finally:
+                log("Starting PBS...")
+                subprocess.run(["systemctl", "start", "proxmox-backup", "proxmox-backup-proxy"])
+            log("Restic restore complete. PBS restarted.")
+            # Give PBS a moment to initialize
+            import time
+            time.sleep(5)
+            # Use latest PBS snapshot for this VM after datastore restore
+            pbs = PBSClient(host)
+            snaps = pbs.get_snapshots()
+            vm_snaps = next(
+                (g["snapshots"] for g in snaps
+                 if g["pve_id"] == vmid and g["backup_type"] == vm_type), []
+            )
+            if not vm_snaps:
+                raise RuntimeError(f"No PBS snapshot found for {vm_type}/{vmid} after restic restore")
+            backup_ts = vm_snaps[0]["backup_time"]
+        else:
+            backup_ts = backup_time
+
+        # Format timestamp as ISO 8601 for PVE API
+        backup_time_iso = datetime.fromtimestamp(backup_ts, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        log(f"Restoring {vm_type}/{vmid} snapshot {backup_time_iso} from {host.pbs_storage_id}")
+        upid = pve.restore_vm(vmid, vm_type, backup_time_iso, host.pbs_storage_id, node,
+                              host.pbs_datastore)
+        log(f"Task started: {upid}")
+        ok = pve.wait_for_task(node, upid, log)
+        if not ok:
+            raise RuntimeError("Restore task failed")
+        log("Restore complete.")
+
+        if run_backup_after:
+            log("Triggering PBS backup of all VMs...")
+            upid2 = pve.backup_vm(0, vm_type, host.pbs_storage_id, node)
+            pve.wait_for_task(node, upid2, log)
+            log("Post-restore backup complete.")
+
+        _cache.pop(f"items:{host_id}", None)
+
+    run_job(job_id, work)
+    return jsonify({"job_id": job_id})
+
+
+@app.get("/api/job/<job_id>")
+def get_job_status(job_id: str):
+    job = get_job(job_id)
+    if not job:
+        abort(404)
+    return jsonify(job)
 
 
 # ──────────────────────────────────────────────

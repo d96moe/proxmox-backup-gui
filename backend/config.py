@@ -16,7 +16,9 @@ class HostConfig:
     pbs_user: str          # e.g. backup@pbs  or  user!tokenid for API token
     pbs_password: str
     pbs_datastore: str     # e.g. local-store
-    restic_repo: str = ""           # e.g. rclone:gdrive:bu/proxmox_home
+    pbs_storage_id: str = "pbs-local"   # PVE storage ID for PBS (used in vzdump/restore)
+    pbs_datastore_path: str = "/mnt/pbs" # Local path to PBS datastore (for restic restore target)
+    restic_repo: str = ""               # e.g. rclone:gdrive:bu/proxmox_home
     restic_password: str = ""
     restic_env: dict = field(default_factory=dict)
     verify_ssl: bool = False

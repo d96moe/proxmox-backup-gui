@@ -144,6 +144,28 @@ class ResticClient:
             pass
         return result
 
+    def restore_datastore(self, snapshot_id: str, target: str, log: callable) -> None:
+        """Restore a restic snapshot to target path (destructive — overwrites PBS datastore)."""
+        import subprocess
+        cmd = [
+            "restic", "restore", snapshot_id,
+            "--target", target,
+            "--no-lock",
+        ]
+        log(f"Running: {' '.join(cmd)}")
+        proc = subprocess.Popen(
+            cmd,
+            env=self._env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        for line in proc.stdout:
+            log(line.rstrip())
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"restic restore failed (exit {proc.returncode})")
+
     def get_version(self) -> str:
         try:
             result = subprocess.run(
