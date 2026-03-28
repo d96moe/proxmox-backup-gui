@@ -122,6 +122,21 @@ pipeline {
 
                     # Push into LXC 300 and restart service
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'EOF'
+                        set -e
+
+                        # Ensure PVE daemon (pvestatd) is ready — pct push/exec need it
+                        echo "Waiting for pvestatd..."
+                        for i in $(seq 1 24); do
+                            systemctl is-active pvestatd >/dev/null 2>&1 && break
+                            echo "  pvestatd attempt ${i}/24..."
+                            sleep 5
+                        done
+                        systemctl is-active pvestatd || { echo "ERROR: pvestatd not ready"; exit 1; }
+
+                        # Ensure LXC 300 is running (may not autostart immediately)
+                        pct status 300 | grep -q running || pct start 300
+                        echo "LXC 300 status: $(pct status 300)"
+
                         for f in app.py config.py pbs_client.py pve_client.py restic_client.py jobs.py; do
                             pct push 300 /tmp/gui-update/${f} /opt/proxmox-backup-gui/backend/${f}
                         done
