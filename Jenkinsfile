@@ -8,6 +8,11 @@
 pipeline {
     agent any
 
+    parameters {
+        string(name: 'BRANCH', defaultValue: 'main',
+               description: 'Branch to test (e.g. main, feature/backup-restore)')
+    }
+
     options {
         timeout(time: 10, unit: 'MINUTES')
         disableConcurrentBuilds()
@@ -16,7 +21,13 @@ pipeline {
 
     stages {
         stage('Checkout') {
-            steps { checkout scm }
+            steps {
+                checkout scmGit(
+                    branches: [[name: "${params.BRANCH}"]],
+                    userRemoteConfigs: scm.userRemoteConfigs
+                )
+                echo "Testing branch: ${params.BRANCH}"
+            }
         }
 
         stage('Install deps') {
