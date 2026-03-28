@@ -88,10 +88,12 @@ pipeline {
 
                     # cloud-init maps the hostname to 127.0.1.1 (loopback).
                     # pve-cluster (pmxcfs) refuses to start on a loopback address,
-                    # so we must rewrite the hosts entry before restarting it.
+                    # so we append a non-loopback entry before restarting it.
                     echo "Fixing /etc/hosts for pve-cluster..."
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "sed -i 's|^127\.0\.1\.1 .*|${VM_IP} \$(hostname)|' /etc/hosts && systemctl restart pve-cluster"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} << 'FIXHOSTS'
+echo "192.168.0.250 $(hostname)" >> /etc/hosts
+systemctl restart pve-cluster
+FIXHOSTS
 
                     # Now wait for pve-cluster (and pct) to become operational
                     echo "Waiting for PVE cluster daemon on ${VM_IP}..."
