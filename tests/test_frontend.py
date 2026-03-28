@@ -297,6 +297,20 @@ def content_text(pg: Page) -> str:
     return pg.locator("#content").inner_text()
 
 
+def expand_vm_card(pg: Page, vmid: int):
+    """Expand the snapshot section of the VM card with the given vmid.
+    Snapshots are collapsed by default (.snapshots { display:none }).
+    """
+    # Find the card whose header contains this vmid's backup-btn, click the expand btn
+    pg.locator(f".backup-btn[data-vmid='{vmid}']").locator(
+        "xpath=ancestor::div[contains(@class,'vm-header')]"
+    ).click()
+    # Wait for snapshots to become visible (any restore button in this card)
+    pg.locator(f".restore-btn[data-vmid='{vmid}']").first.wait_for(
+        state="visible", timeout=5000
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DEPLOY — the tests that would have caught the actual prod bug
 # ─────────────────────────────────────────────────────────────────────────────
@@ -960,8 +974,8 @@ def snap_test_page(browser, mock_server):
 
 def test_restore_modal_opens_with_correct_vm_name(page: Page):
     """Clicking Restore on a snapshot row opens the modal with the correct VM name."""
+    expand_vm_card(page, 101)
     restore_btn = page.locator(".restore-btn[data-vmid='101']").first
-    restore_btn.wait_for(timeout=5000)
     restore_btn.click()
     page.wait_for_selector("#modal.open", timeout=5000)
     subtitle = page.locator("#modal-subtitle").inner_text()
@@ -970,8 +984,8 @@ def test_restore_modal_opens_with_correct_vm_name(page: Page):
 
 def test_restore_modal_both_sources_shown_for_local_cloud_snap(page: Page):
     """Snapshot with local=True and cloud=True must show both Local PBS and cloud options."""
+    expand_vm_card(page, 101)
     restore_btn = page.locator(".restore-btn[data-vmid='101']").first
-    restore_btn.wait_for(timeout=5000)
     restore_btn.click()
     page.wait_for_selector("#modal.open", timeout=5000)
     assert page.locator(".source-opt[data-source='local']").count() == 1, \
@@ -982,8 +996,8 @@ def test_restore_modal_both_sources_shown_for_local_cloud_snap(page: Page):
 
 def test_restore_modal_only_local_source_for_local_only_snap(snap_test_page: Page):
     """Snapshot with local=True, cloud=False must show only Local PBS option."""
+    expand_vm_card(snap_test_page, 502)
     restore_btn = snap_test_page.locator(".restore-btn[data-vmid='502']").first
-    restore_btn.wait_for(timeout=5000)
     restore_btn.click()
     snap_test_page.wait_for_selector("#modal.open", timeout=5000)
     assert snap_test_page.locator(".source-opt[data-source='local']").count() == 1
@@ -993,8 +1007,8 @@ def test_restore_modal_only_local_source_for_local_only_snap(snap_test_page: Pag
 
 def test_restore_modal_only_cloud_source_for_cloud_only_snap(snap_test_page: Page):
     """Snapshot with local=False, cloud=True must show only cloud option."""
+    expand_vm_card(snap_test_page, 503)
     restore_btn = snap_test_page.locator(".restore-btn[data-vmid='503']").first
-    restore_btn.wait_for(timeout=5000)
     restore_btn.click()
     snap_test_page.wait_for_selector("#modal.open", timeout=5000)
     assert snap_test_page.locator(".source-opt[data-source='cloud']").count() == 1
@@ -1004,8 +1018,8 @@ def test_restore_modal_only_cloud_source_for_cloud_only_snap(snap_test_page: Pag
 
 def test_restore_modal_cloud_warning_changes_on_source_switch(page: Page):
     """Selecting cloud source must show the datastore-overwrite warning."""
+    expand_vm_card(page, 101)
     restore_btn = page.locator(".restore-btn[data-vmid='101']").first
-    restore_btn.wait_for(timeout=5000)
     restore_btn.click()
     page.wait_for_selector("#modal.open", timeout=5000)
     # Default (local) — standard warning
@@ -1021,8 +1035,8 @@ def test_restore_modal_cloud_warning_changes_on_source_switch(page: Page):
 
 def test_restore_modal_backup_after_unchecked_by_default(page: Page):
     """run-backup-after checkbox must be unchecked when modal opens."""
+    expand_vm_card(page, 101)
     restore_btn = page.locator(".restore-btn[data-vmid='101']").first
-    restore_btn.wait_for(timeout=5000)
     restore_btn.click()
     page.wait_for_selector("#modal.open", timeout=5000)
     assert not page.locator("#modal-backup-after").is_checked(), \
@@ -1033,8 +1047,8 @@ def test_restore_modal_full_flow_local(page: Page):
     """Full flow: click Restore → select local → confirm → job modal shows done."""
     cfg.job_status = "done"
     cfg.job_logs = ["Restore complete."]
+    expand_vm_card(page, 101)
     restore_btn = page.locator(".restore-btn[data-vmid='101']").first
-    restore_btn.wait_for(timeout=5000)
     restore_btn.click()
     page.wait_for_selector("#modal.open", timeout=5000)
     page.locator(".source-opt[data-source='local']").click()
@@ -1051,8 +1065,8 @@ def test_restore_modal_full_flow_cloud(page: Page):
     """Full flow: click Restore → select cloud → confirm → job modal shows done."""
     cfg.job_status = "done"
     cfg.job_logs = ["Restore complete."]
+    expand_vm_card(page, 101)
     restore_btn = page.locator(".restore-btn[data-vmid='101']").first
-    restore_btn.wait_for(timeout=5000)
     restore_btn.click()
     page.wait_for_selector("#modal.open", timeout=5000)
     page.locator(".source-opt[data-source='cloud']").click()
@@ -1068,8 +1082,8 @@ def test_restore_modal_failed_job_shows_error_badge(page: Page):
     """If restore job ends with error, modal badge must show 'error'."""
     cfg.job_status = "error"
     cfg.job_logs = ["ERROR: SSH connection refused"]
+    expand_vm_card(page, 101)
     restore_btn = page.locator(".restore-btn[data-vmid='101']").first
-    restore_btn.wait_for(timeout=5000)
     restore_btn.click()
     page.wait_for_selector("#modal.open", timeout=5000)
     page.click("#modal-confirm-btn")
@@ -1084,8 +1098,8 @@ def test_restore_no_js_errors_full_flow(page: Page):
     """No JS errors across the entire restore flow: open → confirm → done → close."""
     cfg.job_status = "done"
     cfg.job_logs = ["Restore complete."]
+    expand_vm_card(page, 101)
     restore_btn = page.locator(".restore-btn[data-vmid='101']").first
-    restore_btn.wait_for(timeout=5000)
     restore_btn.click()
     page.wait_for_selector("#modal.open", timeout=5000)
     page.click("#modal-confirm-btn")
@@ -1105,7 +1119,7 @@ def test_backup_now_opens_job_modal_with_correct_title(page: Page):
     cfg.job_status = "done"
     cfg.job_logs = ["Backup complete."]
     backup_btn = page.locator(".backup-btn[data-vmid='101']").first
-    backup_btn.wait_for(timeout=5000)
+    backup_btn.wait_for(state="visible", timeout=5000)
     page.on("dialog", lambda d: d.accept())
     backup_btn.click()
     page.wait_for_selector("#job-modal.open", timeout=5000)
@@ -1119,7 +1133,7 @@ def test_backup_now_opens_job_modal_with_correct_title(page: Page):
 def test_backup_now_cancel_does_not_open_job_modal(page: Page):
     """Cancelling the confirm dialog must NOT open the job modal."""
     backup_btn = page.locator(".backup-btn[data-vmid='101']").first
-    backup_btn.wait_for(timeout=5000)
+    backup_btn.wait_for(state="visible", timeout=5000)
     page.on("dialog", lambda d: d.dismiss())
     backup_btn.click()
     # Modal must remain closed
@@ -1134,7 +1148,7 @@ def test_backup_now_refresh_btn_disabled_during_job(page: Page):
     cfg.job_status = "running"
     cfg.job_logs = ["Starting backup..."]
     backup_btn = page.locator(".backup-btn[data-vmid='101']").first
-    backup_btn.wait_for(timeout=5000)
+    backup_btn.wait_for(state="visible", timeout=5000)
     page.on("dialog", lambda d: d.accept())
     backup_btn.click()
     page.wait_for_selector("#job-modal.open", timeout=5000)
