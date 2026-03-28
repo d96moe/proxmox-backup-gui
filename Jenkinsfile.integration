@@ -93,7 +93,13 @@ pipeline {
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} << 'FIXHOSTS'
 sed -i '/^127[.]0[.]1[.]1/d' /etc/hosts
 echo "192.168.0.250 $(hostname)" >> /etc/hosts
-systemctl restart pve-cluster
+echo "=== /etc/hosts after fix ==="
+cat /etc/hosts
+echo "=== restarting pve-cluster ==="
+systemctl restart pve-cluster || true
+sleep 3
+echo "=== pve-cluster status ==="
+systemctl is-active pve-cluster || journalctl -u pve-cluster --no-pager -n 10
 FIXHOSTS
 
                     # Now wait for pve-cluster (and pct) to become operational
