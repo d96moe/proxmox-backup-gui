@@ -367,3 +367,122 @@ def test_cloud_only_restore_api(host_id, items):
     job = _poll_job(resp["job_id"], timeout=600)
     err = _job_ok(job)
     assert not err, f"Cloud-only restore failed:\n{err}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ERROR HANDLING — bad inputs and failure paths must produce readable errors
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_cloud_restore_invalid_restic_id_shows_error(host_id):
+    """Passing a non-existent restic snapshot ID must produce job status=error
+    with a readable error message — not a 500 or a silent hang."""
+    resp = _post(f"/api/host/{host_id}/restore", {
+        "vmid": 101, "type": "vm",
+        "source": "cloud", "restic_id": "0000000000000000deadbeef",
+        "run_backup_after": False,
+    })
+    assert "job_id" in resp
+
+    job = _poll_job(resp["job_id"], timeout=120)
+    assert job["status"] == "error", \
+        f"Expected error for invalid restic_id, got: {job['status']}"
+    logs = "\n".join(job.get("logs", []))
+    assert logs.strip(), "Error job must have log output — got empty logs"
+    # The log must contain something human-readable (not just a traceback class name)
+    assert any(word in logs.lower() for word in ("error", "failed", "not found", "exit")), \
+        f"Error log does not contain a readable message:\n{logs}"
+
+
+def test_local_restore_invalid_backup_time_shows_error(host_id):
+    """Passing backup_time=1 (nonexistent timestamp) must produce job status=error."""
+    resp = _post(f"/api/host/{host_id}/restore", {
+        "vmid": 101, "type": "vm",
+        "source": "local", "backup_time": 1,
+    })
+    assert "job_id" in resp
+
+    job = _poll_job(resp["job_id"], timeout=120)
+    assert job["status"] == "error", \
+        f"Expected error for invalid backup_time, got: {job['status']}"
+    logs = "\n".join(job.get("logs", []))
+    assert logs.strip(), "Error job must have log output"
+
+
+def test_restore_nonexistent_vmid_shows_error(host_id):
+    """Requesting restore for a vmid that doesn't exist must produce job status=error."""
+    resp = _post(f"/api/host/{host_id}/restore", {
+        "vmid": 99999, "type": "vm",
+        "source": "local", "backup_time": 1700000000,
+    })
+    assert "job_id" in resp
+
+    job = _poll_job(resp["job_id"], timeout=120)
+    assert job["status"] == "error", \
+        f"Expected error for vmid=99999, got: {job['status']}"
+
+
+def test_concurrent_backups_both_get_job_ids(host_id, items):
+    """Triggering two backups simultaneously must return a job_id for each request.
+    PVE may queue or reject the second, but the API must not crash."""
+    vmid, vm_type, _ = _find_vm_with_local_snap(items)
+    if vmid is None:
+        pytest.skip("No suitable VM for concurrent backup test")
+
+    import concurrent.futures
+
+    def start_backup(_):
+        return _post(f"/api/host/{host_id}/backup/pbs", {"vmid": vmid, "type": vm_type})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
+        futures = [ex.submit(start_backup, i) for i in range(2)]
+        results = [f.result() for f in concurrent.futures.as_completed(futures)]
+
+    for resp in results:
+        assert "job_id" in resp, f"Missing job_id in concurrent backup response: {resp}"
+
+    # Wait for both to settle (one may fail — that is acceptable)
+    jobs = [_poll_job(r["job_id"], timeout=300) for r in results]
+    statuses = [j["status"] for j in jobs]
+    assert all(s in ("done", "error") for s in statuses), \
+        f"Unexpected job statuses: {statuses}"
+    # At least one must succeed
+    assert "done" in statuses, \
+        f"Neither concurrent backup succeeded: {statuses}\n" + \
+        "\n".join(f"job {i}: " + "\n".join(j.get("logs", [])) for i, j in enumerate(jobs))
+
+
+def test_backup_post_restore_data_appears_in_gui(real_page, host_id, items):
+    """After a successful local restore, the GUI must refresh and show updated snapshot data."""
+    vmid, vm_type, backup_time = _find_vm_with_local_snap(items)
+    if vmid is None:
+        pytest.skip("No VM with local PBS snapshot")
+
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        f"() => document.getElementById('content').innerText.includes('{vmid}')",
+        timeout=10000,
+    )
+
+    restore_btn = real_page.locator(f".restore-btn[data-vmid='{vmid}']").first
+    restore_btn.wait_for(timeout=5000)
+    restore_btn.click()
+    real_page.wait_for_selector("#modal.open", timeout=5000)
+    real_page.locator(".source-opt[data-source='local']").click()
+    real_page.click("#modal-confirm-btn")
+    real_page.wait_for_selector("#job-modal.open", timeout=5000)
+    real_page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled", timeout=300000)
+
+    badge = real_page.locator("#job-badge").inner_text()
+    assert badge == "done", \
+        f"Restore failed — cannot check GUI refresh.\nLog:\n{real_page.locator('#job-log').inner_text()}"
+
+    real_page.evaluate("closeJobModal()")
+
+    # After close, refreshData() is called — VM content must still be present
+    real_page.wait_for_function(
+        f"() => document.getElementById('content').innerText.includes('{vmid}')",
+        timeout=15000,
+    )
+    assert real_page._js_errors == [], f"JS errors after restore + GUI refresh: {real_page._js_errors}"
