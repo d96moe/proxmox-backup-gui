@@ -137,7 +137,7 @@ FIXHOSTS
 
                     # Push latest test files to VM (so we always run the current test suite)
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
-                        tests/test_frontend.py tests/test_restore.py \
+                        tests/test_frontend.py tests/test_restore.py tests/conftest.py \
                         root@${VM_IP}:/tmp/gui-update/tests/
 
                     # Push into LXC 300 and restart service
@@ -169,6 +169,8 @@ FIXHOSTS
                             /opt/ci/proxmox-backup-gui/tests/test_frontend.py
                         cp /tmp/gui-update/tests/test_restore.py \
                             /opt/ci/proxmox-backup-gui/tests/test_restore.py
+                        cp /tmp/gui-update/tests/conftest.py \
+                            /opt/ci/proxmox-backup-gui/tests/conftest.py
                         cp /tmp/gui-update/index.html \
                             /opt/ci/proxmox-backup-gui/frontend/index.html
 EOF
