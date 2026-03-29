@@ -240,14 +240,14 @@ EOF
                     # oldest_local, making it appear as a cloud-only entry in the GUI.
                     echo "Triggering PBS backup #2 (cloud-only seed)..."
                     JOB3=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- python3 -c \"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':300,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\"")
+                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':300,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
                     JOB3_ID=$(echo "${JOB3}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup #2 job: ${JOB3_ID}"
 
                     for i in $(seq 1 60); do
                         sleep 5
                         STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "pct exec 300 -- python3 -c \"import urllib.request; print(urllib.request.urlopen('http://localhost:5000/api/job/${JOB3_ID}',timeout=5).read().decode())\"" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                            "pct exec 300 -- python3 -c \\"import urllib.request; print(urllib.request.urlopen('http://localhost:5000/api/job/${JOB3_ID}',timeout=5).read().decode())\\"" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
                         echo "  PBS backup #2 status: ${STATUS}"
                         [ "${STATUS}" = "done" ] && { echo "PBS backup #2 complete"; break; }
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #2 failed"; exit 1; }
@@ -287,7 +287,8 @@ def api(url, method='GET'):
     req = urllib.request.Request(url, method=method)
     for k, v in hdrs.items():
         req.add_header(k, v)
-    return json.loads(urllib.request.urlopen(req, context=ctx, timeout=30).read())
+    body = urllib.request.urlopen(req, context=ctx, timeout=30).read()
+    return json.loads(body) if body else {}
 
 snaps = api(f'{base}/api2/json/admin/datastore/{ds}/snapshots?backup-type=ct&backup-id=300')['data']
 snaps.sort(key=lambda s: s['backup-time'])
