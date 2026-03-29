@@ -20,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 from playwright.async_api import async_playwright
-from playwright.sync_api import Page, sync_playwright
+from playwright.sync_api import Page
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Mock API data
@@ -176,14 +176,6 @@ def mock_server():
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{port}"
     server.shutdown()
-
-
-@pytest.fixture(scope="session")
-def browser():
-    with sync_playwright() as p:
-        b = p.chromium.launch(headless=True)
-        yield b
-        b.close()
 
 
 @pytest.fixture(autouse=True)
