@@ -124,9 +124,19 @@ FIXHOSTS
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} cat /root/.config/rclone/rclone.conf | \
                         ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                             "cat > /tmp/rclone.conf && mkdir -p /root/.config/rclone && cp /tmp/rclone.conf /root/.config/rclone/rclone.conf && echo nameserver 8.8.8.8 > /etc/resolv.conf"
-                    # Step B: start LXC 300, then push rclone.conf and DNS into it
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct start 300 || true && sleep 3 && pct exec 300 -- mkdir -p /root/.config/rclone && pct push 300 /tmp/rclone.conf /root/.config/rclone/rclone.conf && pct exec 300 -- bash -c 'echo nameserver 8.8.8.8 > /etc/resolv.conf'"
+                    # Step B: bind-mount PBS datastore into LXC 300 so restic can back it
+                    # up from inside (rclone is installed inside LXC 300, not on PVE host).
+                    # Requires stop → set → start because pct set needs container stopped.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'STEP_B'
+set -e
+pct stop 300 2>/dev/null || true
+pct set 300 --mp0 /mnt/ci-pbs,mp=/mnt/ci-pbs
+pct start 300
+sleep 5
+pct exec 300 -- mkdir -p /root/.config/rclone
+pct push 300 /tmp/rclone.conf /root/.config/rclone/rclone.conf
+pct exec 300 -- bash -c 'echo nameserver 8.8.8.8 > /etc/resolv.conf'
+STEP_B
                     echo "rclone.conf deployed"
                 '''
             }
@@ -217,12 +227,12 @@ EOF
                     done
 
                     # Step 2: Restic backup of PBS datastore → creates cloud snapshot.
+                    # Runs from inside LXC 300 where restic + rclone are installed and
+                    # /mnt/ci-pbs is bind-mounted (configured in "Start VM + wait").
                     # Tagged ct-300 so restic_client.py maps it to LXC 300.
                     echo "Running restic backup of PBS datastore to cloud..."
-                    # Restic backup runs on the CI VM (PVE host) where /mnt/ci-pbs is mounted.
-                    # rclone.conf was deployed there in the "Start VM + wait" stage.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "RESTIC_PASSWORD=X5-erkses2 RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test restic backup /mnt/ci-pbs --tag ct-300 --json 2>&1 | tail -3"
+                        "pct exec 300 -- bash -c 'RESTIC_PASSWORD=X5-erkses2 RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test restic backup /mnt/ci-pbs --tag ct-300 --json 2>&1 | tail -3'"
                     echo "Restic backup complete"
 
                     # Step 3: PBS backup #2 — second local snapshot needed so that after
