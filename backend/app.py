@@ -440,6 +440,9 @@ def restore(host_id: str):
     body = request.get_json() or {}
     vmid             = int(body.get("vmid", 0))
     vm_type          = body.get("type", "vm")
+    # PVE metadata uses "lxc" for containers; PBS and restore APIs use "ct"
+    if vm_type == "lxc":
+        vm_type = "ct"
     backup_time      = body.get("backup_time")
     source           = body.get("source", "local")
     restic_id        = body.get("restic_id")
