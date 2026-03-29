@@ -107,6 +107,12 @@ FIXHOSTS
                         sleep 5; echo "  pve attempt ${i}/24..."
                     done
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "pct list" || { echo "ERROR: PVE not ready"; exit 1; }
+
+                    # Grant gui-test@pbs DatastoreAdmin on ci-pbs so the backend
+                    # can list snapshots. Template starts with no ACLs configured.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "proxmox-backup-manager acl update /datastore/ci-pbs DatastoreAdmin --auth-id gui-test@pbs"
+                    echo "PBS ACL configured"
                 '''
             }
         }
