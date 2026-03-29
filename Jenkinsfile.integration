@@ -136,6 +136,13 @@ sleep 5
 pct exec 300 -- mkdir -p /root/.config/rclone
 pct push 300 /tmp/rclone.conf /root/.config/rclone/rclone.conf
 pct exec 300 -- bash -c 'echo nameserver 8.8.8.8 > /etc/resolv.conf'
+# Pull rclone binary from LXC 300 to PVE host so restic can call it during
+# cloud restore (app.py SSHes to this host and runs restic restore there).
+pct pull 300 /usr/local/bin/rclone /usr/local/bin/rclone
+chmod +x /usr/local/bin/rclone
+# Clear stale host key for 10.10.0.1 in LXC 300 (each CI VM clone gets a new
+# SSH host key; the template bakes in the key from the original build).
+pct exec 300 -- bash -c 'ssh-keygen -f /root/.ssh/known_hosts -R 10.10.0.1 2>/dev/null; ssh-keyscan -t ed25519 10.10.0.1 >> /root/.ssh/known_hosts 2>/dev/null' || true
 STEP_B
                     echo "rclone.conf deployed"
                 '''

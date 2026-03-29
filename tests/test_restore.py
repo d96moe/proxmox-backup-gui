@@ -221,6 +221,10 @@ def test_local_restore_ui(real_page, host_id, items):
         timeout=10000,
     )
 
+    # Restore buttons live inside the collapsible .snapshots section (display:none
+    # by default). Click the vm-header to expand it first.
+    real_page.locator(f".vm-card:has(.backup-btn[data-vmid='{vmid}'])").locator(".vm-header").click()
+
     # Click the first Restore button for this VM (latest snapshot row)
     restore_btn = real_page.locator(f".restore-btn[data-vmid='{vmid}']").first
     restore_btn.wait_for(timeout=5000)
@@ -305,6 +309,9 @@ def test_cloud_restore_ui(real_page, host_id, items):
         f"() => document.getElementById('content').innerText.includes('{vmid}')",
         timeout=10000,
     )
+
+    # Expand the VM card so the restore buttons inside .snapshots become visible
+    real_page.locator(f".vm-card:has(.backup-btn[data-vmid='{vmid}'])").locator(".vm-header").click()
 
     # Click first Restore button for this VM
     restore_btn = real_page.locator(f".restore-btn[data-vmid='{vmid}']").first
@@ -454,6 +461,9 @@ def test_backup_post_restore_data_appears_in_gui(real_page, host_id, items):
         f"() => document.getElementById('content').innerText.includes('{vmid}')",
         timeout=10000,
     )
+
+    # Expand the VM card so the restore buttons inside .snapshots become visible
+    real_page.locator(f".vm-card:has(.backup-btn[data-vmid='{vmid}'])").locator(".vm-header").click()
 
     restore_btn = real_page.locator(f".restore-btn[data-vmid='{vmid}']").first
     restore_btn.wait_for(timeout=5000)
