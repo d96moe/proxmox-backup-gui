@@ -120,9 +120,13 @@ FIXHOSTS
                     # The rclone OAuth token is refreshed automatically but copying fresh
                     # ensures we always start with a valid access token.
                     echo "Deploying rclone.conf..."
+                    # Step A: pipe rclone.conf to CI VM PVE root (LXC 300 not yet started)
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} cat /root/.config/rclone/rclone.conf | \
                         ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "cat > /tmp/rclone.conf && mkdir -p /root/.config/rclone && cp /tmp/rclone.conf /root/.config/rclone/rclone.conf && pct exec 300 -- mkdir -p /root/.config/rclone && pct push 300 /tmp/rclone.conf /root/.config/rclone/rclone.conf && echo nameserver 8.8.8.8 > /etc/resolv.conf && pct exec 300 -- bash -c 'echo nameserver 8.8.8.8 > /etc/resolv.conf'"
+                            "cat > /tmp/rclone.conf && mkdir -p /root/.config/rclone && cp /tmp/rclone.conf /root/.config/rclone/rclone.conf && echo nameserver 8.8.8.8 > /etc/resolv.conf"
+                    # Step B: start LXC 300, then push rclone.conf and DNS into it
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "pct start 300 || true && sleep 3 && pct exec 300 -- mkdir -p /root/.config/rclone && pct push 300 /tmp/rclone.conf /root/.config/rclone/rclone.conf && pct exec 300 -- bash -c 'echo nameserver 8.8.8.8 > /etc/resolv.conf'"
                     echo "rclone.conf deployed"
                 '''
             }
