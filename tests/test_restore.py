@@ -24,7 +24,6 @@ import time
 import urllib.request
 
 import pytest
-from playwright.sync_api import sync_playwright
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "").rstrip("/")
 
@@ -135,17 +134,9 @@ def items(host_id):
     return _items(host_id)
 
 
-@pytest.fixture(scope="module")
-def browser_instance():
-    with sync_playwright() as p:
-        b = p.chromium.launch(headless=True)
-        yield b
-        b.close()
-
-
 @pytest.fixture
-def real_page(browser_instance):
-    ctx = browser_instance.new_context(base_url=BACKEND_URL)
+def real_page(browser):
+    ctx = browser.new_context(base_url=BACKEND_URL)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
