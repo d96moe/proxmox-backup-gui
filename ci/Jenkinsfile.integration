@@ -217,7 +217,7 @@ STEP_B
 
                     # Push latest test files to VM (so we always run the current test suite)
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
-                        tests/test_frontend.py tests/test_restore.py tests/conftest.py \
+                        ci/tests/test_frontend.py ci/tests/test_restore.py ci/tests/conftest.py \
                         root@${VM_IP}:/tmp/gui-update/tests/
 
                     # Push into LXC 300 and restart service
