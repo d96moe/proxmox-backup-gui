@@ -258,6 +258,14 @@
         <div class="source-options" id="modal-sources"></div>
       </div>
       <div class="modal-warning" id="modal-warning">⚠ &nbsp;The VM will be stopped and overwritten. This cannot be undone.</div>
+      <div class="modal-warning cloud" id="modal-self-warning" style="display:none">
+        ⚠ &nbsp;<strong>You are restoring the container that runs this web UI.</strong><br>
+        The web UI will go <strong>offline</strong> as soon as the restore starts. It will only come back once the restore finishes and the container restarts. If the restore fails, the web UI will not return automatically.
+      </div>
+      <label class="modal-checkbox" id="modal-self-confirm-label" style="display:none">
+        <input type="checkbox" id="modal-self-confirm" onchange="updateConfirmBtn()">
+        I understand — the web UI will go offline during restore
+      </label>
       <label class="modal-checkbox" id="modal-backup-label">
         <input type="checkbox" id="modal-backup-after"> Run PBS backup for all VMs after restore
       </label>
@@ -299,6 +307,7 @@ const API_BASE = window.location.origin;  // same host when served by Flask
 // ─────────────────────────────────────────────
 let currentHost = null;
 let hosts = [];
+let selfVmid = null;  // VMID of the LXC container running this web UI (null if unknown)
 let _abortController = null;
 let _modalState = {};  // holds pending restore params
 
@@ -310,6 +319,7 @@ async function init() {
     const res = await fetch(`${API_BASE}/api/hosts`);
     if (!res.ok) throw new Error(res.statusText);
     hosts = await res.json();
+    selfVmid = hosts[0]?.self_vmid ?? null;
   } catch (err) {
     setStatus('error', 'backend unreachable');
     document.getElementById('content').innerHTML =
@@ -601,14 +611,16 @@ function openRestoreModal(d) {
   const hasLocal = d.local === 'true';
   const hasCloud = d.cloud === 'true';
 
+  const vmid = parseInt(d.vmid);
   _modalState = {
-    vmid:       parseInt(d.vmid),
+    vmid,
     type:       d.type,
     backupTime: parseInt(d.backupTime),
     resticId:   d.resticId || null,
     hasLocal,
     hasCloud,
     source:     hasLocal ? 'local' : 'cloud',
+    isSelf:     selfVmid !== null && vmid === selfVmid,
   };
 
   document.getElementById('modal-vm').textContent   = d.vm;
@@ -630,7 +642,13 @@ function openRestoreModal(d) {
       <div class="source-opt-desc">${s.desc}</div>
     </div>`).join('');
 
+  const isSelf = _modalState.isSelf;
+  document.getElementById('modal-self-warning').style.display = isSelf ? '' : 'none';
+  document.getElementById('modal-self-confirm-label').style.display = isSelf ? '' : 'none';
+  document.getElementById('modal-self-confirm').checked = false;
+
   updateRestoreWarning();
+  updateConfirmBtn();
   document.getElementById('modal').classList.add('open');
 }
 
@@ -642,6 +660,7 @@ function selectRestoreSource(el) {
   document.getElementById('modal-time').textContent =
     _modalState.source === 'local' ? '~5 min' : '~2–4 h';
   updateRestoreWarning();
+  updateConfirmBtn();
 }
 
 function updateRestoreWarning() {
@@ -653,6 +672,12 @@ function updateRestoreWarning() {
     w.className = 'modal-warning';
     w.innerHTML = '⚠ &nbsp;The VM will be stopped and overwritten. This cannot be undone.';
   }
+}
+
+function updateConfirmBtn() {
+  const btn = document.getElementById('modal-confirm-btn');
+  const selfOk = !_modalState.isSelf || document.getElementById('modal-self-confirm').checked;
+  btn.disabled = !selfOk;
 }
 
 function closeModal() {
