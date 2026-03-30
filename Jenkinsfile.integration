@@ -303,12 +303,18 @@ EOF
                     # When that snapshot is later restored, PBS returns 400 on every
                     # API call because it cannot open the corrupt datastore.
                     echo "Backing up PBS datastore to Google Drive (rclone:gdrive:bu/gui-ci-test)..."
+                    # restic init and backup run directly on the PVE host (not inside LXC 300).
+                    # LXC 300 is unprivileged: root inside the container maps to uid 100000 on
+                    # the host, so the PBS chunk files (owned by host root) appear as nobody and
+                    # are unreadable. Running on the PVE host avoids this UID mapping entirely.
+                    # The restore (in app.py _cloud_restore_cmd) already runs on the PVE host
+                    # via SSH — this keeps backup and restore symmetric.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- bash -c 'RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic init --no-lock 2>&1'" || true
+                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic init --no-lock 2>&1" || true
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl stop proxmox-backup proxmox-backup-proxy"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- bash -c 'RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic backup /mnt/ci-pbs --tag ct-301 --json --no-lock 2>&1 | tail -3'"
+                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic backup /mnt/ci-pbs --tag ct-301 --json --no-lock 2>&1 | tail -3"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl start proxmox-backup proxmox-backup-proxy"
                     # Wait for PBS API to be ready before proceeding to step 3
