@@ -36,16 +36,45 @@ ITEMS = {
         "storage": {"local_used": 100, "local_total": 500, "cloud_used": 0},
         "vms": [
             {"id": 101, "name": "home-vm", "type": "vm", "os": "linux", "status": "running",
+             "template": False,
              "snapshots": [{"backup_time": 1700000000, "date": "2023-11-14 22:13:20",
                             "age": "1h ago", "local": True, "cloud": True,
-                            "incremental": True, "size": "1.2 GB"}]}
+                            "incremental": True, "size": "1.2 GB",
+                            "restic_id": "abc123def456", "restic_short_id": "abc123de"}]}
         ],
         "lxcs": [
             {"id": 104, "name": "home-lxc", "type": "lxc", "os": "linux", "status": "running",
+             "template": False,
              "snapshots": [{"backup_time": 1700000010, "date": "2023-11-14 22:13:30",
                             "age": "1h ago", "local": True, "cloud": True,
-                            "incremental": True, "size": "500 MB"}]}
+                            "incremental": True, "size": "500 MB",
+                            "restic_id": "def456abc789", "restic_short_id": "def456ab"}]}
         ],
+    },
+    # snap-test: three VMs covering local+cloud, local-only, cloud-only
+    "snap-test": {
+        "storage": {"local_used": 50, "local_total": 200, "cloud_used": 0},
+        "vms": [
+            {"id": 501, "name": "both-snap-vm", "type": "vm", "os": "linux",
+             "status": "running", "template": False,
+             "snapshots": [{"backup_time": 1700001000, "date": "2023-11-14 22:16:40",
+                            "age": "1h ago", "local": True, "cloud": True,
+                            "incremental": True, "size": "1.0 GB",
+                            "restic_id": "aaa111bbb222", "restic_short_id": "aaa111bb"}]},
+            {"id": 502, "name": "local-only-vm", "type": "vm", "os": "linux",
+             "status": "stopped", "template": False,
+             "snapshots": [{"backup_time": 1700002000, "date": "2023-11-14 22:33:20",
+                            "age": "2h ago", "local": True, "cloud": False,
+                            "incremental": True, "size": "800 MB",
+                            "restic_id": None, "restic_short_id": None}]},
+            {"id": 503, "name": "cloud-only-vm", "type": "vm", "os": "linux",
+             "status": "stopped", "template": False,
+             "snapshots": [{"backup_time": 1699900000, "date": "2023-11-13 18:26:40",
+                            "age": "26h ago", "local": False, "cloud": True,
+                            "incremental": True, "size": "—",
+                            "restic_id": "ccc333ddd444", "restic_short_id": "ccc333dd"}]},
+        ],
+        "lxcs": [],
     },
     "cabin": {
         "storage": {"local_used": 200, "local_total": 800, "cloud_used": 0},
@@ -99,6 +128,11 @@ class ServerConfig:
     # Per-host overrides (takes precedence over global)
     host_items_delay: dict[str, float] = {}
     host_items_status: dict[str, int] = {}
+    # Job state for /api/job/<id>
+    job_status: str = "done"
+    job_logs: list = None       # None → default
+    job_status_code: int = 200  # HTTP status for /api/job/ responses
+    items_request_count: int = 0  # incremented on each /items hit — for refresh verification
 
 
 cfg = ServerConfig()
@@ -130,8 +164,9 @@ class MockHandler(BaseHTTPRequestHandler):
                 return self._error(cfg.hosts_status)
             return self._json(HOSTS)
 
-        for host_id in ("home", "cabin", "empty", "lxc-only", "no-cloud"):
+        for host_id in ("home", "cabin", "empty", "lxc-only", "no-cloud", "snap-test"):
             if path == f"/api/host/{host_id}/items":
+                cfg.items_request_count += 1
                 delay = cfg.host_items_delay.get(host_id, cfg.items_delay)
                 status = cfg.host_items_status.get(host_id, cfg.items_status)
                 if delay:
@@ -148,6 +183,13 @@ class MockHandler(BaseHTTPRequestHandler):
             if path == f"/api/host/{host_id}/info":
                 return self._json(INFO.get(host_id, INFO["home"]))
 
+        if path.startswith("/api/job/"):
+            if cfg.job_status_code != 200:
+                return self._error(cfg.job_status_code)
+            logs = cfg.job_logs if cfg.job_logs is not None else ["Operation complete."]
+            return self._json({"id": path.split("/")[-1], "status": cfg.job_status,
+                               "logs": logs, "label": "test"})
+
         # Serve frontend
         import os
         frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
@@ -161,6 +203,20 @@ class MockHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+
+        self._error(404)
+
+    def do_POST(self):
+        path = self.path.split("?")[0]
+        # Consume request body
+        length = int(self.headers.get("Content-Length", 0))
+        if length:
+            self.rfile.read(length)
+
+        for host_id in ("home", "cabin"):
+            if path in (f"/api/host/{host_id}/backup/pbs",
+                        f"/api/host/{host_id}/restore"):
+                return self._json({"job_id": "mock-job-1"})
 
         self._error(404)
 
@@ -187,6 +243,10 @@ def reset_server_config():
     cfg.hosts_status = 200
     cfg.host_items_delay = {}
     cfg.host_items_status = {}
+    cfg.job_status = "done"
+    cfg.job_logs = None
+    cfg.job_status_code = 200
+    cfg.items_request_count = 0
     yield
 
 
@@ -229,9 +289,42 @@ def content_text(pg: Page) -> str:
     return pg.locator("#content").inner_text()
 
 
+def expand_vm_card(pg: Page, vmid: int):
+    """Expand the snapshot section of the VM card with the given vmid.
+    Snapshots are collapsed by default (.snapshots { display:none }).
+    """
+    # Find the card whose header contains this vmid's backup-btn, click the expand btn
+    pg.locator(f".backup-btn[data-vmid='{vmid}']").locator(
+        "xpath=ancestor::div[contains(@class,'vm-header')]"
+    ).click()
+    # Wait for snapshots to become visible (any restore button in this card)
+    pg.locator(f".restore-btn[data-vmid='{vmid}']").first.wait_for(
+        state="visible", timeout=5000
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # DEPLOY — the tests that would have caught the actual prod bug
 # ─────────────────────────────────────────────────────────────────────────────
+
+def test_deploy_has_job_modal_elements(mock_server):
+    """Job modal DOM elements must be present in the served HTML."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    for el_id in ("job-modal", "job-log", "job-badge", "job-close-btn", "job-title"):
+        assert f'id="{el_id}"' in html or f"id='{el_id}'" in html, \
+            f"#{el_id} missing from served HTML — job modal not deployed!"
+
+def test_deploy_has_job_functions(mock_server):
+    """openJobModal, closeJobModal, _pollJob must be present in the served HTML."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    for fn in ("openJobModal", "closeJobModal", "_pollJob"):
+        assert fn in html, f"{fn}() missing from served HTML"
+
+def test_deploy_refresh_btn_disable_in_open_job_modal(mock_server):
+    """openJobModal must contain code to disable the refresh button."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "refresh-btn" in html and "disabled" in html, \
+        "refresh-btn disable logic not found in HTML"
 
 def test_deploy_js_has_abort_controller(mock_server):
     """Served index.html must contain AbortController — proves correct file is deployed."""
@@ -264,6 +357,7 @@ REQUIRED_IDS = [
     "content", "hostname-label", "page-subtitle",
     "local-usage", "local-bar", "cloud-usage", "cloud-bar",
     "refresh-btn", "hosts-section",
+    "job-modal", "job-close-btn", "job-badge", "job-log",
 ]
 
 def test_dom_required_elements_exist(page: Page):
@@ -686,6 +780,373 @@ def test_concurrent_backend_cache_shared_not_duplicated(mock_server):
     assert len(results) == 5, f"Not all requests completed: {len(results)}/5"
     for uid, (duration, data) in results.items():
         assert "vms" in data, f"Request {uid} got corrupt data: {str(data)[:100]}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB — backup/restore job modal behaviour
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_job_refresh_btn_disabled_while_modal_open(page: Page):
+    """Refresh button must be disabled while a job modal is open."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Starting..."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    assert page.locator("#refresh-btn").is_disabled(), \
+        "Refresh button should be disabled while job modal is open"
+
+def test_job_refresh_btn_re_enabled_after_close(page: Page):
+    """Refresh button must be re-enabled after the job modal is closed."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Starting..."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.evaluate("closeJobModal()")
+    assert not page.locator("#refresh-btn").is_disabled(), \
+        "Refresh button should be enabled after closing the job modal"
+
+def test_job_close_btn_enabled_when_done(page: Page):
+    """Close button must become enabled once the job reports status 'done'."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled",
+        timeout=6000,
+    )
+    assert not page.locator("#job-close-btn").is_disabled(), \
+        "Close button should be enabled when job is done"
+
+def test_job_close_btn_enabled_when_error(page: Page):
+    """Close button must also be enabled when the job ends with an error."""
+    cfg.job_status = "error"
+    cfg.job_logs = ["ERROR: something went wrong"]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled",
+        timeout=6000,
+    )
+    assert not page.locator("#job-close-btn").is_disabled(), \
+        "Close button should be enabled when job errors"
+
+def test_job_modal_shows_log_lines(page: Page):
+    """Log lines returned by /api/job/ must appear in the job-log div."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Step 1 done", "Step 2 running"]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => document.getElementById('job-log').innerText.includes('Step 1')",
+        timeout=6000,
+    )
+    log_text = page.locator("#job-log").inner_text()
+    assert "Step 1 done" in log_text
+    assert "Step 2 running" in log_text
+
+def test_job_badge_shows_error_status(page: Page):
+    """Job badge text must change to 'error' when job reports error status."""
+    cfg.job_status = "error"
+    cfg.job_logs = ["ERROR: restore failed"]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => document.getElementById('job-badge').textContent === 'error'",
+        timeout=6000,
+    )
+    assert page.locator("#job-badge").inner_text() == "error"
+
+def test_job_badge_shows_done_status(page: Page):
+    """Job badge text must change to 'done' when job completes successfully."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => document.getElementById('job-badge').textContent === 'done'",
+        timeout=6000,
+    )
+    assert page.locator("#job-badge").inner_text() == "done"
+
+def test_job_no_js_errors_open_close(page: Page):
+    """No JS errors when opening and closing the job modal."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Done."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled",
+        timeout=6000,
+    )
+    page.evaluate("closeJobModal()")
+    assert page._js_errors == [], f"JS errors during job modal lifecycle: {page._js_errors}"
+
+def test_job_refresh_btn_enabled_after_done_and_close(page: Page):
+    """Full lifecycle: open → done → close must leave refresh button enabled."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete."]
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled",
+        timeout=6000,
+    )
+    page.evaluate("closeJobModal()")
+    assert not page.locator("#refresh-btn").is_disabled(), \
+        "Refresh button should be enabled after job done + modal closed"
+
+def test_job_triggers_data_refresh_on_done(page: Page):
+    """JS calls refreshData() automatically when job status becomes 'done'.
+    Verified by counting /items requests before and after job completion."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete."]
+    count_before = cfg.items_request_count
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled",
+        timeout=6000,
+    )
+    # Give the async refreshData() fetch a moment to fire
+    page.wait_for_timeout(600)
+    assert cfg.items_request_count > count_before, \
+        "loadData() was not called after job done — refreshData() may be broken"
+
+def test_job_modal_reopen_works_correctly(page: Page):
+    """Open → close → open again: second modal must poll and complete without stale state."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Done."]
+    # First cycle
+    page.evaluate("openJobModal('First', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+    page.evaluate("closeJobModal()")
+    # Second cycle — must work cleanly
+    page.evaluate("openJobModal('Second', 'mock-job-1')")
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+    assert page.locator("#job-badge").inner_text() == "done"
+    assert page._js_errors == [], f"JS errors on second modal open: {page._js_errors}"
+    page.evaluate("closeJobModal()")
+
+def test_job_500_from_endpoint_no_crash_and_refresh_recovers(page: Page):
+    """If /api/job/ returns 500, modal must not crash. After manual close,
+    refresh button is re-enabled and the page still works."""
+    cfg.job_status_code = 500
+    page.evaluate("openJobModal('Test', 'mock-job-1')")
+    # Wait several poll cycles — close button must stay disabled (job never finishes)
+    page.wait_for_timeout(5500)
+    assert page._js_errors == [], f"JS errors on 500 from job endpoint: {page._js_errors}"
+    assert page.locator("#job-close-btn").is_disabled(), \
+        "Close button should stay disabled when job endpoint is unreachable"
+    # Manually close (simulates user giving up)
+    page.evaluate("closeJobModal()")
+    assert not page.locator("#refresh-btn").is_disabled(), \
+        "Refresh button should be re-enabled even after aborting a stuck job"
+    # Page must still function — refresh loads data
+    cfg.job_status_code = 200
+    page.click("#refresh-btn")
+    wait_content(page, "home-vm")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESTORE MODAL — full UI flow and source selection logic
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def snap_test_page(browser, mock_server):
+    """Page loaded with the snap-test host (local+cloud, local-only, cloud-only VMs)."""
+    orig_hosts = HOSTS[:]
+    HOSTS.append({"id": "snap-test", "label": "Snap Test"})
+    ctx = browser.new_context(base_url=mock_server)
+    pg = ctx.new_page()
+    pg._js_errors = []
+    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.goto("/")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText !== 'Loading…'", timeout=10000)
+    pg.click("#nav-snap-test")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText.includes('both-snap-vm')",
+        timeout=10000)
+    yield pg
+    ctx.close()
+    HOSTS[:] = orig_hosts
+
+def test_restore_modal_opens_with_correct_vm_name(page: Page):
+    """Clicking Restore on a snapshot row opens the modal with the correct VM name."""
+    expand_vm_card(page, 101)
+    restore_btn = page.locator(".restore-btn[data-vmid='101']").first
+    restore_btn.click()
+    page.wait_for_selector("#modal.open", timeout=5000)
+    subtitle = page.locator("#modal-subtitle").inner_text()
+    assert "home-vm" in subtitle, f"VM name missing from modal subtitle: {subtitle!r}"
+    page.click("button.modal-close")
+
+def test_restore_modal_both_sources_shown_for_local_cloud_snap(page: Page):
+    """Snapshot with local=True and cloud=True must show both Local PBS and cloud options."""
+    expand_vm_card(page, 101)
+    restore_btn = page.locator(".restore-btn[data-vmid='101']").first
+    restore_btn.click()
+    page.wait_for_selector("#modal.open", timeout=5000)
+    assert page.locator(".source-opt[data-source='local']").count() == 1, \
+        "Local PBS source option missing"
+    assert page.locator(".source-opt[data-source='cloud']").count() == 1, \
+        "Cloud source option missing"
+    page.click("button.modal-close")
+
+def test_restore_modal_only_local_source_for_local_only_snap(snap_test_page: Page):
+    """Snapshot with local=True, cloud=False must show only Local PBS option."""
+    expand_vm_card(snap_test_page, 502)
+    restore_btn = snap_test_page.locator(".restore-btn[data-vmid='502']").first
+    restore_btn.click()
+    snap_test_page.wait_for_selector("#modal.open", timeout=5000)
+    assert snap_test_page.locator(".source-opt[data-source='local']").count() == 1
+    assert snap_test_page.locator(".source-opt[data-source='cloud']").count() == 0, \
+        "Cloud source must not appear for local-only snapshot"
+    snap_test_page.click("button.modal-close")
+
+def test_restore_modal_only_cloud_source_for_cloud_only_snap(snap_test_page: Page):
+    """Snapshot with local=False, cloud=True must show only cloud option."""
+    expand_vm_card(snap_test_page, 503)
+    restore_btn = snap_test_page.locator(".restore-btn[data-vmid='503']").first
+    restore_btn.click()
+    snap_test_page.wait_for_selector("#modal.open", timeout=5000)
+    assert snap_test_page.locator(".source-opt[data-source='cloud']").count() == 1
+    assert snap_test_page.locator(".source-opt[data-source='local']").count() == 0, \
+        "Local PBS source must not appear for cloud-only snapshot"
+    snap_test_page.click("button.modal-close")
+
+def test_restore_modal_cloud_warning_changes_on_source_switch(page: Page):
+    """Selecting cloud source must show the datastore-overwrite warning."""
+    expand_vm_card(page, 101)
+    restore_btn = page.locator(".restore-btn[data-vmid='101']").first
+    restore_btn.click()
+    page.wait_for_selector("#modal.open", timeout=5000)
+    # Default (local) — standard warning
+    local_warn = page.locator("#modal-warning").inner_text()
+    assert "datastore" not in local_warn.lower(), \
+        f"Local warning should not mention datastore: {local_warn!r}"
+    # Switch to cloud
+    page.locator(".source-opt[data-source='cloud']").click()
+    cloud_warn = page.locator("#modal-warning").inner_text()
+    assert "datastore" in cloud_warn.lower() or "overwrite" in cloud_warn.lower(), \
+        f"Cloud warning must mention datastore overwrite: {cloud_warn!r}"
+    page.click("button.modal-close")
+
+def test_restore_modal_backup_after_unchecked_by_default(page: Page):
+    """run-backup-after checkbox must be unchecked when modal opens."""
+    expand_vm_card(page, 101)
+    restore_btn = page.locator(".restore-btn[data-vmid='101']").first
+    restore_btn.click()
+    page.wait_for_selector("#modal.open", timeout=5000)
+    assert not page.locator("#modal-backup-after").is_checked(), \
+        "run-backup-after checkbox should be unchecked by default"
+    page.click("button.modal-close")
+
+def test_restore_modal_full_flow_local(page: Page):
+    """Full flow: click Restore → select local → confirm → job modal shows done."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Restore complete."]
+    expand_vm_card(page, 101)
+    restore_btn = page.locator(".restore-btn[data-vmid='101']").first
+    restore_btn.click()
+    page.wait_for_selector("#modal.open", timeout=5000)
+    page.locator(".source-opt[data-source='local']").click()
+    page.click("#modal-confirm-btn")
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    assert page.locator("#job-title").inner_text() == "Restore"
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+    assert page.locator("#job-badge").inner_text() == "done"
+    assert page._js_errors == []
+    page.evaluate("closeJobModal()")
+
+def test_restore_modal_full_flow_cloud(page: Page):
+    """Full flow: click Restore → select cloud → confirm → job modal shows done."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Restore complete."]
+    expand_vm_card(page, 101)
+    restore_btn = page.locator(".restore-btn[data-vmid='101']").first
+    restore_btn.click()
+    page.wait_for_selector("#modal.open", timeout=5000)
+    page.locator(".source-opt[data-source='cloud']").click()
+    page.click("#modal-confirm-btn")
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+    assert page.locator("#job-badge").inner_text() == "done"
+    assert page._js_errors == []
+    page.evaluate("closeJobModal()")
+
+def test_restore_modal_failed_job_shows_error_badge(page: Page):
+    """If restore job ends with error, modal badge must show 'error'."""
+    cfg.job_status = "error"
+    cfg.job_logs = ["ERROR: SSH connection refused"]
+    expand_vm_card(page, 101)
+    restore_btn = page.locator(".restore-btn[data-vmid='101']").first
+    restore_btn.click()
+    page.wait_for_selector("#modal.open", timeout=5000)
+    page.click("#modal-confirm-btn")
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    page.wait_for_function(
+        "() => document.getElementById('job-badge').textContent === 'error'", timeout=6000)
+    log_text = page.locator("#job-log").inner_text()
+    assert "ERROR" in log_text, f"Error message not shown in log: {log_text!r}"
+    page.evaluate("closeJobModal()")
+
+def test_restore_no_js_errors_full_flow(page: Page):
+    """No JS errors across the entire restore flow: open → confirm → done → close."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Restore complete."]
+    expand_vm_card(page, 101)
+    restore_btn = page.locator(".restore-btn[data-vmid='101']").first
+    restore_btn.click()
+    page.wait_for_selector("#modal.open", timeout=5000)
+    page.click("#modal-confirm-btn")
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+    page.evaluate("closeJobModal()")
+    assert page._js_errors == [], f"JS errors during restore flow: {page._js_errors}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BACKUP NOW — on-demand backup button
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_backup_now_opens_job_modal_with_correct_title(page: Page):
+    """Confirming 'Backup now' must open job modal titled 'PBS Backup'."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete."]
+    backup_btn = page.locator(".backup-btn[data-vmid='101']").first
+    backup_btn.wait_for(state="visible", timeout=5000)
+    page.on("dialog", lambda d: d.accept())
+    backup_btn.click()
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    assert page.locator("#job-title").inner_text() == "PBS Backup"
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+    assert page.locator("#job-badge").inner_text() == "done"
+    assert page._js_errors == []
+    page.evaluate("closeJobModal()")
+
+def test_backup_now_cancel_does_not_open_job_modal(page: Page):
+    """Cancelling the confirm dialog must NOT open the job modal."""
+    backup_btn = page.locator(".backup-btn[data-vmid='101']").first
+    backup_btn.wait_for(state="visible", timeout=5000)
+    page.on("dialog", lambda d: d.dismiss())
+    backup_btn.click()
+    # Modal must remain closed
+    page.wait_for_timeout(500)
+    assert not page.locator("#job-modal").evaluate(
+        "el => el.classList.contains('open')"
+    ), "Job modal must not open when confirm is cancelled"
+    assert page._js_errors == []
+
+def test_backup_now_refresh_btn_disabled_during_job(page: Page):
+    """Refresh button must be disabled while backup job modal is open."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Starting backup..."]
+    backup_btn = page.locator(".backup-btn[data-vmid='101']").first
+    backup_btn.wait_for(state="visible", timeout=5000)
+    page.on("dialog", lambda d: d.accept())
+    backup_btn.click()
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    assert page.locator("#refresh-btn").is_disabled(), \
+        "Refresh button should be disabled while backup job modal is open"
+    page.evaluate("closeJobModal()")
 
 
 def test_concurrent_no_js_errors_under_load(mock_server):

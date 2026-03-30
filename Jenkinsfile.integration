@@ -300,6 +300,12 @@ EOF
                     # via SSH — this keeps backup and restore symmetric.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic init --no-lock 2>&1" || true
+                    # Forget all previous ct-301 snapshots before taking a fresh one.
+                    # Old snapshots from prior CI runs may be corrupt (taken inside an
+                    # unprivileged container) and the GUI picks the oldest cloud-only
+                    # entry — which would be one of those corrupt snapshots.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic forget --tag ct-301 --keep-last 0 --prune --no-lock 2>&1" || true
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl stop proxmox-backup proxmox-backup-proxy"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \

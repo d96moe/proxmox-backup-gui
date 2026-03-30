@@ -192,7 +192,6 @@ class ResticClient:
             log,
         )
 
-
     def get_version(self) -> str:
         try:
             stdout = self._ssh_run("restic version", timeout=10)

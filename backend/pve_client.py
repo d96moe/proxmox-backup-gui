@@ -33,6 +33,15 @@ class PVEClient:
         resp.raise_for_status()
         return resp.json().get("data", [])
 
+    def _post(self, path: str, **data) -> dict:
+        resp = self._session.post(f"{self._base}/api2/json{path}", json=data)
+        resp.raise_for_status()
+        return resp.json().get("data", {})
+
+    def get_nodes(self) -> list[str]:
+        nodes = self._get("/nodes")
+        return [n["node"] for n in nodes]
+
     def get_vms_and_lxcs(self) -> dict[int, dict]:
         """Returns {vmid: {name, type, os, status}} for all nodes."""
         nodes = self._get("/nodes")
@@ -55,6 +64,75 @@ class PVEClient:
                     "status": ct.get("status", "unknown"),
                 }
         return result
+
+    def backup_vm(self, vmid: int, vm_type: str, storage: str, node: str) -> str:
+        """Trigger vzdump backup of a single VM/LXC to PBS storage. Returns PVE task UPID."""
+        resp = self._post(
+            f"/nodes/{node}/vzdump",
+            vmid=str(vmid),
+            storage=storage,
+            mode="snapshot",
+            compress="zstd",
+            remove=0,
+        )
+        return resp  # UPID string
+
+    def restore_vm(
+        self,
+        vmid: int,
+        vm_type: str,
+        backup_time_iso: str,
+        storage_id: str,
+        node: str,
+        pbs_datastore: str,
+    ) -> str:
+        """Restore VM/LXC from PBS snapshot. Returns PVE task UPID."""
+        archive = f"{storage_id}:backup/{vm_type}/{vmid}/{backup_time_iso}"
+        if vm_type == "ct":
+            resp = self._post(
+                f"/nodes/{node}/lxc",
+                vmid=vmid,
+                ostemplate=archive,
+                restore=1,
+                force=1,
+            )
+        else:
+            resp = self._post(
+                f"/nodes/{node}/qemu",
+                vmid=vmid,
+                archive=archive,
+                force=1,
+            )
+        return resp  # UPID string
+
+    def stop_vm(self, vmid: int, vm_type: str, node: str) -> None:
+        """Stop a running VM/LXC. Silently succeeds if already stopped."""
+        import time
+        endpoint = (f"/nodes/{node}/lxc/{vmid}/status/stop" if vm_type == "ct"
+                    else f"/nodes/{node}/qemu/{vmid}/status/stop")
+        try:
+            upid = self._post(endpoint)
+            if upid:
+                self.wait_for_task(node, upid, lambda _: None, poll_interval=2)
+        except Exception:
+            pass  # Already stopped or other non-critical error
+
+    def wait_for_task(self, node: str, upid: str, log: callable, poll_interval: int = 3) -> bool:
+        """Poll a PVE task until completion. Returns True on success."""
+        import time
+        from urllib.parse import quote
+        encoded = quote(upid, safe="")
+        while True:
+            status = self._get(f"/nodes/{node}/tasks/{encoded}/status")
+            if status.get("status") == "stopped":
+                exit_status = status.get("exitstatus", "unknown")
+                if exit_status == "OK":
+                    log(f"Task completed: {exit_status}")
+                    return True
+                else:
+                    log(f"Task failed: {exit_status}")
+                    return False
+            time.sleep(poll_interval)
 
 
 def _guess_os(name: str) -> str:
