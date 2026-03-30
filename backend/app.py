@@ -440,12 +440,14 @@ def restore(host_id: str):
             restic._ssh_run(
                 "systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true"
             )
-            log("Running restic restore...")
-            restic.restore_datastore(restic_id, log)
-            log("Starting PBS...")
-            restic._ssh_run(
-                "systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true"
-            )
+            try:
+                log("Running restic restore...")
+                restic.restore_datastore(restic_id, log)
+            finally:
+                log("Starting PBS...")
+                restic._ssh_run(
+                    "systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true"
+                )
             log("Restic restore complete. PBS restarted.")
             # Poll until PBS is ready — systemctl start returns before PBS is
             # fully initialised and able to serve API requests (typically 5-30s).

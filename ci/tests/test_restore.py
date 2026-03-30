@@ -313,8 +313,8 @@ def test_cloud_restore_ui(real_page, host_id, items):
     # Expand the VM card so the restore buttons inside .snapshots become visible
     real_page.locator(f".vm-card:has(.backup-btn[data-vmid='{vmid}'])").locator(".vm-header").click()
 
-    # Click first Restore button for this VM
-    restore_btn = real_page.locator(f".restore-btn[data-vmid='{vmid}']").first
+    # Click first Restore button for this VM that has cloud coverage
+    restore_btn = real_page.locator(f".restore-btn[data-vmid='{vmid}'][data-cloud='true']").first
     restore_btn.wait_for(timeout=5000)
     restore_btn.click()
 
