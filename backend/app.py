@@ -412,9 +412,10 @@ def backup_pbs(host_id: str):
         log(f"Triggering PBS backup: {vm_type}/{vmid} on node {node}")
         upid = pve.backup_vm(vmid, vm_type, host.pbs_storage_id, node)
         log(f"Task started: {upid}")
-        ok = pve.wait_for_task(node, upid, log)
-        if not ok:
-            raise RuntimeError("PBS backup task failed")
+        if isinstance(upid, str) and upid.startswith("UPID:"):
+            ok = pve.wait_for_task(node, upid, log)
+            if not ok:
+                raise RuntimeError("PBS backup task failed")
         log("Backup complete.")
         _cache.pop(f"items:{host_id}", None)
 

@@ -4,8 +4,8 @@
 // Runtime : ~12-18 min
 //
 // Spins up a fresh clone of template 9092 (PVE + backup-gui LXC + minimal PBS),
-// pushes latest code, seeds backup data (PBS + cloud), runs Playwright against
-// the REAL Flask backend, then destroys the VM.
+// pushes latest code, seeds backup data (PBS + cloud via real Google Drive),
+// runs Playwright against the REAL Flask backend, then destroys the VM.
 //
 // Nothing touches prod (LXC 199).
 // =============================================================================
@@ -92,11 +92,12 @@ pipeline {
                     # cloud-init maps the hostname to 127.0.1.1 (loopback).
                     # pve-cluster (pmxcfs) refuses to start on a loopback address,
                     # so we append a non-loopback entry before restarting it.
-                    echo "Fixing /etc/hosts for pve-cluster..."
+                    echo "Fixing /etc/hosts and DNS for pve-cluster..."
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} << 'FIXHOSTS'
 sed -i '/^127[.]0[.]1[.]1/d' /etc/hosts
 echo "192.168.0.250 $(hostname)" >> /etc/hosts
-# Ensure DNS is set (template may have it but be explicit)
+# Override systemd-resolved symlink with static DNS (rclone needs internet)
+rm -f /etc/resolv.conf
 echo "nameserver 8.8.8.8" > /etc/resolv.conf
 systemctl reset-failed pve-cluster
 systemctl start pve-cluster || true
@@ -110,45 +111,96 @@ FIXHOSTS
                     done
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "pct list" || { echo "ERROR: PVE not ready"; exit 1; }
 
+                    # Get PBS TLS fingerprint dynamically (cert regenerated on each fresh VM)
+                    PBS_FP=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "proxmox-backup-manager cert info 2>&1 | grep -i 'fingerprint.*sha256' | awk '{print \$NF}'")
+                    echo "PBS fingerprint: ${PBS_FP}"
+
+                    # Register PBS datastore as PVE storage so vzdump can use it
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "pvesm add pbs pbs-local --server 10.10.0.1 --datastore ci-pbs \
+                         --username gui-test@pbs --password gui-test-pw \
+                         --fingerprint ${PBS_FP}"
+                    echo "PBS storage pbs-local added"
+
                     # Grant gui-test@pbs DatastoreAdmin on ci-pbs so the backend
                     # can list snapshots. Template starts with no ACLs configured.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "proxmox-backup-manager acl update /datastore/ci-pbs DatastoreAdmin --auth-id gui-test@pbs"
                     echo "PBS ACL configured"
 
-                    # Set up LXC 300 bind mount and create LXC 301 as a restore test target.
-                    # Cloud restore uses a local restic repo on the shared PBS mount so no
-                    # rclone or internet access is required in CI.
-                    # Tests restore ct/301 (not ct/300) to avoid self-restore deadlock.
+                    # ---------------------------------------------------------------
+                    # STEP_B: rclone.conf, binaries, SSH key, LXC 301, hosts.json
+                    # ---------------------------------------------------------------
+                    # Relay rclone.conf + binaries from prod PVE through Jenkins to CI VM.
+                    # This keeps credentials fresh (no hardcoding in Jenkinsfile) and
+                    # works even if the user rotates Google Drive tokens.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} \
+                        "cat /root/.config/rclone/rclone.conf" | \
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "mkdir -p /root/.config/rclone && cat > /root/.config/rclone/rclone.conf"
+                    echo "rclone.conf deployed to CI VM PVE host"
+
+                    # Relay rclone + restic binaries from prod PVE to CI VM.
+                    # Template 9092 may not have them; always relay for a consistent version.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "cat /usr/bin/rclone" | \
+                        ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "cat > /usr/local/bin/rclone && chmod +x /usr/local/bin/rclone"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "cat /usr/bin/restic" | \
+                        ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "cat > /usr/local/bin/restic && chmod +x /usr/local/bin/restic"
+                    echo "rclone + restic deployed to CI VM PVE host"
+
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'STEP_B'
 set -e
-# Stop LXC 300 so we can set bind mounts and clone it
+# Stop LXC 300 so we can clone it and set bind mounts
 pct stop 300 2>/dev/null || true
 # Clone LXC 300 → LXC 301 as restore test target (stays stopped, never conflicts)
 pct clone 300 301 --full 1
-# Bind-mount PBS datastore into LXC 300 so restic can access it directly
+# Bind-mount PBS datastore into LXC 300 so restic can access it for backup
 pct set 300 --mp0 /mnt/ci-pbs,mp=/mnt/ci-pbs
 pct start 300
 sleep 5
-# Create local restic repo directory inside the shared PBS mount.
-# This path is accessible from BOTH LXC 300 (/mnt/ci-pbs/.restic-ci-repo)
-# and the CI VM PVE host (/mnt/ci-pbs/.restic-ci-repo) — no rclone needed.
-mkdir -p /mnt/ci-pbs/.restic-ci-repo
-# Update hosts.json: use local restic repo path instead of rclone:gdrive
+
+# Push rclone + restic into LXC 300 (template may not have them)
+pct push 300 /usr/local/bin/rclone /usr/local/bin/rclone
+pct push 300 /usr/local/bin/restic /usr/local/bin/restic
+pct exec 300 -- chmod +x /usr/local/bin/rclone /usr/local/bin/restic
+
+# Push rclone.conf into LXC 300
+pct exec 300 -- mkdir -p /root/.config/rclone
+pct push 300 /root/.config/rclone/rclone.conf /root/.config/rclone/rclone.conf
+
+# Ensure LXC 300 has an SSH key for cloud restore (SSH to PVE host)
+pct exec 300 -- bash -c '
+    mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    [ -f /root/.ssh/id_ed25519 ] || ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N ""
+'
+# Authorize LXC 300 public key on PVE host
+LXC300_PUBKEY=$(pct exec 300 -- cat /root/.ssh/id_ed25519.pub)
+grep -qF "${LXC300_PUBKEY}" /root/.ssh/authorized_keys 2>/dev/null || \
+    echo "${LXC300_PUBKEY}" >> /root/.ssh/authorized_keys
+
+# Update hosts.json: use rclone:gdrive for cloud backup and restore
 pct exec 300 -- python3 -c "
 import json
 with open('/opt/proxmox-backup-gui/backend/hosts.json') as f: h=json.load(f)
-h[0]['restic_repo'] = '/mnt/ci-pbs/.restic-ci-repo'
-h[0]['restic_password'] = 'ci-test'
-h[0]['restic_env'] = {}
+h[0]['restic_repo'] = 'rclone:gdrive:bu/gui-ci-test'
+h[0]['restic_password'] = 'X5-erkses2'
+h[0]['restic_env'] = {'RCLONE_CONFIG': '/root/.config/rclone/rclone.conf'}
+h[0]['pbs_storage_id'] = 'pbs-local'
+h[0]['pbs_datastore_path'] = '/mnt/ci-pbs'
+h[0]['pve_ssh_host'] = '10.10.0.1'
 open('/opt/proxmox-backup-gui/backend/hosts.json','w').write(json.dumps(h))
-print('STEP_B: local restic repo configured')
+print('STEP_B: hosts.json updated with rclone:gdrive config')
 "
+
 # Refresh SSH known_hosts for 10.10.0.1 in LXC 300
-pct exec 300 -- bash -c 'ssh-keygen -f /root/.ssh/known_hosts -R 10.10.0.1 2>/dev/null; ssh-keyscan -t ed25519 10.10.0.1 >> /root/.ssh/known_hosts 2>/dev/null' || true
+pct exec 300 -- bash -c '
+    ssh-keygen -f /root/.ssh/known_hosts -R 10.10.0.1 2>/dev/null || true
+    ssh-keyscan -t ed25519 10.10.0.1 >> /root/.ssh/known_hosts 2>/dev/null || true
+'
 echo "STEP_B: done"
 STEP_B
-                    echo "LXC 301 created and restic configured"
+                    echo "LXC 301 created, rclone/restic installed, SSH key authorised"
                 '''
             }
         }
@@ -237,15 +289,15 @@ EOF
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup failed"; exit 1; }
                     done
 
-                    # Step 2: Restic backup of PBS datastore → creates cloud snapshot.
-                    # Uses local repo at /mnt/ci-pbs/.restic-ci-repo (shared via bind mount
-                    # between LXC 300 and CI VM host — no rclone or internet required).
+                    # Step 2: Restic backup of PBS datastore to Google Drive.
                     # Tagged ct-301 so restic_client.py maps it to LXC 301.
-                    echo "Initialising local restic repo and backing up PBS datastore..."
+                    # The repo already exists (created from template or prior run);
+                    # 'init' is a no-op if already initialised (exits 0 or 10).
+                    echo "Backing up PBS datastore to Google Drive (rclone:gdrive:bu/gui-ci-test)..."
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- bash -c 'RESTIC_PASSWORD=ci-test RESTIC_REPOSITORY=/mnt/ci-pbs/.restic-ci-repo restic init 2>&1'"
+                        "pct exec 300 -- bash -c 'RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic init --no-lock 2>&1'" || true
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- bash -c 'RESTIC_PASSWORD=ci-test RESTIC_REPOSITORY=/mnt/ci-pbs/.restic-ci-repo restic backup /mnt/ci-pbs --exclude /mnt/ci-pbs/.restic-ci-repo --tag ct-301 --json 2>&1 | tail -3'"
+                        "pct exec 300 -- bash -c 'RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic backup /mnt/ci-pbs --tag ct-301 --json --no-lock 2>&1 | tail -3'"
                     echo "Restic backup complete"
 
                     # Step 3: PBS backup #2 — second local snapshot needed so that after
