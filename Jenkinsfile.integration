@@ -307,13 +307,14 @@ EOF
                     # restic forget <id>... removes specific snapshots without needing a policy.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'FORGET_OLD'
 RESTIC_ENV="RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf"
-IDS=$(eval "$RESTIC_ENV restic snapshots --tag ct-301 --json --no-lock 2>/dev/null" | \
+# Forget ALL snapshots (tagged or not) — some old ones have no tag and survive --tag filter
+IDS=$(eval "$RESTIC_ENV restic snapshots --json --no-lock 2>/dev/null" | \
     python3 -c "import json,sys; snaps=json.load(sys.stdin); print(' '.join(s['id'] for s in snaps))" 2>/dev/null || true)
 if [ -n "$IDS" ]; then
-    echo "Forgetting old ct-301 snapshots: $IDS"
+    echo "Forgetting all snapshots: $IDS"
     eval "$RESTIC_ENV restic forget $IDS --prune 2>&1"
 else
-    echo "No existing ct-301 snapshots to forget"
+    echo "No existing snapshots to forget"
 fi
 FORGET_OLD
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
