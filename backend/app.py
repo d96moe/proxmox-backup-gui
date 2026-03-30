@@ -488,11 +488,21 @@ def restore(host_id: str):
             log(f"Connecting to PVE host {ssh_host} via SSH...")
             _ssh_stream(ssh_host, _cloud_restore_cmd(host, restic_id), log)
             log("Restic restore complete. PBS restarted.")
-            # Give PBS a moment to initialize
-            time.sleep(5)
-            # Use latest PBS snapshot for this VM after datastore restore
+            # Poll until PBS is ready — systemctl start returns before PBS is
+            # fully initialised and able to serve API requests (typically 5-30s).
             pbs = PBSClient(host)
-            snaps = pbs.get_snapshots()
+            snaps = None
+            for attempt in range(1, 25):
+                try:
+                    snaps = pbs.get_snapshots()
+                    log(f"PBS ready after {attempt * 5}s.")
+                    break
+                except Exception as e:
+                    log(f"PBS not ready yet (attempt {attempt}/24): {e}")
+                    time.sleep(5)
+            if snaps is None:
+                raise RuntimeError("PBS did not become ready within 120s after restic restore")
+            # Use latest PBS snapshot for this VM after datastore restore
             vm_snaps = next(
                 (g["snapshots"] for g in snaps
                  if g["pve_id"] == vmid and g["backup_type"] == vm_type), []
