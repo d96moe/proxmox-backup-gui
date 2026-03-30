@@ -296,12 +296,30 @@ EOF
                     # Tagged ct-301 so restic_client.py maps it to LXC 301.
                     # The repo already exists (created from template or prior run);
                     # 'init' is a no-op if already initialised (exits 0 or 10).
+                    #
+                    # IMPORTANT: PBS must be stopped before the restic snapshot.
+                    # Taking a snapshot of a live PBS datastore captures lock files and
+                    # partially-written chunks, producing an inconsistent backup.
+                    # When that snapshot is later restored, PBS returns 400 on every
+                    # API call because it cannot open the corrupt datastore.
                     echo "Backing up PBS datastore to Google Drive (rclone:gdrive:bu/gui-ci-test)..."
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "pct exec 300 -- bash -c 'RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic init --no-lock 2>&1'" || true
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "systemctl stop proxmox-backup proxmox-backup-proxy"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "pct exec 300 -- bash -c 'RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic backup /mnt/ci-pbs --tag ct-301 --json --no-lock 2>&1 | tail -3'"
-                    echo "Restic backup complete"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "systemctl start proxmox-backup proxmox-backup-proxy"
+                    # Wait for PBS API to be ready before proceeding to step 3
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'WAITPBS'
+for i in $(seq 1 24); do
+    proxmox-backup-manager datastore list --output-format json >/dev/null 2>&1 && { echo "PBS ready"; break; }
+    echo "  waiting for PBS... ($i/24)"
+    sleep 5
+done
+WAITPBS
+                    echo "Restic backup complete (PBS stopped during snapshot for consistency)"
 
                     # Step 3: PBS backup #2 — second local snapshot needed so that after
                     # we delete PBS#1 the restic snapshot (from Step 2) is older than
