@@ -16,7 +16,7 @@ import json
 import threading
 import time
 import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
 from playwright.async_api import async_playwright
@@ -227,7 +227,7 @@ class MockHandler(BaseHTTPRequestHandler):
 
 @pytest.fixture(scope="session")
 def mock_server():
-    server = HTTPServer(("127.0.0.1", 0), MockHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MockHandler)
     port = server.server_address[1]
     threading.Thread(target=server.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{port}"

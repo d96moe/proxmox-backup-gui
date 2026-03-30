@@ -70,6 +70,8 @@ class PVEClient:
         params: dict = dict(storage=storage, mode="snapshot", compress="zstd", remove=0)
         if vmid:
             params["vmid"] = str(vmid)
+        else:
+            params["all"] = 1
         resp = self._post(f"/nodes/{node}/vzdump", **params)
         return resp  # UPID string
 
