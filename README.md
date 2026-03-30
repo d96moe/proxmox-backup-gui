@@ -11,6 +11,8 @@ Shows per-VM backup status, local/cloud coverage, storage usage, and historical 
 - **Cloud-only snapshots** — shows older restic backups that no longer exist locally
 - **Storage meters** — PBS local usage and Google Drive family quota
 - **Backup folder size** — actual restic repo size via `rclone size`
+- **Backup now** — trigger a PBS backup of any VM/LXC directly from the GUI; live log in job modal
+- **Restore** — restore any VM/LXC from a PBS snapshot (local) or from a restic snapshot (cloud); restic operations run on the PVE host via SSH, never inside the GUI container
 - **Multi-host** — configure multiple PVE/PBS hosts in `hosts.json`
 - **HA integration** — `/api/host/<id>/ha/sensors` endpoint for the [proxmox-backup-ha](https://github.com/d96moe/proxmox-backup-ha) integration
 
@@ -85,9 +87,21 @@ Edit `/opt/proxmox-backup-gui/backend/hosts.json` on the LXC:
 | `GET /api/host/<id>/ha/sensors` | Flat sensor dict for Home Assistant |
 | `GET /api/host/<id>/info` | PBS and restic version info |
 
+## CI & Testing
+
+See [ci/README.md](ci/README.md) for the full CI setup — two Jenkins pipelines (fast mock tests on every push, nightly integration tests against a real Proxmox VM).
+
 ## Restic conflict avoidance
 
 The GUI uses `rclone lsjson locks/` to check if a restic backup is in progress before making restic calls. Locks older than 8 hours are treated as stale (from crashed backups) and ignored.
+
+## Roadmap
+
+- **Authentication** — login page with hashed credentials; currently the GUI is open to anyone who can reach the LXC
+- **VM/LXC backup mask** — per-VM include/exclude toggles so not every container is backed up to cloud
+- **Prune / retention settings** — UI for restic `--keep-last / --keep-daily / --keep-weekly` etc., written to PVE host config via SSH
+- **Backup scheduler** — view and trigger the backup schedule that runs on the PVE host (systemd timer / cron); currently schedule is configured statically outside the GUI
+- **Delete backup (cloud)** — guided workflow to remove a specific VM's backup from the restic repo: restore full datastore → delete from PBS → re-backup → forget old snapshot. Expensive but correct given the whole-datastore restic architecture.
 
 ## Related
 
