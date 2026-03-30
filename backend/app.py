@@ -126,12 +126,17 @@ def get_items(host_id: str):
         snap_map: dict[int, list] = {}
         for group in pbs_snaps:
             vid = group["pve_id"]
-            entries = restic_by_vm.get(vid, [])
-            latest_restic = max([e["ts"] for e in entries] + [untagged_latest], default=0)
+            all_entries = sorted(
+                restic_by_vm.get(vid, []) + untagged_snaps,
+                key=lambda e: e["ts"], reverse=True,
+            )
             for snap in group["snapshots"]:
                 snap["local"] = True
-                if latest_restic > snap["backup_time"]:
+                covering = next((e for e in all_entries if e["ts"] > snap["backup_time"]), None)
+                if covering:
                     snap["cloud"] = True
+                    snap["restic_id"] = covering.get("id")
+                    snap["restic_short_id"] = covering.get("short_id")
             snap_map.setdefault(vid, []).extend(group["snapshots"])
 
         # Add cloud-only restic snapshots (contain PBS snapshots pruned locally)
