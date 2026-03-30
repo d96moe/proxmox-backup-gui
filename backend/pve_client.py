@@ -67,14 +67,10 @@ class PVEClient:
 
     def backup_vm(self, vmid: int, vm_type: str, storage: str, node: str) -> str:
         """Trigger vzdump backup of a single VM/LXC to PBS storage. Returns PVE task UPID."""
-        resp = self._post(
-            f"/nodes/{node}/vzdump",
-            vmid=str(vmid),
-            storage=storage,
-            mode="snapshot",
-            compress="zstd",
-            remove=0,
-        )
+        params: dict = dict(storage=storage, mode="snapshot", compress="zstd", remove=0)
+        if vmid:
+            params["vmid"] = str(vmid)
+        resp = self._post(f"/nodes/{node}/vzdump", **params)
         return resp  # UPID string
 
     def restore_vm(
