@@ -158,19 +158,8 @@ set -e
 pct stop 300 2>/dev/null || true
 # Clone LXC 300 → LXC 301 as restore test target (stays stopped, never conflicts)
 pct clone 300 301 --full 1
-# Bind-mount PBS datastore into LXC 300 so restic can access it for backup
-pct set 300 --mp0 /mnt/ci-pbs,mp=/mnt/ci-pbs
 pct start 300
 sleep 5
-
-# Push rclone + restic into LXC 300 (template may not have them)
-pct push 300 /usr/local/bin/rclone /usr/local/bin/rclone
-pct push 300 /usr/local/bin/restic /usr/local/bin/restic
-pct exec 300 -- chmod +x /usr/local/bin/rclone /usr/local/bin/restic
-
-# Push rclone.conf into LXC 300
-pct exec 300 -- mkdir -p /root/.config/rclone
-pct push 300 /root/.config/rclone/rclone.conf /root/.config/rclone/rclone.conf
 
 # Ensure LXC 300 has an SSH key for cloud restore (SSH to PVE host)
 pct exec 300 -- bash -c '
