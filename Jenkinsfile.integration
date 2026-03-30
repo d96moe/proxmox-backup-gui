@@ -116,35 +116,39 @@ FIXHOSTS
                         "proxmox-backup-manager acl update /datastore/ci-pbs DatastoreAdmin --auth-id gui-test@pbs"
                     echo "PBS ACL configured"
 
-                    # Copy fresh rclone.conf from PVE host to CI VM and into LXC 300.
-                    # The rclone OAuth token is refreshed automatically but copying fresh
-                    # ensures we always start with a valid access token.
-                    echo "Deploying rclone.conf..."
-                    # Step A: pipe rclone.conf to CI VM PVE root (LXC 300 not yet started)
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} cat /root/.config/rclone/rclone.conf | \
-                        ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "cat > /tmp/rclone.conf && mkdir -p /root/.config/rclone && cp /tmp/rclone.conf /root/.config/rclone/rclone.conf && echo nameserver 8.8.8.8 > /etc/resolv.conf"
-                    # Step B: bind-mount PBS datastore into LXC 300 so restic can back it
-                    # up from inside (rclone is installed inside LXC 300, not on PVE host).
-                    # Requires stop → set → start because pct set needs container stopped.
+                    # Set up LXC 300 bind mount and create LXC 301 as a restore test target.
+                    # Cloud restore uses a local restic repo on the shared PBS mount so no
+                    # rclone or internet access is required in CI.
+                    # Tests restore ct/301 (not ct/300) to avoid self-restore deadlock.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'STEP_B'
 set -e
+# Stop LXC 300 so we can set bind mounts and clone it
 pct stop 300 2>/dev/null || true
+# Clone LXC 300 → LXC 301 as restore test target (stays stopped, never conflicts)
+pct clone 300 301 --full 1
+# Bind-mount PBS datastore into LXC 300 so restic can access it directly
 pct set 300 --mp0 /mnt/ci-pbs,mp=/mnt/ci-pbs
 pct start 300
 sleep 5
-pct exec 300 -- mkdir -p /root/.config/rclone
-pct push 300 /tmp/rclone.conf /root/.config/rclone/rclone.conf
-pct exec 300 -- bash -c 'echo nameserver 8.8.8.8 > /etc/resolv.conf'
-# Pull rclone binary from LXC 300 to PVE host so restic can call it during
-# cloud restore (app.py SSHes to this host and runs restic restore there).
-pct pull 300 /usr/local/bin/rclone /usr/local/bin/rclone
-chmod +x /usr/local/bin/rclone
-# Clear stale host key for 10.10.0.1 in LXC 300 (each CI VM clone gets a new
-# SSH host key; the template bakes in the key from the original build).
+# Create local restic repo directory inside the shared PBS mount.
+# This path is accessible from BOTH LXC 300 (/mnt/ci-pbs/.restic-ci-repo)
+# and the CI VM PVE host (/mnt/ci-pbs/.restic-ci-repo) — no rclone needed.
+mkdir -p /mnt/ci-pbs/.restic-ci-repo
+# Update hosts.json: use local restic repo path instead of rclone:gdrive
+pct exec 300 -- python3 -c "
+import json
+with open('/opt/proxmox-backup-gui/backend/hosts.json') as f: h=json.load(f)
+h[0]['restic_repo'] = '/mnt/ci-pbs/.restic-ci-repo'
+h[0]['restic_password'] = 'ci-test'
+h[0]['restic_env'] = {}
+open('/opt/proxmox-backup-gui/backend/hosts.json','w').write(json.dumps(h))
+print('STEP_B: local restic repo configured')
+"
+# Refresh SSH known_hosts for 10.10.0.1 in LXC 300
 pct exec 300 -- bash -c 'ssh-keygen -f /root/.ssh/known_hosts -R 10.10.0.1 2>/dev/null; ssh-keyscan -t ed25519 10.10.0.1 >> /root/.ssh/known_hosts 2>/dev/null' || true
+echo "STEP_B: done"
 STEP_B
-                    echo "rclone.conf deployed"
+                    echo "LXC 301 created and restic configured"
                 '''
             }
         }
@@ -215,11 +219,11 @@ EOF
                 sh '''
                     VM_IP=$(cat vm_ip.txt)
 
-                    # Step 1: PBS backup of LXC 300 — creates a local PBS snapshot so
-                    # test_backup_pbs_api and test_local_restore_ui have data to work with.
-                    echo "Triggering PBS backup of LXC 300..."
+                    # Step 1: PBS backup of LXC 301 (clone of 300, already stopped).
+                    # Tests restore ct/301 to avoid self-restore deadlock (app runs in ct/300).
+                    echo "Triggering PBS backup of LXC 301..."
                     JOB=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':300,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
+                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
                     JOB_ID=$(echo "${JOB}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup job: ${JOB_ID}"
 
@@ -234,12 +238,14 @@ EOF
                     done
 
                     # Step 2: Restic backup of PBS datastore → creates cloud snapshot.
-                    # Runs from inside LXC 300 where restic + rclone are installed and
-                    # /mnt/ci-pbs is bind-mounted (configured in "Start VM + wait").
-                    # Tagged ct-300 so restic_client.py maps it to LXC 300.
-                    echo "Running restic backup of PBS datastore to cloud..."
+                    # Uses local repo at /mnt/ci-pbs/.restic-ci-repo (shared via bind mount
+                    # between LXC 300 and CI VM host — no rclone or internet required).
+                    # Tagged ct-301 so restic_client.py maps it to LXC 301.
+                    echo "Initialising local restic repo and backing up PBS datastore..."
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- bash -c 'RESTIC_PASSWORD=X5-erkses2 RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test restic backup /mnt/ci-pbs --tag ct-300 --json 2>&1 | tail -3'"
+                        "pct exec 300 -- bash -c 'RESTIC_PASSWORD=ci-test RESTIC_REPOSITORY=/mnt/ci-pbs/.restic-ci-repo restic init 2>&1'"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "pct exec 300 -- bash -c 'RESTIC_PASSWORD=ci-test RESTIC_REPOSITORY=/mnt/ci-pbs/.restic-ci-repo restic backup /mnt/ci-pbs --exclude /mnt/ci-pbs/.restic-ci-repo --tag ct-301 --json 2>&1 | tail -3'"
                     echo "Restic backup complete"
 
                     # Step 3: PBS backup #2 — second local snapshot needed so that after
@@ -247,7 +253,7 @@ EOF
                     # oldest_local, making it appear as a cloud-only entry in the GUI.
                     echo "Triggering PBS backup #2 (cloud-only seed)..."
                     JOB3=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':300,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
+                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
                     JOB3_ID=$(echo "${JOB3}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup #2 job: ${JOB3_ID}"
 
@@ -264,7 +270,7 @@ EOF
                     # (PBS#2 time) and restic_ts = T2 (Step 2 time), so T2 < T3 and the
                     # restic snapshot appears as cloud-only (no matching local PBS snapshot).
                     cat > /tmp/delete_oldest_snap.py << 'PYEOF'
-"""Delete the oldest PBS snapshot for ct/300 to produce a cloud-only restic entry."""
+"""Delete the oldest PBS snapshot for ct/301 to produce a cloud-only restic entry."""
 import json, ssl, urllib.parse, urllib.request
 
 ctx = ssl.create_default_context()
@@ -297,14 +303,14 @@ def api(url, method='GET'):
     body = urllib.request.urlopen(req, context=ctx, timeout=30).read()
     return json.loads(body) if body else {}
 
-snaps = api(f'{base}/api2/json/admin/datastore/{ds}/snapshots?backup-type=ct&backup-id=300')['data']
+snaps = api(f'{base}/api2/json/admin/datastore/{ds}/snapshots?backup-type=ct&backup-id=301')['data']
 snaps.sort(key=lambda s: s['backup-time'])
 if len(snaps) < 2:
     raise SystemExit(f'Only {len(snaps)} PBS snapshot(s) — need >=2 for cloud-only seed')
 
 t = snaps[0]['backup-time']
-print(f'Deleting oldest PBS snapshot ct/300/{t} ({len(snaps)} total)...')
-api(f'{base}/api2/json/admin/datastore/{ds}/snapshots?backup-type=ct&backup-id=300&backup-time={t}',
+print(f'Deleting oldest PBS snapshot ct/301/{t} ({len(snaps)} total)...')
+api(f'{base}/api2/json/admin/datastore/{ds}/snapshots?backup-type=ct&backup-id=301&backup-time={t}',
     method='DELETE')
 print('Deleted — cloud-only restic entry will now appear in the GUI')
 PYEOF

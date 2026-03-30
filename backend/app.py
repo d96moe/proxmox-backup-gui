@@ -486,6 +486,8 @@ def restore(host_id: str):
         backup_time_iso = datetime.fromtimestamp(backup_ts, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
+        log(f"Stopping {vm_type}/{vmid} before restore...")
+        pve.stop_vm(vmid, vm_type, node)
         log(f"Restoring {vm_type}/{vmid} snapshot {backup_time_iso} from {host.pbs_storage_id}")
         upid = pve.restore_vm(vmid, vm_type, backup_time_iso, host.pbs_storage_id, node,
                               host.pbs_datastore)
