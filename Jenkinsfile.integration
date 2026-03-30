@@ -116,12 +116,15 @@ FIXHOSTS
                         "proxmox-backup-manager cert info 2>&1 | grep -i 'fingerprint.*sha256' | sed 's/.*: //' | tr -d ' '")
                     echo "PBS fingerprint: ${PBS_FP}"
 
-                    # Register PBS datastore as PVE storage so vzdump can use it
+                    # Register/update PBS datastore as PVE storage so vzdump can use it.
+                    # The template may already have pbs-local; only the fingerprint changes
+                    # (PBS regenerates its TLS cert on every fresh VM).
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pvesm add pbs pbs-local --server 10.10.0.1 --datastore ci-pbs \
+                        "pvesm set pbs-local --fingerprint ${PBS_FP} 2>/dev/null || \
+                         pvesm add pbs pbs-local --server 10.10.0.1 --datastore ci-pbs \
                          --username gui-test@pbs --password gui-test-pw \
                          --fingerprint ${PBS_FP}"
-                    echo "PBS storage pbs-local added"
+                    echo "PBS storage pbs-local configured"
 
                     # Grant gui-test@pbs DatastoreAdmin on ci-pbs so the backend
                     # can list snapshots. Template starts with no ACLs configured.
