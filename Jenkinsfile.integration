@@ -113,7 +113,7 @@ FIXHOSTS
 
                     # Get PBS TLS fingerprint dynamically (cert regenerated on each fresh VM)
                     PBS_FP=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "proxmox-backup-manager cert info 2>&1 | grep -i 'fingerprint.*sha256' | awk '{print \$NF}'")
+                        "proxmox-backup-manager cert info 2>&1 | grep -i 'fingerprint.*sha256' | sed 's/.*: //' | tr -d ' '")
                     echo "PBS fingerprint: ${PBS_FP}"
 
                     # Register PBS datastore as PVE storage so vzdump can use it
