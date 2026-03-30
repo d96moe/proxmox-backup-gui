@@ -99,7 +99,7 @@ The GUI uses `rclone lsjson locks/` to check if a restic backup is in progress b
 
 - **Authentication** — login page with hashed credentials; currently the GUI is open to anyone who can reach the LXC
 - **VM/LXC backup mask** — per-VM include/exclude toggles so not every container is backed up to cloud
-- **Prune / retention settings** — UI for restic `--keep-last / --keep-daily / --keep-weekly` etc., written to PVE host config via SSH
+- **Prune / retention settings** — UI for both PBS retention (`prune-backups` per storage in PVE) and restic `--keep-last / --keep-daily / --keep-weekly`; both written to PVE host config via SSH
 - **Backup scheduler** — view and edit schedules for both PBS (vzdump) and restic (cloud) jobs; currently both are configured statically on the PVE host via systemd timers / cron outside the GUI
 - **Delete backup (cloud)** — guided workflow to remove a specific VM's backup from the restic repo: restore full datastore → delete from PBS → re-backup → forget old snapshot. Expensive but correct given the whole-datastore restic architecture.
 
