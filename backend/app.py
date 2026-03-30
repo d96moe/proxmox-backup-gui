@@ -7,6 +7,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import re
 import shlex
 import subprocess
 import time
@@ -29,6 +30,22 @@ CORS(app)
 
 HOSTS: dict[str, HostConfig] = {h.id: h for h in load_hosts()}
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
+
+
+def _detect_self_vmid() -> int | None:
+    """Return our own LXC VMID if running inside a Proxmox container, else None."""
+    try:
+        with open("/proc/1/cgroup") as f:
+            for line in f:
+                m = re.search(r"/lxc/(\d+)", line)
+                if m:
+                    return int(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
+SELF_VMID: int | None = _detect_self_vmid()
 
 # Simple in-process cache (ttl=60s) so the page stays snappy
 _cache: dict[str, tuple[float, object]] = {}
@@ -117,7 +134,10 @@ def static_files(filename: str):
 
 @app.get("/api/hosts")
 def get_hosts():
-    return jsonify([{"id": h.id, "label": h.label} for h in HOSTS.values()])
+    return jsonify([
+        {"id": h.id, "label": h.label, "self_vmid": SELF_VMID}
+        for h in HOSTS.values()
+    ])
 
 
 @app.get("/api/host/<host_id>/items")
