@@ -131,11 +131,29 @@ Set the **Script Path** in each Jenkins job:
 
 ## Credentials and Secrets
 
-| What | Where it lives | How CI gets it |
+| What | Jenkins credential ID | How CI gets it |
 |---|---|---|
-| rclone OAuth token (`rclone.conf`) | `/root/.config/rclone/rclone.conf` on PVE host | Already present on template 9092 |
-| restic repository password | In `hosts.json` on LXC 300 | Already configured in template |
-| PBS + PVE credentials | `/opt/proxmox-backup-gui/backend/hosts.json` on LXC 300 | Already configured in template |
-| SSH private key | LXC 200 at `/var/lib/jenkins/.ssh/id_ed25519` | Jenkins — never in git |
+| restic repository password | `gui-ci-restic-password` | Jenkins secret text — injected as `$RESTIC_PASSWORD` at runtime, written into `hosts.json` on the CI VM by the pipeline |
+| PBS GUI test user password | `gui-ci-pbs-password` | Jenkins secret text — injected as `$PBS_CI_PASSWORD` at runtime, used to configure `pbs-local` storage on the CI VM |
+| rclone OAuth token (`rclone.conf`) | — | Relayed at runtime from prod PVE host (`cat /root/.config/rclone/rclone.conf` → CI VM via SSH pipe) — never stored in Jenkins or git |
+| rclone + restic binaries | — | Relayed at runtime from prod PVE host (same SSH pipe approach) — keeps CI VM on the same binary version as prod |
+| SSH private key | — | LXC 200 at `/var/lib/jenkins/.ssh/id_ed25519` — never in git |
+| PBS + PVE host credentials | — | Baked into `hosts.json` on template 9092 LXC 300 — restic password and restic repo overwritten by pipeline at runtime |
 
-No secrets are committed to the repository. The `hosts.json` file on the CI VM is configured manually as part of the template setup.
+### Adding the Jenkins credentials
+
+In **Jenkins → Manage Jenkins → Credentials → (global)**:
+
+1. **`gui-ci-restic-password`** — Kind: Secret text, value: restic password for `rclone:gdrive:bu/gui-ci-test`
+2. **`gui-ci-pbs-password`** — Kind: Secret text, value: password for `gui-test@pbs` on the CI PBS instance
+
+No other secrets need to be registered — everything else is relayed from the prod PVE host or baked into template 9092.
+
+### Jenkins LXC 200 resources
+
+The Playwright tests are CPU and memory intensive. LXC 200 must have at least:
+
+- **6 cores**
+- **6 GB RAM**
+
+With less, Jenkins may OOM mid-run or time out before the tests finish.
