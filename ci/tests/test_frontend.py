@@ -191,9 +191,13 @@ class MockHandler(BaseHTTPRequestHandler):
             return self._json({"id": path.split("/")[-1], "status": cfg.job_status,
                                "logs": logs, "label": "test"})
 
-        # Serve frontend
+        # Serve frontend — resolve path for both repo layout (ci/tests/ → ../../frontend)
+        # and integration CI layout (tests/ → ../frontend).
         import os
-        frontend_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
+        _here = os.path.dirname(__file__)
+        frontend_dir = os.path.join(_here, "..", "frontend")
+        if not os.path.exists(os.path.join(frontend_dir, "index.html")):
+            frontend_dir = os.path.join(_here, "..", "..", "frontend")
         file_path = os.path.join(frontend_dir, "index.html")
         if path == "/" and os.path.exists(file_path):
             with open(file_path, "rb") as f:
