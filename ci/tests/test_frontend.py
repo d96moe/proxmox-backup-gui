@@ -807,12 +807,16 @@ def test_concurrent_backend_cache_shared_not_duplicated(mock_server):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_job_refresh_btn_disabled_while_modal_open(page: Page):
-    """Refresh button must be disabled while a job modal is open."""
+    """Refresh button is NOT disabled when job modal opens — close button is always enabled
+    so user can dismiss the modal at any time and reopen via the card indicator."""
     cfg.job_status = "running"
     cfg.job_logs = ["Starting..."]
     page.evaluate("openJobModal('Test', 'mock-job-1')")
-    assert page.locator("#refresh-btn").is_disabled(), \
-        "Refresh button should be disabled while job modal is open"
+    page.wait_for_selector("#job-modal.open", timeout=3000)
+    # Close button must be immediately enabled (user can dismiss at any time)
+    assert not page.locator("#job-close-btn").is_disabled(), \
+        "Close button should be enabled from the start — user can dismiss and reopen via indicator"
+    page.evaluate("closeJobModal()")
 
 def test_job_refresh_btn_re_enabled_after_close(page: Page):
     """Refresh button must be re-enabled after the job modal is closed."""
@@ -941,19 +945,18 @@ def test_job_modal_reopen_works_correctly(page: Page):
     page.evaluate("closeJobModal()")
 
 def test_job_500_from_endpoint_no_crash_and_refresh_recovers(page: Page):
-    """If /api/job/ returns 500, modal must not crash. After manual close,
-    refresh button is re-enabled and the page still works."""
+    """If /api/job/ returns 500, modal must not crash. Close button stays enabled
+    (user can always dismiss). After close, page still functions."""
     cfg.job_status_code = 500
     page.evaluate("openJobModal('Test', 'mock-job-1')")
-    # Wait several poll cycles — close button must stay disabled (job never finishes)
+    # Wait several poll cycles — 500s must be swallowed silently
     page.wait_for_timeout(5500)
     assert page._js_errors == [], f"JS errors on 500 from job endpoint: {page._js_errors}"
-    assert page.locator("#job-close-btn").is_disabled(), \
-        "Close button should stay disabled when job endpoint is unreachable"
+    # Close button must be enabled — user can always dismiss even a stuck job
+    assert not page.locator("#job-close-btn").is_disabled(), \
+        "Close button should always be enabled so user can dismiss a stuck job"
     # Manually close (simulates user giving up)
     page.evaluate("closeJobModal()")
-    assert not page.locator("#refresh-btn").is_disabled(), \
-        "Refresh button should be re-enabled even after aborting a stuck job"
     # Page must still function — refresh loads data
     cfg.job_status_code = 200
     page.click("#refresh-btn")
