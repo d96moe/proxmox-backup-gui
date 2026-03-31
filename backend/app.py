@@ -206,6 +206,7 @@ def get_items(host_id: str):
                 "os": meta["os"],
                 "status": meta["status"],
                 "template": meta.get("template", False),
+                "in_pve": vmid in pve_meta,
                 "snapshots": snap_map.get(vmid, []),
             }
             if meta["type"] == "lxc":
