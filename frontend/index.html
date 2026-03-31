@@ -22,7 +22,7 @@
     --purple:  #a78bfa;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; min-height: 100vh; }
+  body { background: var(--bg); color: var(--text); font-family: 'IBM Plex Sans', sans-serif; font-size: 14px; min-height: 100vh; overflow-x: auto; }
 
   /* Topbar */
   .topbar { display:flex; align-items:center; justify-content:space-between; padding:0 28px; height:52px; background:var(--surface); border-bottom:1px solid var(--border); }
@@ -36,7 +36,7 @@
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
 
   /* Layout */
-  .layout { display:grid; grid-template-columns:220px 1fr; min-height:calc(100vh - 52px); }
+  .layout { display:grid; grid-template-columns:220px 1fr; min-height:calc(100vh - 52px); min-width:820px; }
 
   /* Sidebar */
   .sidebar { background:var(--surface); border-right:1px solid var(--border); padding:20px 0; }
@@ -131,7 +131,7 @@
   /* Modal */
   .modal-overlay { position:fixed; inset:0; background:rgba(0,0,0,.7); display:flex; align-items:center; justify-content:center; z-index:100; backdrop-filter:blur(4px); opacity:0; pointer-events:none; transition:opacity .2s; }
   .modal-overlay.open { opacity:1; pointer-events:all; }
-  .modal { background:var(--surface); border:1px solid var(--border2); border-radius:12px; width:480px; overflow:hidden; transform:translateY(12px); transition:transform .2s; box-shadow:0 24px 80px rgba(0,0,0,.6); }
+  .modal { background:var(--surface); border:1px solid var(--border2); border-radius:12px; width:min(480px, calc(100vw - 32px)); overflow:hidden; transform:translateY(12px); transition:transform .2s; box-shadow:0 24px 80px rgba(0,0,0,.6); }
   .modal-overlay.open .modal { transform:translateY(0); }
   .modal-header { padding:20px 24px 16px; border-bottom:1px solid var(--border); display:flex; align-items:flex-start; justify-content:space-between; }
   .modal-title { font-family:'IBM Plex Mono',monospace; font-size:15px; font-weight:500; color:var(--text); }
