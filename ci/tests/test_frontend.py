@@ -1203,32 +1203,6 @@ def test_backup_modal_no_js_errors_full_flow(page: Page):
 # SYNC BUTTON — ☁ sync visible for local-only VMs and snapshots
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.fixture
-def snap_test_page(browser, mock_server):
-    """Page loaded on the snap-test host (has local-only, cloud-only, both VMs)."""
-    orig_hosts = HOSTS[:]
-    HOSTS.append({"id": "snap-test", "label": "Snap Test"})
-    try:
-        ctx = browser.new_context(base_url=mock_server)
-        pg = ctx.new_page()
-        pg._js_errors = []
-        pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-        pg.goto("/")
-        pg.wait_for_function(
-            "() => document.getElementById('content').innerText !== 'Loading…'",
-            timeout=10000,
-        )
-        pg.click("#nav-snap-test")
-        pg.wait_for_function(
-            "() => document.getElementById('content').innerText.includes('local-only-vm')",
-            timeout=8000,
-        )
-        yield pg
-        ctx.close()
-    finally:
-        HOSTS[:] = orig_hosts
-
-
 def test_sync_button_visible_on_local_only_card(snap_test_page: Page):
     """Local-only VM card must show ☁ sync button at card level."""
     # VM 502 is local-only in snap-test fixture
@@ -1402,3 +1376,379 @@ def test_concurrent_no_js_errors_under_load(mock_server):
     all_errors = run_async(run())
     for i, errs in enumerate(all_errors):
         assert errs == [], f"User {i} had JS errors under concurrent load: {errs}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LAYOUT / VIEWPORT — elements must be visible and within the browser viewport
+#
+# Strategy: load at 1280x800 (common laptop), assert each element bounding
+# box is inside the viewport — no overflow, no cut-off.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _in_viewport(pg, selector: str) -> bool:
+    """Return True if element bounding box is fully within the visible viewport."""
+    return pg.evaluate(
+        "(sel) => { const el = document.querySelector(sel); if (!el) return false;"
+        " const r = el.getBoundingClientRect();"
+        " return r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0"
+        " && r.bottom <= window.innerHeight && r.right <= window.innerWidth; }",
+        selector,
+    )
+
+
+def _partly_in_viewport(pg, selector: str) -> bool:
+    """Return True if element is at least partially visible (not fully clipped)."""
+    return pg.evaluate(
+        "(sel) => { const el = document.querySelector(sel); if (!el) return false;"
+        " const r = el.getBoundingClientRect();"
+        " return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0"
+        " && r.top < window.innerHeight && r.left < window.innerWidth; }",
+        selector,
+    )
+
+
+@pytest.fixture
+def vp_page(browser, mock_server):
+    """1280x800 page — standard laptop viewport, home host loaded."""
+    ctx = browser.new_context(base_url=mock_server, viewport={"width": 1280, "height": 800})
+    pg = ctx.new_page()
+    pg._js_errors = []
+    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.goto("/")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText !== 'Loading\u2026'",
+        timeout=10000,
+    )
+    yield pg
+    ctx.close()
+
+
+@pytest.fixture
+def vp_snap_page(browser, mock_server):
+    """1280x800 page on snap-test host (local-only, cloud-only, both VMs)."""
+    orig_hosts = HOSTS[:]
+    HOSTS.append({"id": "snap-test", "label": "Snap Test"})
+    ctx = browser.new_context(base_url=mock_server, viewport={"width": 1280, "height": 800})
+    pg = ctx.new_page()
+    pg._js_errors = []
+    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.goto("/")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText !== 'Loading\u2026'",
+        timeout=10000,
+    )
+    pg.click("#nav-snap-test")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText.includes('local-only-vm')",
+        timeout=8000,
+    )
+    yield pg
+    ctx.close()
+    HOSTS[:] = orig_hosts
+
+
+# ── Topbar / sidebar always visible ──────────────────────────────────────────
+
+def test_layout_topbar_in_viewport(vp_page):
+    """Topbar must be fully visible at top of viewport."""
+    assert _in_viewport(vp_page, ".topbar"), "Topbar not fully in viewport"
+
+
+def test_layout_sidebar_in_viewport(vp_page):
+    """Sidebar must be partially visible — hosts and storage meters accessible."""
+    assert _partly_in_viewport(vp_page, ".sidebar"), "Sidebar not in viewport"
+
+
+def test_layout_refresh_btn_in_viewport(vp_page):
+    """Refresh button must be reachable without scrolling."""
+    assert _in_viewport(vp_page, "#refresh-btn"), "Refresh button outside viewport"
+
+
+def test_layout_footer_not_off_screen(vp_page):
+    """Footer must be present and its top edge must be within the viewport height."""
+    footer_top = vp_page.evaluate(
+        "() => document.querySelector('.footer').getBoundingClientRect().top"
+    )
+    assert 0 < footer_top <= 800, f"Footer top at unexpected position: {footer_top}"
+
+
+def test_layout_vm_card_visible(vp_page):
+    """First VM card must be partially visible without scrolling."""
+    assert _partly_in_viewport(vp_page, ".vm-card"), "First VM card not visible in viewport"
+
+
+# ── VM card header fits in one row ────────────────────────────────────────────
+
+def test_layout_vm_header_not_overflowing(vp_page):
+    """VM card header must not overflow its container horizontally."""
+    overflow = vp_page.evaluate(
+        "() => { const h = document.querySelector('.vm-header');"
+        " return h ? h.scrollWidth > h.clientWidth + 2 : false; }"
+    )
+    assert not overflow, "VM card header scrollWidth exceeds clientWidth — horizontal overflow"
+
+
+def test_layout_backup_btn_within_viewport(vp_page):
+    """Backup now button must be fully within viewport bounds."""
+    btn = vp_page.locator(".backup-btn").first
+    btn.wait_for(state="visible", timeout=5000)
+    box = btn.bounding_box()
+    assert box is not None, "Backup button has no bounding box"
+    assert box["width"] > 0 and box["height"] > 0, "Backup button has zero size"
+    assert box["x"] >= 0, "Backup button left edge is off-screen"
+    assert box["x"] + box["width"] <= 1282, \
+        f"Backup button right edge {box['x']+box['width']:.0f} exceeds viewport width 1280"
+
+
+def test_layout_loc_badge_not_truncated(vp_page):
+    """Location badges must have reasonable width — not truncated to zero."""
+    badge = vp_page.locator(".loc-badge").first
+    badge.wait_for(state="visible", timeout=5000)
+    box = badge.bounding_box()
+    assert box is not None
+    assert box["width"] > 20, f"loc-badge seems truncated: width={box['width']:.0f}px"
+
+
+# ── Snapshot rows fit within card ────────────────────────────────────────────
+
+def test_layout_snapshot_row_not_overflowing(vp_page):
+    """Snapshot rows must not cause horizontal scroll after expanding a card."""
+    expand_vm_card(vp_page, 101)
+    overflow = vp_page.evaluate(
+        "() => { const row = document.querySelector('.snapshot-row');"
+        " return row ? row.scrollWidth > row.clientWidth + 2 : false; }"
+    )
+    assert not overflow, "Snapshot row scrollWidth exceeds clientWidth — horizontal overflow"
+
+
+def test_layout_restore_btn_in_snapshot_row_visible(vp_page):
+    """Restore button in expanded snapshot row must be within viewport bounds."""
+    expand_vm_card(vp_page, 101)
+    btn = vp_page.locator(".restore-btn[data-vmid='101']").first
+    btn.wait_for(state="visible", timeout=5000)
+    box = btn.bounding_box()
+    assert box is not None
+    assert box["x"] + box["width"] <= 1282, \
+        f"Restore button right edge {box['x']+box['width']:.0f} exceeds 1280"
+
+
+def test_layout_sync_btn_in_snapshot_row_not_clipped(vp_snap_page):
+    """Cloud sync button in local-only snapshot row must not be clipped."""
+    expand_vm_card(vp_snap_page, 502)
+    sync_btn = vp_snap_page.locator(
+        ".vm-card:has(.backup-btn[data-vmid='502']) .snapshot-row .restore-btn"
+    ).filter(has_text="sync").first
+    sync_btn.wait_for(state="visible", timeout=5000)
+    box = sync_btn.bounding_box()
+    assert box is not None, "sync button has no bounding box"
+    assert box["width"] > 0, "sync button has zero width"
+    assert box["x"] >= 0, "sync button is off left edge"
+    assert box["x"] + box["width"] <= 1282, \
+        f"sync button right edge {box['x']+box['width']:.0f} clips viewport"
+
+
+def test_layout_sync_btn_on_card_level_visible(vp_snap_page):
+    """Card-level sync button (local-only VM) must be visible without expanding."""
+    sync_btn = vp_snap_page.locator(
+        ".vm-card:has(.backup-btn[data-vmid='502']) .backup-btn"
+    ).filter(has_text="sync").first
+    sync_btn.wait_for(state="visible", timeout=5000)
+    box = sync_btn.bounding_box()
+    assert box is not None
+    assert box["width"] > 0
+    assert box["x"] + box["width"] <= 1282, \
+        f"Card-level sync button clips right edge at {box['x']+box['width']:.0f}"
+
+
+# ── Backup modal fits in viewport ─────────────────────────────────────────────
+
+def test_layout_backup_modal_fits_viewport(vp_page):
+    """Backup choice modal must fit fully within 1280x800."""
+    vp_page.locator(".backup-btn").first.click()
+    vp_page.wait_for_selector("#backup-modal.open", timeout=5000)
+    box = vp_page.locator("#backup-modal .modal").bounding_box()
+    assert box is not None, "Backup modal has no bounding box"
+    assert box["x"] >= 0, f"Backup modal left edge off-screen: {box['x']:.0f}"
+    assert box["y"] >= 0, f"Backup modal top edge off-screen: {box['y']:.0f}"
+    assert box["x"] + box["width"] <= 1282, \
+        f"Backup modal clips right: {box['x']+box['width']:.0f}"
+    assert box["y"] + box["height"] <= 802, \
+        f"Backup modal clips bottom: {box['y']+box['height']:.0f}"
+    vp_page.evaluate("closeBackupModal()")
+
+
+def test_layout_backup_modal_source_options_visible(vp_page):
+    """Both PBS-only and PBS+Cloud options must be visible inside the backup modal."""
+    vp_page.locator(".backup-btn").first.click()
+    vp_page.wait_for_selector("#backup-modal.open", timeout=5000)
+    for btype in ("pbs", "pbs+restic"):
+        opt = vp_page.locator(f".source-opt[data-btype='{btype}']")
+        assert opt.is_visible(), f"Backup option [{btype}] not visible"
+        box = opt.bounding_box()
+        assert box["y"] + box["height"] <= 802, \
+            f"Backup option [{btype}] is below fold at y={box['y']+box['height']:.0f}"
+    vp_page.evaluate("closeBackupModal()")
+
+
+def test_layout_backup_modal_confirm_btn_visible(vp_page):
+    """Confirm button in backup modal must be visible and not below fold."""
+    vp_page.locator(".backup-btn").first.click()
+    vp_page.wait_for_selector("#backup-modal.open", timeout=5000)
+    btn = vp_page.locator("#backup-confirm-btn")
+    assert btn.is_visible(), "Backup confirm button not visible"
+    box = btn.bounding_box()
+    assert box["y"] + box["height"] <= 802, \
+        f"Backup confirm button below fold at y={box['y']+box['height']:.0f}"
+    vp_page.evaluate("closeBackupModal()")
+
+
+# ── Restore modal fits in viewport ────────────────────────────────────────────
+
+def test_layout_restore_modal_fits_viewport(vp_page):
+    """Restore modal must fit fully within 1280x800."""
+    expand_vm_card(vp_page, 101)
+    vp_page.locator(".restore-btn[data-vmid='101']").first.click()
+    vp_page.wait_for_selector("#modal.open", timeout=5000)
+    box = vp_page.locator("#modal .modal").bounding_box()
+    assert box is not None
+    assert box["x"] >= 0
+    assert box["y"] >= 0
+    assert box["x"] + box["width"] <= 1282, \
+        f"Restore modal clips right: {box['x']+box['width']:.0f}"
+    assert box["y"] + box["height"] <= 802, \
+        f"Restore modal clips bottom: {box['y']+box['height']:.0f}"
+    vp_page.click("button.modal-close")
+
+
+def test_layout_restore_modal_confirm_btn_visible(vp_page):
+    """Restore confirm button must not be below fold."""
+    expand_vm_card(vp_page, 101)
+    vp_page.locator(".restore-btn[data-vmid='101']").first.click()
+    vp_page.wait_for_selector("#modal.open", timeout=5000)
+    btn = vp_page.locator("#modal-confirm-btn")
+    assert btn.is_visible(), "Restore confirm button not visible"
+    box = btn.bounding_box()
+    assert box["y"] + box["height"] <= 802, \
+        f"Restore confirm button below fold at {box['y']+box['height']:.0f}"
+    vp_page.click("button.modal-close")
+
+
+# ── Job modal fits in viewport ────────────────────────────────────────────────
+
+def test_layout_job_modal_fits_viewport(vp_page):
+    """Job progress modal (wide variant) must fit within 1280x800."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Starting..."]
+    vp_page.evaluate("openJobModal('Test', 'mock-job-1')")
+    vp_page.wait_for_selector("#job-modal.open", timeout=5000)
+    box = vp_page.locator("#job-modal .modal").bounding_box()
+    assert box is not None
+    assert box["x"] >= 0
+    assert box["y"] >= 0
+    assert box["x"] + box["width"] <= 1282, \
+        f"Job modal clips right: {box['x']+box['width']:.0f}"
+    assert box["y"] + box["height"] <= 802, \
+        f"Job modal clips bottom: {box['y']+box['height']:.0f}"
+    vp_page.evaluate("closeJobModal()")
+
+
+def test_layout_job_log_area_visible(vp_page):
+    """Job log area must be visible and have non-trivial height."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Step 1", "Step 2"]
+    vp_page.evaluate("openJobModal('Test', 'mock-job-1')")
+    vp_page.wait_for_selector("#job-modal.open", timeout=5000)
+    box = vp_page.locator("#job-log").bounding_box()
+    assert box is not None
+    assert box["height"] > 50, f"Job log area too small: {box['height']:.0f}px"
+    assert box["y"] + box["height"] <= 802, "Job log area is below fold"
+    vp_page.evaluate("closeJobModal()")
+
+
+def test_layout_job_close_btn_visible(vp_page):
+    """Job modal close button must be reachable without scrolling."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Done."]
+    vp_page.evaluate("openJobModal('Test', 'mock-job-1')")
+    vp_page.wait_for_function(
+        "() => document.getElementById('job-badge').textContent === 'done'",
+        timeout=6000,
+    )
+    btn = vp_page.locator("#job-close-btn")
+    assert btn.is_visible(), "Job close button not visible"
+    box = btn.bounding_box()
+    assert box["y"] + box["height"] <= 802, \
+        f"Job close button below fold at {box['y']+box['height']:.0f}"
+    vp_page.evaluate("closeJobModal()")
+
+
+# ── Narrow viewport (768x1024) — no hard crash ────────────────────────────────
+
+def test_layout_narrow_no_js_errors(browser, mock_server):
+    """At 768x1024 the page must load without JS errors."""
+    ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    pg = ctx.new_page()
+    pg._js_errors = []
+    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.goto("/")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText !== 'Loading\u2026'",
+        timeout=10000,
+    )
+    assert pg._js_errors == [], f"JS errors at 768px viewport: {pg._js_errors}"
+    ctx.close()
+
+
+def test_layout_narrow_vm_cards_rendered(browser, mock_server):
+    """VM cards must render at 768px — no blank content."""
+    ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    pg = ctx.new_page()
+    pg._js_errors = []
+    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.goto("/")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText.includes('home-vm')",
+        timeout=10000,
+    )
+    assert pg.locator(".vm-card").count() > 0, "No VM cards at 768px width"
+    assert pg._js_errors == []
+    ctx.close()
+
+
+def test_layout_narrow_backup_modal_opens(browser, mock_server):
+    """Backup modal must open without JS errors at 768px."""
+    ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    pg = ctx.new_page()
+    pg._js_errors = []
+    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.goto("/")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText.includes('home-vm')",
+        timeout=10000,
+    )
+    pg.locator(".backup-btn").first.click()
+    pg.wait_for_selector("#backup-modal.open", timeout=5000)
+    assert pg.locator("#backup-modal .modal").is_visible()
+    assert pg._js_errors == []
+    pg.evaluate("closeBackupModal()")
+    ctx.close()
+
+
+def test_layout_narrow_restore_modal_opens(browser, mock_server):
+    """Restore modal must open without JS errors at 768px."""
+    ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    pg = ctx.new_page()
+    pg._js_errors = []
+    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.goto("/")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText.includes('home-vm')",
+        timeout=10000,
+    )
+    expand_vm_card(pg, 101)
+    pg.locator(".restore-btn[data-vmid='101']").first.click()
+    pg.wait_for_selector("#modal.open", timeout=5000)
+    assert pg.locator("#modal .modal").is_visible()
+    assert pg._js_errors == []
+    pg.click("button.modal-close")
+    ctx.close()
