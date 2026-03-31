@@ -177,6 +177,49 @@
   .footer { position:fixed; bottom:0; left:0; right:0; height:30px; background:var(--surface); border-top:1px solid var(--border); display:flex; align-items:center; padding:0 20px; gap:24px; }
   .footer-item { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); display:flex; align-items:center; gap:6px; }
   .footer-dot { width:5px; height:5px; border-radius:50%; }
+
+  /* ── Responsive: mobile portrait ── */
+  @media (max-width: 699px) {
+    body { overflow-x: hidden; }
+
+    /* Stack layout vertically */
+    .layout { grid-template-columns: 1fr; min-width: unset; }
+
+    /* Sidebar → compact horizontal host picker, no storage meters */
+    .sidebar { border-right: none; border-bottom: 1px solid var(--border); padding: 10px 0 6px; }
+    .sidebar-section { padding: 0 12px; margin-bottom: 6px; }
+    .sidebar-section:has(.storage-meter) { display: none; }
+    #hosts-section { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    #hosts-section .sidebar-label { width: 100%; margin-bottom: 2px; }
+    .nav-item.host-item { padding: 5px 10px; font-size: 11px; }
+
+    /* Main area */
+    .main { padding: 16px 12px 50px; }
+    .page-header { flex-direction: column; align-items: flex-start; gap: 10px; }
+
+    /* Legend: wrap and shrink */
+    .legend { flex-wrap: wrap; gap: 8px; }
+
+    /* VM card header: compress */
+    .vm-header { grid-template-columns: 32px 1fr auto auto; gap: 8px; padding: 12px; }
+
+    /* Snapshot rows: scroll horizontally within the card */
+    .snapshots { overflow-x: auto; }
+    .snapshot-header-row,
+    .snapshot-row { min-width: 520px; }
+
+    /* Topbar: hide breadcrumb detail on very small screens */
+    .logo-text span { display: none; }
+
+    /* Modals: slide up from bottom as a sheet */
+    .modal-overlay { align-items: flex-end; }
+    .modal,
+    .modal.wide { width: 100%; border-radius: 16px 16px 0 0; max-height: 90vh; overflow-y: auto; }
+    .modal-overlay.open .modal { transform: translateY(0); }
+
+    /* Footer */
+    .footer { padding: 0 12px; gap: 16px; }
+  }
 </style>
 </head>
 <body>
