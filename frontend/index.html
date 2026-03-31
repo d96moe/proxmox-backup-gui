@@ -255,6 +255,10 @@
       <div class="storage-meter">
         <div class="meter-label"><span>local · pbs</span><span id="local-usage">— GB</span></div>
         <div class="meter-bar"><div class="meter-fill" id="local-bar" style="background:linear-gradient(90deg,var(--green),var(--accent));width:0%"></div></div>
+        <div class="meter-label" style="margin-top:4px;font-size:11px;color:var(--muted)">
+          <span title="Deduplication factor: ratio of total source data size to actual disk usage. A factor of 4× means 4 GB of VM data uses only 1 GB on disk. Shared chunks between snapshots and VMs are counted once — so adding more similar snapshots costs very little extra space." style="cursor:help;border-bottom:1px dotted var(--muted)">dedup · pbs</span>
+          <span id="pbs-dedup">—</span>
+        </div>
       </div>
       <div class="storage-meter">
         <div class="meter-label"><span>gdrive · family</span><span id="cloud-usage">— GB</span></div>
@@ -457,6 +461,7 @@ function selectHost(id) {
   document.getElementById('cloud-usage').textContent = '— GB';
   document.getElementById('local-bar').style.width = '0%';
   document.getElementById('cloud-bar').style.width = '0%';
+  document.getElementById('pbs-dedup').textContent = '—';
   loadData(_abortController.signal);
   loadInfo(_abortController.signal);
   loadStorage(_abortController.signal);
@@ -513,6 +518,7 @@ async function loadStorage(signal) {
     const localPct = s.local_total > 0 ? Math.round(s.local_used / s.local_total * 100) : 0;
     document.getElementById('local-usage').textContent = `${s.local_used} / ${s.local_total} GB`;
     document.getElementById('local-bar').style.width = localPct + '%';
+    document.getElementById('pbs-dedup').textContent = s.dedup_factor != null ? `${s.dedup_factor}×` : '—';
     if (s.cloud_total) {
       const cloudPct = Math.min(Math.round(s.cloud_quota_used / s.cloud_total * 100), 100);
       document.getElementById('cloud-usage').textContent =
@@ -674,7 +680,7 @@ function renderCard(item) {
       <div class="snapshots">
         <div class="snapshot-header-row">
           <span class="col-label">Date</span>
-          <span class="col-label">Size</span>
+          <span class="col-label" title="Source VM/LXC disk size — not the on-disk footprint after deduplication" style="cursor:help;border-bottom:1px dotted var(--muted)">VM size</span>
           <span class="col-label">Type</span>
           <span class="col-label">Location</span>
           <span class="col-label"></span>

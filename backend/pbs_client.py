@@ -41,13 +41,25 @@ class PBSClient:
         return resp.json().get("data", {})
 
     def get_storage_info(self) -> dict:
-        """Returns local_used and local_total in GB."""
+        """Returns local_used, local_total in GB, and PBS dedup factor."""
         data = self._get(f"/admin/datastore/{self._datastore}/status")
         total = data.get("total", 0)
         used = data.get("used", 0)
+
+        dedup = None
+        try:
+            gc = self._get(f"/admin/datastore/{self._datastore}/gc-status")
+            index_bytes = gc.get("index-data-bytes", 0)   # sum of all source sizes
+            disk_bytes  = gc.get("disk-bytes", 0)          # actual chunks on disk
+            if disk_bytes and disk_bytes > 0:
+                dedup = round(index_bytes / disk_bytes, 1)
+        except Exception:
+            pass
+
         return {
             "local_used": round(used / 1024**3, 1),
             "local_total": round(total / 1024**3, 1),
+            "dedup_factor": dedup,
         }
 
     def get_snapshots(self) -> list[dict]:
