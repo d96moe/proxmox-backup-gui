@@ -193,7 +193,7 @@ class MockHandler(BaseHTTPRequestHandler):
 
         # Serve frontend
         import os
-        frontend_dir = os.path.join(os.path.dirname(__file__), "..", "frontend")
+        frontend_dir = os.path.join(os.path.dirname(__file__), "..", "..", "frontend")
         file_path = os.path.join(frontend_dir, "index.html")
         if path == "/" and os.path.exists(file_path):
             with open(file_path, "rb") as f:
