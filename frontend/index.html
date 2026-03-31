@@ -120,6 +120,8 @@
   .no-backups { padding:16px 18px 16px 68px; font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--muted); }
   .restore-btn { padding:5px 12px; border-radius:5px; border:1px solid var(--border2); background:transparent; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:11px; cursor:pointer; transition:all .15s; white-space:nowrap; }
   .restore-btn:hover { background:rgba(74,158,255,.1); border-color:var(--accent); color:var(--accent); }
+  /* On desktop, row-top/bottom wrappers are transparent — grid columns do the layout */
+  .snap-row-top, .snap-row-bottom { display: contents; }
 
   /* Error/loading states */
   .state-msg { padding:40px; text-align:center; font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--muted); }
@@ -203,10 +205,17 @@
     /* VM card header: compress */
     .vm-header { grid-template-columns: 32px 1fr auto auto; gap: 8px; padding: 12px; }
 
-    /* Snapshot rows: scroll horizontally within the card */
-    .snapshots { overflow-x: auto; }
-    .snapshot-header-row,
-    .snapshot-row { min-width: 520px; }
+    /* Snapshot rows: stack vertically, no horizontal scroll */
+    .snapshot-header-row { display: none; }
+    .snapshot-row {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      padding: 10px 12px 10px 12px;
+      min-width: unset;
+    }
+    .snap-row-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .snap-row-bottom { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 
     /* Topbar: hide breadcrumb detail on very small screens */
     .logo-text span { display: none; }
@@ -615,11 +624,13 @@ function renderCard(item) {
     ? `<div class="no-backups">No backups found</div>`
     : item.snapshots.map(s => `
         <div class="snapshot-row">
-          <div><div class="snap-date">${s.date}</div><div class="snap-age">${s.age}${s.restic_short_id ? ` · <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted)">${s.restic_short_id}</span>` : ''}</div></div>
-          <div class="snap-size">${s.size}</div>
-          <div class="snap-type">${s.incremental ? 'incremental' : 'full'}</div>
-          ${locBadge(s.local, s.cloud)}
-          <div style="display:flex;gap:5px;align-items:center">
+          <div class="snap-row-top">
+            <div><div class="snap-date">${s.date}</div><div class="snap-age">${s.age}${s.restic_short_id ? ` · <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted)">${s.restic_short_id}</span>` : ''}</div></div>
+            <div class="snap-size">${s.size}</div>
+            <div class="snap-type">${s.incremental ? 'incremental' : 'full'}</div>
+            ${locBadge(s.local, s.cloud)}
+          </div>
+          <div class="snap-row-bottom">
             ${s.local && !s.cloud ? `<button class="restore-btn" style="color:var(--accent);border-color:rgba(74,158,255,.3)" onclick="event.stopPropagation();triggerResticBackup(${item.id},'${item.name.replace(/'/g,"\\'")}')">☁ sync</button>` : ''}
             <button class="restore-btn"
               data-vmid="${item.id}"
