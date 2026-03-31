@@ -4,6 +4,12 @@ A self-hosted web dashboard for monitoring Proxmox Backup Server (PBS) and resti
 
 Shows per-VM backup status, local/cloud coverage, storage usage, and historical snapshots in a clean dark UI.
 
+> **⚠️ HOBBY PROJECT — USE AT YOUR OWN RISK**
+>
+> This is a personal homelab project built for fun and convenience. The code, the CI pipelines, the tests, and this README were all written with Claude Code assistance. It is not production software, has no guarantees, and comes with no support. It works on my hardware — it may or may not work on yours. If you use this and something goes wrong, that's on you.
+>
+> The GUI can trigger real backup and restore operations on your Proxmox host. A restore from cloud will stop PBS, overwrite your local datastore, and restart PBS. Make sure you understand what each operation does before using it.
+
 ## Features
 
 - **Per-VM/LXC overview** — snapshot count, latest backup age, local/cloud coverage badges
