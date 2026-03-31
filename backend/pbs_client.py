@@ -48,11 +48,13 @@ class PBSClient:
 
         dedup = None
         try:
-            gc = self._get(f"/admin/datastore/{self._datastore}/gc-status")
-            index_bytes = gc.get("index-data-bytes", 0)   # sum of all source sizes
-            disk_bytes  = gc.get("disk-bytes", 0)          # actual chunks on disk
-            if disk_bytes and disk_bytes > 0:
-                dedup = round(index_bytes / disk_bytes, 1)
+            gc_list = self._get("/admin/gc")
+            gc = next((e for e in gc_list if e.get("store") == self._datastore), None)
+            if gc:
+                index_bytes = gc.get("index-data-bytes", 0)  # sum of all source sizes
+                disk_bytes  = gc.get("disk-bytes", 0)         # actual chunks on disk
+                if disk_bytes > 0:
+                    dedup = round(index_bytes / disk_bytes, 1)
         except Exception:
             pass
 
