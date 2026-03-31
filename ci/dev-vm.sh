@@ -24,25 +24,36 @@ SSH_KEY="/var/lib/jenkins/.ssh/id_ed25519"
 SSH_OPTS="-o StrictHostKeyChecking=no -o BatchMode=yes"
 
 # Read credentials from same place as prod
-RESTIC_PASSWORD="$(ssh root@${PVE_HOST} cat /etc/resticprofile/restic-password)"
+RESTIC_PASSWORD="$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} cat /etc/resticprofile/restic-password)"
 # PBS CI password — set in /etc/proxmox-backup-restore/config.env or pass as env var
 PBS_CI_PASSWORD="${PBS_CI_PASSWORD:-gui-test-pw}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# If script is run from the repo, REPO_ROOT is parent of ci/. Otherwise fall
+# back to cloning from GitHub into a temp dir.
+if [ -f "${SCRIPT_DIR}/../backend/app.py" ]; then
+    REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+else
+    REPO_ROOT="/tmp/proxmox-backup-gui-dev"
+    if [ ! -d "${REPO_ROOT}/.git" ]; then
+        git clone --depth 1 https://github.com/d96moe/proxmox-backup-gui.git "${REPO_ROOT}"
+    else
+        git -C "${REPO_ROOT}" pull --ff-only
+    fi
+fi
 
 # ── Destroy mode ─────────────────────────────────────────────────────────────
 if [ "${1:-}" = "destroy" ]; then
     echo "=== Destroying dev VM ${VM_ID} ==="
-    ssh root@${PVE_HOST} "qm stop ${VM_ID} 2>/dev/null || true; sleep 3; qm destroy ${VM_ID} --purge 1 2>/dev/null || true"
+    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "qm stop ${VM_ID} 2>/dev/null || true; sleep 3; qm destroy ${VM_ID} --purge 1 2>/dev/null || true"
     echo "Done."
     exit 0
 fi
 
 # ── Clone + start ─────────────────────────────────────────────────────────────
 echo "=== Cloning template ${TEMPLATE_ID} → VM ${VM_ID} ==="
-ssh root@${PVE_HOST} "qm clone ${TEMPLATE_ID} ${VM_ID} --name gui-dev --full 1"
-ssh root@${PVE_HOST} "qm start ${VM_ID}"
+ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "qm clone ${TEMPLATE_ID} ${VM_ID} --name gui-ci --full 1"
+ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "qm start ${VM_ID}"
 
 echo "=== Waiting for SSH at ${VM_IP} (max 150s) ==="
 ssh-keygen -f "${HOME}/.ssh/known_hosts" -R "${VM_IP}" 2>/dev/null || true
@@ -85,12 +96,12 @@ ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
 
 # ── rclone.conf + binaries ────────────────────────────────────────────────────
 echo "=== Deploying rclone.conf + binaries ==="
-ssh root@${PVE_HOST} "cat /root/.config/rclone/rclone.conf" | \
+ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "cat /root/.config/rclone/rclone.conf" | \
     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
         "mkdir -p /root/.config/rclone && cat > /root/.config/rclone/rclone.conf"
-ssh root@${PVE_HOST} "cat /usr/bin/rclone" | \
+ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "cat /usr/bin/rclone" | \
     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "cat > /usr/local/bin/rclone && chmod +x /usr/local/bin/rclone"
-ssh root@${PVE_HOST} "cat /usr/bin/restic" | \
+ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "cat /usr/bin/restic" | \
     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "cat > /usr/local/bin/restic && chmod +x /usr/local/bin/restic"
 
 # ── LXC 301 + SSH key + hosts.json ───────────────────────────────────────────
