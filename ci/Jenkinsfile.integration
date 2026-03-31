@@ -33,6 +33,8 @@ pipeline {
         TEMPLATE_ID   = '9092'
         SSH_KEY       = '/var/lib/jenkins/.ssh/id_ed25519'
         SSH_OPTS      = '-o StrictHostKeyChecking=no -o BatchMode=yes'
+        RESTIC_PASSWORD  = credentials('gui-ci-restic-password')
+        PBS_CI_PASSWORD  = credentials('gui-ci-pbs-password')
     }
 
     stages {
@@ -122,7 +124,7 @@ FIXHOSTS
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "pvesm set pbs-local --fingerprint ${PBS_FP} 2>/dev/null || \
                          pvesm add pbs pbs-local --server 10.10.0.1 --datastore ci-pbs \
-                         --username gui-test@pbs --password gui-test-pw \
+                         --username gui-test@pbs --password ${PBS_CI_PASSWORD} \
                          --fingerprint ${PBS_FP}"
                     echo "PBS storage pbs-local configured"
 
@@ -176,7 +178,7 @@ pct exec 300 -- python3 -c "
 import json
 with open('/opt/proxmox-backup-gui/backend/hosts.json') as f: h=json.load(f)
 h[0]['restic_repo'] = 'rclone:gdrive:bu/gui-ci-test'
-h[0]['restic_password'] = 'X5-erkses2'
+h[0]['restic_password'] = '${RESTIC_PASSWORD}'
 h[0]['restic_env'] = {'RCLONE_CONFIG': '/root/.config/rclone/rclone.conf'}
 h[0]['pbs_storage_id'] = 'pbs-local'
 h[0]['pbs_datastore_path'] = '/mnt/ci-pbs'
@@ -299,14 +301,14 @@ EOF
                     # The restore (in app.py _cloud_restore_cmd) already runs on the PVE host
                     # via SSH — this keeps backup and restore symmetric.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic init --no-lock 2>&1" || true
+                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic init --no-lock 2>&1" || true
                     # Forget ALL previous ct-301 snapshots before taking a fresh one.
                     # Old snapshots from prior CI runs may be corrupt (taken inside an
                     # unprivileged container). The GUI picks the oldest cloud-only entry,
                     # which would be one of those corrupt snapshots.
                     # restic forget <id>... removes specific snapshots without needing a policy.
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'FORGET_OLD'
-RESTIC_ENV="RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << FORGET_OLD
+RESTIC_ENV="RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf"
 # Forget ALL snapshots (tagged or not) — some old ones have no tag and survive --tag filter
 IDS=$(eval "$RESTIC_ENV restic snapshots --json --no-lock 2>/dev/null" | \
     python3 -c "import json,sys; snaps=json.load(sys.stdin); print(' '.join(s['id'] for s in snaps))" 2>/dev/null || true)
@@ -320,7 +322,7 @@ FORGET_OLD
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl stop proxmox-backup proxmox-backup-proxy"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=X5-erkses2 RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic backup /mnt/ci-pbs --tag ct-301 --json --no-lock 2>&1 | tail -3"
+                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic backup /mnt/ci-pbs --tag ct-301 --json --no-lock 2>&1 | tail -3"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl start proxmox-backup proxmox-backup-proxy"
                     # Wait for PBS API to be ready before proceeding to step 3
