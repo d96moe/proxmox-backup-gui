@@ -184,6 +184,26 @@ class ResticClient:
 
         return result
 
+    def backup_datastore(self, datastore_path: str, log) -> None:
+        """Back up the PBS datastore to the restic repo on the PVE host."""
+        log("Stopping PBS...")
+        self._ssh_run(
+            "systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true"
+        )
+        try:
+            path = shlex.quote(datastore_path)
+            log(f"Running restic backup of {datastore_path}...")
+            self._ssh_stream(
+                f"{self._env_prefix} restic backup {path} --no-lock",
+                log,
+            )
+        finally:
+            log("Starting PBS...")
+            self._ssh_run(
+                "systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true"
+            )
+        log("Restic backup complete.")
+
     def restore_datastore(self, snapshot_id: str, log) -> None:
         """Restore a restic snapshot to the PBS datastore path on the PVE host."""
         snap = shlex.quote(snapshot_id)

@@ -17,8 +17,10 @@ Shows per-VM backup status, local/cloud coverage, storage usage, and historical 
 - **Cloud-only snapshots** — shows older restic backups that no longer exist locally
 - **Storage meters** — PBS local usage and Google Drive family quota
 - **Backup folder size** — actual restic repo size via `rclone size`
-- **Backup now** — trigger a PBS backup of any VM/LXC directly from the GUI; live log in job modal
+- **Backup now** — trigger a PBS-only or PBS+cloud backup of any VM/LXC; backup type selection modal with live log
+- **☁ sync** — trigger a standalone restic cloud sync from any VM card or snapshot row that has local-only coverage
 - **Restore** — restore any VM/LXC from a PBS snapshot (local) or from a restic snapshot (cloud); restic operations run on the PVE host via SSH, never inside the GUI container
+- **Job indicator** — running backup/restore jobs show a pulsing indicator on the VM card; click to reopen the progress modal at any time
 - **Multi-host** — configure multiple PVE/PBS hosts in `hosts.json`
 - **HA integration** — `/api/host/<id>/ha/sensors` endpoint for the [proxmox-backup-ha](https://github.com/d96moe/proxmox-backup-ha) integration
 
@@ -108,6 +110,7 @@ The GUI uses `rclone lsjson locks/` to check if a restic backup is in progress b
 - **Prune / retention settings** — UI for both PBS retention (`prune-backups` per storage in PVE) and restic `--keep-last / --keep-daily / --keep-weekly`; both written to PVE host config via SSH
 - **Backup scheduler** — view and edit schedules for both PBS (vzdump) and restic (cloud) jobs; currently both are configured statically on the PVE host via systemd timers / cron outside the GUI
 - **Delete backup (cloud)** — guided workflow to remove a specific VM's backup from the restic repo: restore full datastore → delete from PBS → re-backup → forget old snapshot. Expensive but correct given the whole-datastore restic architecture.
+- **Restic prune after sync** — after a successful `☁ sync`, automatically run `restic forget --prune` according to configured retention policy; currently pruning is handled outside the GUI
 
 ## Related
 

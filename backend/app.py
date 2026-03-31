@@ -8,6 +8,7 @@ Endpoints:
 from __future__ import annotations
 
 import re
+import threading
 import time
 from pathlib import Path
 from urllib.parse import urlparse
@@ -48,6 +49,17 @@ SELF_VMID: int | None = _detect_self_vmid()
 # Simple in-process cache (ttl=60s) so the page stays snappy
 _cache: dict[str, tuple[float, object]] = {}
 CACHE_TTL = 60
+
+# Per-host restic lock — prevents concurrent restic backup/restore operations
+_restic_locks: dict[str, threading.Lock] = {}
+_restic_locks_guard = threading.Lock()
+
+
+def _get_restic_lock(host_id: str) -> threading.Lock:
+    with _restic_locks_guard:
+        if host_id not in _restic_locks:
+            _restic_locks[host_id] = threading.Lock()
+        return _restic_locks[host_id]
 
 
 def _cached(key: str, fn):
@@ -373,26 +385,42 @@ def backup_pbs(host_id: str):
     if not host:
         abort(404)
     body = request.get_json() or {}
-    vmid    = int(body.get("vmid", 0))
-    vm_type = body.get("type", "vm")   # vm or ct
+    vmid             = int(body.get("vmid", 0))
+    vm_type          = body.get("type", "vm")   # vm or ct
+    run_restic_after = body.get("run_restic_after", False)
     if not vmid:
         abort(400, "vmid required")
 
-    job_id = create_job(f"PBS backup {vm_type}/{vmid}")
+    if run_restic_after and host.restic_repo:
+        restic_lock = _get_restic_lock(host_id)
+        if not restic_lock.acquire(blocking=False):
+            abort(409, "A restic operation is already running for this host")
+    else:
+        restic_lock = None
+
+    label = f"PBS + cloud backup {vm_type}/{vmid}" if run_restic_after else f"PBS backup {vm_type}/{vmid}"
+    job_id = create_job(label)
 
     def work(log):
-        pve = PVEClient(host)
-        nodes = pve.get_nodes()
-        node = nodes[0]
-        log(f"Triggering PBS backup: {vm_type}/{vmid} on node {node}")
-        upid = pve.backup_vm(vmid, vm_type, host.pbs_storage_id, node)
-        log(f"Task started: {upid}")
-        if isinstance(upid, str) and upid.startswith("UPID:"):
-            ok = pve.wait_for_task(node, upid, log)
-            if not ok:
-                raise RuntimeError("PBS backup task failed")
-        log("Backup complete.")
-        _cache.pop(f"items:{host_id}", None)
+        try:
+            pve = PVEClient(host)
+            nodes = pve.get_nodes()
+            node = nodes[0]
+            log(f"Triggering PBS backup: {vm_type}/{vmid} on node {node}")
+            upid = pve.backup_vm(vmid, vm_type, host.pbs_storage_id, node)
+            log(f"Task started: {upid}")
+            if isinstance(upid, str) and upid.startswith("UPID:"):
+                ok = pve.wait_for_task(node, upid, log)
+                if not ok:
+                    raise RuntimeError("PBS backup task failed")
+            log("Backup complete.")
+            if run_restic_after and host.restic_repo:
+                restic = ResticClient(host)
+                restic.backup_datastore(host.pbs_datastore_path, log)
+            _cache.pop(f"items:{host_id}", None)
+        finally:
+            if restic_lock:
+                restic_lock.release()
 
     run_job(job_id, work)
     return jsonify({"job_id": job_id})
@@ -426,6 +454,13 @@ def restore(host_id: str):
 
     if not vmid:
         abort(400, "vmid required")
+
+    if source == "cloud":
+        restic_lock = _get_restic_lock(host_id)
+        if not restic_lock.acquire(blocking=False):
+            abort(409, "A restic operation is already running for this host")
+    else:
+        restic_lock = None
 
     job_id = create_job(f"Restore {vm_type}/{vmid} from {source}")
 
@@ -501,6 +536,40 @@ def restore(host_id: str):
             log("Post-restore backup complete.")
 
         _cache.pop(f"items:{host_id}", None)
+
+    def work_with_lock(log):
+        try:
+            work(log)
+        finally:
+            if restic_lock:
+                restic_lock.release()
+
+    run_job(job_id, work_with_lock)
+    return jsonify({"job_id": job_id})
+
+
+@app.post("/api/host/<host_id>/backup/restic")
+def backup_restic(host_id: str):
+    """Trigger a restic backup of the PBS datastore to cloud."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.restic_repo:
+        abort(400, "restic not configured for this host")
+
+    restic_lock = _get_restic_lock(host_id)
+    if not restic_lock.acquire(blocking=False):
+        abort(409, "A restic operation is already running for this host")
+
+    job_id = create_job("Cloud backup (restic)")
+
+    def work(log):
+        try:
+            restic = ResticClient(host)
+            restic.backup_datastore(host.pbs_datastore_path, log)
+            _cache.pop(f"items:{host_id}", None)
+        finally:
+            restic_lock.release()
 
     run_job(job_id, work)
     return jsonify({"job_id": job_id})

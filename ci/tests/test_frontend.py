@@ -133,6 +133,7 @@ class ServerConfig:
     job_logs: list = None       # None → default
     job_status_code: int = 200  # HTTP status for /api/job/ responses
     items_request_count: int = 0  # incremented on each /items hit — for refresh verification
+    restic_status_code: int = 200  # HTTP status for /backup/restic POST
 
 
 cfg = ServerConfig()
@@ -213,9 +214,13 @@ class MockHandler(BaseHTTPRequestHandler):
         if length:
             self.rfile.read(length)
 
-        for host_id in ("home", "cabin"):
+        for host_id in ("home", "cabin", "snap-test"):
             if path in (f"/api/host/{host_id}/backup/pbs",
                         f"/api/host/{host_id}/restore"):
+                return self._json({"job_id": "mock-job-1"})
+            if path == f"/api/host/{host_id}/backup/restic":
+                if cfg.restic_status_code != 200:
+                    return self._error(cfg.restic_status_code)
                 return self._json({"job_id": "mock-job-1"})
 
         self._error(404)
@@ -247,6 +252,7 @@ def reset_server_config():
     cfg.job_logs = None
     cfg.job_status_code = 200
     cfg.items_request_count = 0
+    cfg.restic_status_code = 200
     yield
 
 
@@ -325,6 +331,20 @@ def test_deploy_refresh_btn_disable_in_open_job_modal(mock_server):
     html = urllib.request.urlopen(mock_server + "/").read().decode()
     assert "refresh-btn" in html and "disabled" in html, \
         "refresh-btn disable logic not found in HTML"
+
+def test_deploy_has_backup_modal_elements(mock_server):
+    """Backup choice modal elements must be present in served HTML."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    for el_id in ("backup-modal", "backup-confirm-btn", "backup-modal-options"):
+        assert f'id="{el_id}"' in html or f"id='{el_id}'" in html, \
+            f"#{el_id} missing from served HTML — backup modal not deployed!"
+
+def test_deploy_has_new_js_functions(mock_server):
+    """New JS functions for backup modal and job indicator must be present."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    for fn in ("openBackupModal", "closeBackupModal", "reopenJobModal",
+               "_activeJobs", "_setJobIndicator"):
+        assert fn in html, f"{fn} missing from served HTML"
 
 def test_deploy_js_has_abort_controller(mock_server):
     """Served index.html must contain AbortController — proves correct file is deployed."""
@@ -1103,49 +1123,254 @@ def test_restore_no_js_errors_full_flow(page: Page):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# BACKUP NOW — on-demand backup button
+# BACKUP NOW — backup modal (PBS only / PBS+cloud choice)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_backup_now_opens_job_modal_with_correct_title(page: Page):
-    """Confirming 'Backup now' must open job modal titled 'PBS Backup'."""
-    cfg.job_status = "done"
-    cfg.job_logs = ["Backup complete."]
+def test_backup_now_opens_backup_modal(page: Page):
+    """Clicking 'Backup now' must open the backup choice modal, not a confirm dialog."""
     backup_btn = page.locator(".backup-btn[data-vmid='101']").first
     backup_btn.wait_for(state="visible", timeout=5000)
-    page.on("dialog", lambda d: d.accept())
     backup_btn.click()
+    page.wait_for_selector("#backup-modal.open", timeout=5000)
+    assert not page.locator("#job-modal").evaluate("el => el.classList.contains('open')"), \
+        "Job modal must not open before user confirms backup choice"
+    assert page._js_errors == []
+    page.evaluate("closeBackupModal()")
+
+def test_backup_modal_pbs_only_opens_job_modal(page: Page):
+    """Selecting PBS only and confirming opens job modal titled 'PBS Backup'."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete."]
+    page.locator(".backup-btn[data-vmid='101']").first.click()
+    page.wait_for_selector("#backup-modal.open", timeout=5000)
+    # PBS only is selected by default — just confirm
+    page.click("#backup-confirm-btn")
     page.wait_for_selector("#job-modal.open", timeout=5000)
     assert page.locator("#job-title").inner_text() == "PBS Backup"
     page.wait_for_function(
-        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+        "() => ['done','error'].includes(document.getElementById('job-badge').textContent)",
+        timeout=6000,
+    )
     assert page.locator("#job-badge").inner_text() == "done"
     assert page._js_errors == []
     page.evaluate("closeJobModal()")
 
-def test_backup_now_cancel_does_not_open_job_modal(page: Page):
-    """Cancelling the confirm dialog must NOT open the job modal."""
-    backup_btn = page.locator(".backup-btn[data-vmid='101']").first
-    backup_btn.wait_for(state="visible", timeout=5000)
-    page.on("dialog", lambda d: d.dismiss())
-    backup_btn.click()
-    # Modal must remain closed
-    page.wait_for_timeout(500)
-    assert not page.locator("#job-modal").evaluate(
-        "el => el.classList.contains('open')"
-    ), "Job modal must not open when confirm is cancelled"
+def test_backup_modal_pbs_plus_cloud_opens_job_modal(page: Page):
+    """Selecting PBS+Cloud and confirming opens job modal with correct title."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete.", "Restic backup complete."]
+    page.locator(".backup-btn[data-vmid='101']").first.click()
+    page.wait_for_selector("#backup-modal.open", timeout=5000)
+    page.locator(".source-opt[data-btype='pbs+restic']").click()
+    page.click("#backup-confirm-btn")
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    assert page.locator("#job-title").inner_text() == "PBS + Cloud Backup"
+    page.wait_for_function(
+        "() => ['done','error'].includes(document.getElementById('job-badge').textContent)",
+        timeout=6000,
+    )
+    assert page.locator("#job-badge").inner_text() == "done"
+    assert page._js_errors == []
+    page.evaluate("closeJobModal()")
+
+def test_backup_modal_cancel_does_not_open_job_modal(page: Page):
+    """Clicking Cancel in backup modal must NOT start a job."""
+    page.locator(".backup-btn[data-vmid='101']").first.click()
+    page.wait_for_selector("#backup-modal.open", timeout=5000)
+    page.locator("#backup-modal .btn:not(.btn-primary)").click()
+    page.wait_for_timeout(400)
+    assert not page.locator("#job-modal").evaluate("el => el.classList.contains('open')"), \
+        "Job modal must not open when backup is cancelled"
     assert page._js_errors == []
 
-def test_backup_now_refresh_btn_disabled_during_job(page: Page):
-    """Refresh button must be disabled while backup job modal is open."""
+def test_backup_modal_no_js_errors_full_flow(page: Page):
+    """No JS errors across backup modal open → select → confirm → done → close."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Backup complete."]
+    page.locator(".backup-btn[data-vmid='101']").first.click()
+    page.wait_for_selector("#backup-modal.open", timeout=5000)
+    page.click("#backup-confirm-btn")
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    page.wait_for_function(
+        "() => ['done','error'].includes(document.getElementById('job-badge').textContent)",
+        timeout=6000,
+    )
+    page.evaluate("closeJobModal()")
+    assert page._js_errors == [], f"JS errors during backup flow: {page._js_errors}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SYNC BUTTON — ☁ sync visible for local-only VMs and snapshots
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def snap_test_page(browser, mock_server):
+    """Page loaded on the snap-test host (has local-only, cloud-only, both VMs)."""
+    orig_hosts = HOSTS[:]
+    HOSTS.append({"id": "snap-test", "label": "Snap Test"})
+    try:
+        ctx = browser.new_context(base_url=mock_server)
+        pg = ctx.new_page()
+        pg._js_errors = []
+        pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+        pg.goto("/")
+        pg.wait_for_function(
+            "() => document.getElementById('content').innerText !== 'Loading…'",
+            timeout=10000,
+        )
+        pg.click("#nav-snap-test")
+        pg.wait_for_function(
+            "() => document.getElementById('content').innerText.includes('local-only-vm')",
+            timeout=8000,
+        )
+        yield pg
+        ctx.close()
+    finally:
+        HOSTS[:] = orig_hosts
+
+
+def test_sync_button_visible_on_local_only_card(snap_test_page: Page):
+    """Local-only VM card must show ☁ sync button at card level."""
+    # VM 502 is local-only in snap-test fixture
+    sync_btn = snap_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='502']) .backup-btn:has-text('sync')"
+    )
+    assert sync_btn.count() > 0, "☁ sync button not found on local-only VM card"
+    assert sync_btn.first.is_visible()
+
+
+def test_sync_button_not_visible_on_fully_covered_card(snap_test_page: Page):
+    """VM with all snapshots covered by cloud must NOT show ☁ sync at card level."""
+    # VM 501 is local+cloud — no local-only snapshots
+    sync_btn = snap_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='501']) .backup-btn:has-text('sync')"
+    )
+    assert sync_btn.count() == 0, "☁ sync button should not appear on fully-covered VM card"
+
+
+def test_sync_button_visible_in_local_only_snapshot_row(snap_test_page: Page):
+    """Expanding a local-only VM must show ☁ sync in the snapshot row."""
+    expand_vm_card(snap_test_page, 502)
+    row_sync = snap_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='502']) .snapshot-row .restore-btn:has-text('sync')"
+    )
+    assert row_sync.count() > 0, "☁ sync not found in local-only snapshot row after expand"
+    assert row_sync.first.is_visible()
+
+
+def test_sync_button_not_in_cloud_covered_snapshot_row(snap_test_page: Page):
+    """Snapshot rows that already have cloud coverage must NOT show ☁ sync."""
+    expand_vm_card(snap_test_page, 501)
+    row_sync = snap_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='501']) .snapshot-row .restore-btn:has-text('sync')"
+    )
+    assert row_sync.count() == 0, "☁ sync should not appear in cloud-covered snapshot row"
+
+
+def test_sync_button_opens_job_modal(snap_test_page: Page):
+    """Clicking ☁ sync on a local-only card → confirm dialog → job modal opens."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["Restic backup complete."]
+    snap_test_page.on("dialog", lambda d: d.accept())
+    sync_btn = snap_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='502']) .backup-btn:has-text('sync')"
+    ).first
+    sync_btn.click()
+    snap_test_page.wait_for_selector("#job-modal.open", timeout=5000)
+    snap_test_page.wait_for_function(
+        "() => ['done','error'].includes(document.getElementById('job-badge').textContent)",
+        timeout=6000,
+    )
+    assert snap_test_page.locator("#job-badge").inner_text() == "done"
+    assert snap_test_page._js_errors == []
+    snap_test_page.evaluate("closeJobModal()")
+
+
+def test_restic_409_shows_friendly_alert(snap_test_page: Page):
+    """When /backup/restic returns 409, the user sees a readable message (not raw HTTP)."""
+    cfg.restic_status_code = 409
+    alert_messages = []
+    snap_test_page.on("dialog", lambda d: (alert_messages.append(d.message), d.accept()))
+    sync_btn = snap_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='502']) .backup-btn:has-text('sync')"
+    ).first
+    # First dialog is the confirm; second would be the alert if it appears
+    sync_btn.click()
+    snap_test_page.wait_for_timeout(800)
+    assert any("restic" in m.lower() or "already" in m.lower() or "running" in m.lower()
+               for m in alert_messages), \
+        f"Expected friendly 409 message, got: {alert_messages}"
+    assert snap_test_page._js_errors == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB INDICATOR — running job shown on card, modal reopenable
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_job_indicator_appears_after_closing_modal(page: Page):
+    """After starting a job and closing the modal, an indicator appears on the VM card."""
     cfg.job_status = "running"
     cfg.job_logs = ["Starting backup..."]
-    backup_btn = page.locator(".backup-btn[data-vmid='101']").first
-    backup_btn.wait_for(state="visible", timeout=5000)
-    page.on("dialog", lambda d: d.accept())
-    backup_btn.click()
+    page.locator(".backup-btn[data-vmid='101']").first.click()
+    page.wait_for_selector("#backup-modal.open", timeout=5000)
+    page.click("#backup-confirm-btn")
     page.wait_for_selector("#job-modal.open", timeout=5000)
-    assert page.locator("#refresh-btn").is_disabled(), \
-        "Refresh button should be disabled while backup job modal is open"
+    # Badge must show running before we close
+    page.wait_for_function(
+        "() => document.getElementById('job-badge').textContent === 'running'",
+        timeout=4000,
+    )
+    page.evaluate("closeJobModal()")
+    page.wait_for_selector("#job-modal:not(.open)", timeout=3000)
+    # Indicator must be visible on card
+    indicator = page.locator("#vm-job-101")
+    assert indicator.is_visible(), \
+        "Job indicator not visible on card after closing modal with running job"
+    assert page._js_errors == []
+
+
+def test_job_indicator_disappears_when_job_completes(page: Page):
+    """Indicator must disappear once the background poll detects job completion."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Starting backup..."]
+    page.locator(".backup-btn[data-vmid='101']").first.click()
+    page.wait_for_selector("#backup-modal.open", timeout=5000)
+    page.click("#backup-confirm-btn")
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    page.evaluate("closeJobModal()")
+    # Now let the job finish
+    cfg.job_status = "done"
+    # Indicator should disappear when poll detects done (poll every 2s)
+    page.wait_for_function(
+        "() => !document.getElementById('vm-job-101') || "
+        "      document.getElementById('vm-job-101').style.display === 'none'",
+        timeout=8000,
+    )
+    assert page._js_errors == []
+
+
+def test_job_indicator_click_reopens_modal(page: Page):
+    """Clicking the indicator on a card must reopen the job progress modal."""
+    cfg.job_status = "running"
+    cfg.job_logs = ["Starting backup..."]
+    page.locator(".backup-btn[data-vmid='101']").first.click()
+    page.wait_for_selector("#backup-modal.open", timeout=5000)
+    page.click("#backup-confirm-btn")
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    page.wait_for_function(
+        "() => document.getElementById('job-badge').textContent === 'running'",
+        timeout=4000,
+    )
+    page.evaluate("closeJobModal()")
+    page.wait_for_selector("#job-modal:not(.open)", timeout=3000)
+    # Click the indicator
+    indicator = page.locator("#vm-job-101")
+    indicator.wait_for(state="visible", timeout=3000)
+    indicator.click()
+    # Modal must reopen
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    assert page.locator("#job-badge").inner_text() == "running"
+    assert page._js_errors == []
     page.evaluate("closeJobModal()")
 
 
