@@ -613,7 +613,7 @@ function renderCard(item) {
           ${itemLocBadge(item)}
           <span id="vm-job-${item.id}" style="display:none" onclick="event.stopPropagation();reopenJobModal(${item.id})"></span>
           ${hasLocalOnly ? `<button class="backup-btn" onclick="event.stopPropagation();triggerResticBackup(${item.id},'${item.name}')">☁ sync</button>` : ''}
-          <button class="backup-btn" data-vmid="${item.id}" onclick="event.stopPropagation();openBackupModal(${item.id},'${item.type}','${item.name.replace(/'/g,"\\'")}')">Backup now</button>
+          ${item.snapshots.some(s => s.local) ? `<button class="backup-btn" data-vmid="${item.id}" onclick="event.stopPropagation();openBackupModal(${item.id},'${item.type}','${item.name.replace(/'/g,"\\'")}')">Backup now</button>` : ''}
         </div>
         <button class="expand-btn" onclick="event.stopPropagation();toggleSnaps(this.closest('.vm-header'))">▾</button>
       </div>
