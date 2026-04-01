@@ -36,7 +36,7 @@ ITEMS = {
         "storage": {"local_used": 100, "local_total": 500, "cloud_used": 0},
         "vms": [
             {"id": 101, "name": "home-vm", "type": "vm", "os": "linux", "status": "running",
-             "template": False,
+             "template": False, "in_pve": True,
              "snapshots": [{"backup_time": 1700000000, "date": "2023-11-14 22:13:20",
                             "age": "1h ago", "local": True, "cloud": True,
                             "incremental": True, "size": "1.2 GB",
@@ -44,7 +44,7 @@ ITEMS = {
         ],
         "lxcs": [
             {"id": 104, "name": "home-lxc", "type": "lxc", "os": "linux", "status": "running",
-             "template": False,
+             "template": False, "in_pve": True,
              "snapshots": [{"backup_time": 1700000010, "date": "2023-11-14 22:13:30",
                             "age": "1h ago", "local": True, "cloud": True,
                             "incremental": True, "size": "500 MB",
@@ -52,23 +52,24 @@ ITEMS = {
         ],
     },
     # snap-test: three VMs covering local+cloud, local-only, cloud-only
+    # VM 503 has in_pve=False (deleted from PVE but PBS snapshots remain)
     "snap-test": {
         "storage": {"local_used": 50, "local_total": 200, "cloud_used": 0},
         "vms": [
             {"id": 501, "name": "both-snap-vm", "type": "vm", "os": "linux",
-             "status": "running", "template": False,
+             "status": "running", "template": False, "in_pve": True,
              "snapshots": [{"backup_time": 1700001000, "date": "2023-11-14 22:16:40",
                             "age": "1h ago", "local": True, "cloud": True,
                             "incremental": True, "size": "1.0 GB",
                             "restic_id": "aaa111bbb222", "restic_short_id": "aaa111bb"}]},
             {"id": 502, "name": "local-only-vm", "type": "vm", "os": "linux",
-             "status": "stopped", "template": False,
+             "status": "stopped", "template": False, "in_pve": True,
              "snapshots": [{"backup_time": 1700002000, "date": "2023-11-14 22:33:20",
                             "age": "2h ago", "local": True, "cloud": False,
                             "incremental": True, "size": "800 MB",
                             "restic_id": None, "restic_short_id": None}]},
             {"id": 503, "name": "cloud-only-vm", "type": "vm", "os": "linux",
-             "status": "stopped", "template": False,
+             "status": "stopped", "template": False, "in_pve": False,
              "snapshots": [{"backup_time": 1699900000, "date": "2023-11-13 18:26:40",
                             "age": "26h ago", "local": False, "cloud": True,
                             "incremental": True, "size": "—",
@@ -80,6 +81,7 @@ ITEMS = {
         "storage": {"local_used": 200, "local_total": 800, "cloud_used": 0},
         "vms": [
             {"id": 201, "name": "cabin-vm", "type": "vm", "os": "linux", "status": "running",
+             "template": False, "in_pve": True,
              "snapshots": [{"backup_time": 1700000001, "date": "2023-11-14 22:13:21",
                             "age": "2h ago", "local": True, "cloud": True,
                             "incremental": True, "size": "2.4 GB"}]}
@@ -96,6 +98,7 @@ ITEMS = {
         "vms": [],
         "lxcs": [
             {"id": 301, "name": "only-ct", "type": "lxc", "os": "linux", "status": "running",
+             "template": False, "in_pve": True,
              "snapshots": []}
         ],
     },
@@ -103,10 +106,10 @@ ITEMS = {
 
 STORAGE = {
     "home":  {"local_used": 100, "local_total": 500, "cloud_used": 50,
-              "cloud_total": 2000, "cloud_quota_used": 738},
+              "cloud_total": 2000, "cloud_quota_used": 738, "dedup_factor": 4.2},
     "cabin": {"local_used": 200, "local_total": 800, "cloud_used": 50,
-              "cloud_total": 2000, "cloud_quota_used": 738},
-    # no-cloud: cloud_total is absent/null
+              "cloud_total": 2000, "cloud_quota_used": 738, "dedup_factor": 7.6},
+    # no-cloud: cloud_total is absent/null; no dedup_factor (PBS GC not available)
     "no-cloud": {"local_used": 30, "local_total": 100, "cloud_used": 0},
 }
 
@@ -302,11 +305,10 @@ def content_text(pg: Page) -> str:
 def expand_vm_card(pg: Page, vmid: int):
     """Expand the snapshot section of the VM card with the given vmid.
     Snapshots are collapsed by default (.snapshots { display:none }).
+    Works for both in_pve=True (has backup-btn) and in_pve=False (no backup-btn).
     """
-    # Find the card whose header contains this vmid's backup-btn, click the expand btn
-    pg.locator(f".backup-btn[data-vmid='{vmid}']").locator(
-        "xpath=ancestor::div[contains(@class,'vm-header')]"
-    ).click()
+    # Click the vm-header — works regardless of whether a backup-btn is present
+    pg.locator(f".vm-card:has([data-vmid='{vmid}'])").locator(".vm-header").first.click()
     # Wait for snapshots to become visible (any restore button in this card)
     pg.locator(f".restore-btn[data-vmid='{vmid}']").first.wait_for(
         state="visible", timeout=5000
@@ -1759,3 +1761,247 @@ def test_layout_narrow_restore_modal_opens(browser, mock_server):
     assert pg._js_errors == []
     pg.click("button.modal-close")
     ctx.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEPLOY — theme toggle + dedup element present in served HTML
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_deploy_has_theme_toggle(mock_server):
+    """theme-toggle button must be present in the served HTML."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "theme-toggle" in html, \
+        "id='theme-toggle' or theme-toggle class missing from served HTML"
+
+def test_deploy_has_pbs_dedup_element(mock_server):
+    """pbs-dedup span must be present in the served HTML for dedup display."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "pbs-dedup" in html, \
+        "id='pbs-dedup' missing from served HTML — dedup factor not deployed"
+
+def test_deploy_has_toggle_theme_function(mock_server):
+    """toggleTheme() JS function must be present in the served HTML."""
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "toggleTheme" in html, "toggleTheme() missing from served HTML"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# THEME — light/dark toggle and localStorage persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_theme_toggle_button_exists(page: Page):
+    """theme-toggle button must be present in the DOM after page load."""
+    result = page.evaluate("document.getElementById('theme-toggle') !== null")
+    assert result, "#theme-toggle button not found in DOM"
+
+def test_theme_default_is_dark(page: Page):
+    """Default theme must be dark (data-theme='dark' on <html>)."""
+    theme = page.evaluate("document.documentElement.getAttribute('data-theme')")
+    assert theme == "dark", f"Default theme should be 'dark', got: {theme!r}"
+
+def test_theme_toggle_switches_to_light(page: Page):
+    """Clicking theme-toggle once must switch to light theme."""
+    page.evaluate("toggleTheme()")
+    theme = page.evaluate("document.documentElement.getAttribute('data-theme')")
+    assert theme == "light", f"Expected 'light' after toggle, got: {theme!r}"
+
+def test_theme_toggle_back_to_dark(page: Page):
+    """Clicking theme-toggle twice must return to dark theme."""
+    page.evaluate("toggleTheme()")
+    page.evaluate("toggleTheme()")
+    theme = page.evaluate("document.documentElement.getAttribute('data-theme')")
+    assert theme == "dark", f"Expected 'dark' after two toggles, got: {theme!r}"
+
+def test_theme_icon_is_sun_on_dark(page: Page):
+    """Theme toggle icon must be ☀ when theme is dark (click to go light)."""
+    # Ensure dark theme
+    page.evaluate("document.documentElement.setAttribute('data-theme','dark')")
+    page.evaluate("_applyTheme('dark')")
+    icon = page.locator("#theme-toggle").inner_text()
+    assert icon == "☀", f"Expected ☀ icon on dark theme, got: {icon!r}"
+
+def test_theme_icon_is_moon_on_light(page: Page):
+    """Theme toggle icon must be ☽ when theme is light (click to go dark)."""
+    page.evaluate("_applyTheme('light')")
+    icon = page.locator("#theme-toggle").inner_text()
+    assert icon == "☽", f"Expected ☽ icon on light theme, got: {icon!r}"
+
+def test_theme_persists_in_localstorage(page: Page):
+    """After toggling to light, localStorage must store 'light'."""
+    page.evaluate("toggleTheme()")  # dark → light
+    stored = page.evaluate("localStorage.getItem('theme')")
+    assert stored == "light", f"localStorage should have 'light', got: {stored!r}"
+
+def test_theme_no_js_errors_on_toggle(page: Page):
+    """No JS errors when toggling theme multiple times."""
+    for _ in range(4):
+        page.evaluate("toggleTheme()")
+    assert page._js_errors == [], f"JS errors during theme toggling: {page._js_errors}"
+
+def test_theme_light_shows_content(page: Page):
+    """In light mode the content area must still be rendered (no white-on-white crash)."""
+    page.evaluate("_applyTheme('light')")
+    text = content_text(page)
+    assert "home-vm" in text, f"Content invisible in light theme: {text[:100]!r}"
+    assert page._js_errors == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IN_PVE — backup button visibility based on in_pve flag
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_in_pve_true_has_backup_now_btn(snap_test_page: Page):
+    """VM with in_pve=True (VM 501) must show Backup now button."""
+    backup_btn = snap_test_page.locator(".backup-btn[data-vmid='501']").filter(
+        has_text="Backup"
+    )
+    assert backup_btn.count() > 0, "Backup now button missing for in_pve=True VM (501)"
+
+def test_in_pve_false_no_backup_now_btn(snap_test_page: Page):
+    """VM with in_pve=False (VM 503, cloud-only) must NOT show Backup now button."""
+    # Look for a button with text "Backup" for VM 503
+    backup_btns = snap_test_page.locator(".backup-btn[data-vmid='503']").filter(
+        has_text="Backup"
+    )
+    assert backup_btns.count() == 0, \
+        "Backup now button shown for in_pve=False VM (503) — should be hidden"
+
+def test_in_pve_false_restore_still_available(snap_test_page: Page):
+    """VM with in_pve=False must still show cloud restore button (cloud-only snapshot)."""
+    expand_vm_card(snap_test_page, 503)
+    restore_btn = snap_test_page.locator(".restore-btn[data-vmid='503']")
+    assert restore_btn.count() > 0, \
+        "Restore button missing for in_pve=False VM (503) — cloud restore should still work"
+
+def test_in_pve_false_no_js_errors_on_card_render(snap_test_page: Page):
+    """Rendering a card for an in_pve=False VM must not throw JS errors."""
+    assert snap_test_page._js_errors == [], \
+        f"JS errors rendering in_pve=False card: {snap_test_page._js_errors}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEDUP — PBS dedup factor shown in sidebar
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_dedup_shown_in_sidebar_when_available(page: Page):
+    """pbs-dedup element must show the dedup factor from storage response (home: 4.2×)."""
+    page.wait_for_function(
+        "() => document.getElementById('pbs-dedup').innerText !== '—'",
+        timeout=8000,
+    )
+    dedup_text = page.locator("#pbs-dedup").inner_text()
+    assert "4.2" in dedup_text, \
+        f"Expected dedup '4.2×' in sidebar, got: {dedup_text!r}"
+
+def test_dedup_updates_on_host_switch(page: Page):
+    """Switching to cabin must update dedup to 7.6× (cabin storage mock)."""
+    page.click("#nav-cabin")
+    page.wait_for_function(
+        "() => document.getElementById('pbs-dedup').innerText.includes('7.6')",
+        timeout=8000,
+    )
+    dedup_text = page.locator("#pbs-dedup").inner_text()
+    assert "7.6" in dedup_text, f"Expected '7.6×' for cabin dedup, got: {dedup_text!r}"
+
+def test_dedup_shows_dash_when_not_available(browser, mock_server):
+    """pbs-dedup must show '—' when storage response has no dedup_factor."""
+    orig_hosts = HOSTS[:]
+    HOSTS.append({"id": "no-cloud", "label": "No Cloud"})
+    try:
+        ctx = browser.new_context(base_url=mock_server)
+        pg = ctx.new_page()
+        pg._js_errors = []
+        pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+        pg.goto("/")
+        pg.wait_for_function(
+            "() => document.getElementById('content').innerText !== 'Loading\u2026'",
+            timeout=10000,
+        )
+        pg.click("#nav-no-cloud")
+        pg.wait_for_timeout(1000)
+        dedup_text = pg.locator("#pbs-dedup").inner_text()
+        assert dedup_text == "—", f"Expected '—' when dedup_factor absent, got: {dedup_text!r}"
+        assert pg._js_errors == []
+        ctx.close()
+    finally:
+        HOSTS[:] = orig_hosts
+
+def test_dedup_no_js_errors(page: Page):
+    """No JS errors when dedup factor is displayed."""
+    page.wait_for_function(
+        "() => document.getElementById('pbs-dedup').innerText !== 'Loading\u2026'",
+        timeout=8000,
+    )
+    assert page._js_errors == [], f"JS errors while dedup displayed: {page._js_errors}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MOBILE — portrait viewport ≤699px layout
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def mobile_page(browser, mock_server):
+    """390x844 viewport — iPhone-sized portrait screen, home host loaded."""
+    ctx = browser.new_context(base_url=mock_server, viewport={"width": 390, "height": 844})
+    pg = ctx.new_page()
+    pg._js_errors = []
+    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.goto("/")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText.includes('home-vm')",
+        timeout=10000,
+    )
+    yield pg
+    ctx.close()
+
+
+def test_mobile_no_js_errors(mobile_page: Page):
+    """No JS errors at 390px mobile viewport."""
+    assert mobile_page._js_errors == [], f"JS errors at mobile viewport: {mobile_page._js_errors}"
+
+def test_mobile_vm_cards_rendered(mobile_page: Page):
+    """VM cards must render at 390px — content not blank."""
+    assert mobile_page.locator(".vm-card").count() > 0, "No VM cards on mobile"
+    assert "home-vm" in content_text(mobile_page)
+
+def test_mobile_sidebar_shows_host_buttons(mobile_page: Page):
+    """At mobile width, host nav buttons must still be present in DOM."""
+    assert mobile_page.locator("#nav-home").count() > 0, "#nav-home missing on mobile"
+    assert mobile_page.locator("#nav-cabin").count() > 0, "#nav-cabin missing on mobile"
+
+def test_mobile_host_switch_works(mobile_page: Page):
+    """Switching hosts must work at mobile viewport."""
+    mobile_page.click("#nav-cabin")
+    wait_content(mobile_page, "cabin-vm")
+    assert "cabin-vm" in content_text(mobile_page)
+    assert mobile_page._js_errors == []
+
+def test_mobile_backup_modal_opens(mobile_page: Page):
+    """Backup modal must open without JS errors on mobile."""
+    mobile_page.locator(".backup-btn").first.click()
+    mobile_page.wait_for_selector("#backup-modal.open", timeout=5000)
+    assert mobile_page.locator("#backup-modal .modal").is_visible()
+    assert mobile_page._js_errors == []
+    mobile_page.evaluate("closeBackupModal()")
+
+def test_mobile_snapshot_rows_stack_vertically(mobile_page: Page):
+    """At mobile width, snapshot rows must not overflow horizontally."""
+    expand_vm_card(mobile_page, 101)
+    overflow = mobile_page.evaluate(
+        "() => { const row = document.querySelector('.snapshot-row');"
+        " return row ? row.scrollWidth > row.clientWidth + 2 : false; }"
+    )
+    assert not overflow, \
+        "Snapshot row has horizontal overflow at mobile width — rows not stacking"
+
+def test_mobile_vm_card_not_clipped(mobile_page: Page):
+    """VM card must be at least partially visible — not clipped off-screen."""
+    assert _partly_in_viewport(mobile_page, ".vm-card"), \
+        "VM card not visible in mobile viewport"
+
+def test_mobile_theme_toggle_works(mobile_page: Page):
+    """Theme toggle must switch theme on mobile too."""
+    mobile_page.evaluate("toggleTheme()")
+    theme = mobile_page.evaluate("document.documentElement.getAttribute('data-theme')")
+    assert theme == "light", f"Theme toggle broken on mobile, got: {theme!r}"
+    assert mobile_page._js_errors == []

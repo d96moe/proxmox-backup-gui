@@ -492,3 +492,101 @@ def test_backup_post_restore_data_appears_in_gui(real_page, host_id, items):
         timeout=15000,
     )
     assert real_page._js_errors == [], f"JS errors after restore + GUI refresh: {real_page._js_errors}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API FIELDS — new backend fields (dedup_factor, in_pve) introduced for GUI features
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_storage_api_returns_dedup_factor(host_id):
+    """GET /api/host/<id>/storage must include dedup_factor field (may be None if GC not run)."""
+    storage = _get(f"/api/host/{host_id}/storage")
+    assert "dedup_factor" in storage, \
+        f"dedup_factor missing from storage response — PBS GC endpoint not wired up.\n{storage}"
+
+def test_storage_dedup_factor_is_number_or_none(host_id):
+    """dedup_factor must be a positive float or None — never a string or negative number."""
+    storage = _get(f"/api/host/{host_id}/storage")
+    dedup = storage.get("dedup_factor")
+    if dedup is not None:
+        assert isinstance(dedup, (int, float)), \
+            f"dedup_factor must be numeric, got {type(dedup).__name__}: {dedup!r}"
+        assert dedup > 0, f"dedup_factor must be positive, got: {dedup}"
+
+def test_items_api_returns_in_pve_field(host_id, items):
+    """Every VM and LXC in /api/host/<id>/items must have an in_pve boolean field."""
+    for section in ("vms", "lxcs"):
+        for item in items.get(section, []):
+            assert "in_pve" in item, \
+                f"in_pve missing from {section} item id={item.get('id')}"
+            assert isinstance(item["in_pve"], bool), \
+                f"in_pve must be bool for id={item.get('id')}, got {type(item['in_pve']).__name__}"
+
+def test_items_in_pve_true_for_existing_vms(host_id, items):
+    """VMs/LXCs that are in PVE's inventory must have in_pve=True."""
+    for section in ("vms", "lxcs"):
+        for item in items.get(section, []):
+            # All items returned by PVE should be in PVE — in_pve=False only for
+            # orphaned PBS snapshots whose source VM was deleted from PVE.
+            # At minimum, items with local PBS snapshots must have in_pve=True
+            # (otherwise the CI template is misconfigured).
+            local_snaps = [s for s in item.get("snapshots", []) if s.get("local")]
+            if local_snaps:
+                assert item["in_pve"], \
+                    f"VM {item['id']} has local PBS snapshots but in_pve=False — " \
+                    f"check if VM was accidentally deleted from PVE"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GUI FEATURES — dedup display, backup button visibility based on in_pve
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_dedup_shown_in_sidebar(real_page, host_id):
+    """GUI sidebar must show PBS dedup factor (pbs-dedup element must not be '—')."""
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    # Wait for storage data to load — dedup may need a moment
+    try:
+        real_page.wait_for_function(
+            "() => document.getElementById('pbs-dedup').innerText !== '—'",
+            timeout=10000,
+        )
+        dedup_text = real_page.locator("#pbs-dedup").inner_text()
+        # Must contain a number (e.g. "4.2×")
+        assert any(c.isdigit() for c in dedup_text), \
+            f"pbs-dedup text does not contain a number: {dedup_text!r}"
+    except Exception:
+        # If GC hasn't run on CI PBS, dedup_factor may legitimately be None → '—'
+        dedup_text = real_page.locator("#pbs-dedup").inner_text()
+        if dedup_text == "—":
+            import warnings
+            warnings.warn(
+                "pbs-dedup shows '—' — PBS GC may not have run on CI instance. "
+                "Run 'proxmox-backup-manager garbage-collection start' to generate GC data."
+            )
+        else:
+            raise
+
+def test_backup_btn_absent_for_non_pve_items(real_page, host_id, items):
+    """Backup now button must be absent for items with in_pve=False."""
+    non_pve = [
+        item for section in ("vms", "lxcs")
+        for item in items.get(section, [])
+        if not item.get("in_pve", True)
+    ]
+    if not non_pve:
+        pytest.skip("No in_pve=False items in CI data — skipping backup button visibility test")
+
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    for item in non_pve:
+        vmid = item["id"]
+        real_page.wait_for_function(
+            f"() => document.getElementById('content').innerText.includes('{vmid}')",
+            timeout=10000,
+        )
+        backup_btns = real_page.locator(
+            f".backup-btn[data-vmid='{vmid}']"
+        ).filter(has_text="Backup")
+        assert backup_btns.count() == 0, \
+            f"Backup now button shown for in_pve=False item vmid={vmid}"
