@@ -10,6 +10,42 @@ Shows per-VM backup status, local/cloud coverage, storage usage, and historical 
 >
 > The GUI can trigger real backup and restore operations on your Proxmox host. A restore from cloud will stop PBS, overwrite your local datastore, and restart PBS. Make sure you understand what each operation does before using it.
 
+## Relationship to proxmox-backup-restore
+
+This GUI is designed to work alongside **[proxmox-backup-restore](https://github.com/d96moe/proxmox-backup-restore)** — a set of scripts that set up PBS local backups and restic cloud backups on a Proxmox host. If you have installed and configured that project, this GUI will work out of the box.
+
+You can use this GUI without those scripts, but you must replicate the same environment on your PVE host (see [Prerequisites](#prerequisites) below).
+
+## Prerequisites
+
+The GUI LXC talks to your PVE host over both the API and SSH. The following must be in place before deploying:
+
+### On your PVE host
+
+| Requirement | Notes |
+|---|---|
+| Proxmox VE 8+ with PBS | PBS must be running with at least one datastore configured |
+| PBS user or API token | Needs `Datastore.Audit`, `Datastore.Backup`, `VM.Backup` privileges |
+| PVE user | `root@pam` or a user with `VM.PowerMgmt`, `Datastore.Allocate` (for restore) |
+| `restic` binary | Required for cloud backup/restore features; must be in `$PATH` |
+| `rclone` binary | Required for cloud features; must be in `$PATH` |
+| rclone configured | A Google Drive remote (`rclone.conf`) with a remote path for the restic repo |
+| restic repo initialized | `restic -r rclone:<remote>:<path> init` must have been run |
+| Passwordless SSH from GUI LXC | The GUI LXC (default: LXC 199) must be able to SSH to the PVE host as root without a password prompt — all cloud operations (restic backup, restore, datastore wipe) run via SSH, never inside the LXC |
+
+### Optional (cloud features only)
+
+Cloud backup, cloud restore, and ☁ sync are all skipped gracefully if `restic_repo` / `restic_password` are omitted from `hosts.json`. The local PBS features work without any restic/rclone setup.
+
+### SSH key setup (if not already done)
+
+On the GUI LXC (LXC 199):
+
+```bash
+ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N ""
+ssh-copy-id root@<your-pve-host-ip>
+```
+
 ![til](./p-b-g_ui.gif)
 
 ## Features
@@ -116,5 +152,5 @@ The GUI uses `rclone lsjson locks/` to check if a restic backup is in progress b
 
 ## Related
 
-- [proxmox-backup-restore](https://github.com/d96moe/proxmox-backup-restore) — PBS + restic setup and disaster recovery scripts
-- [proxmox-backup-ha](https://github.com/d96moe/proxmox-backup-ha) — Home Assistant integration
+- [proxmox-backup-restore](https://github.com/d96moe/proxmox-backup-restore) — PBS + restic setup and disaster recovery scripts; sets up the environment this GUI expects
+- [proxmox-backup-ha](https://github.com/d96moe/proxmox-backup-ha) — Home Assistant integration using the `/api/host/<id>/ha/sensors` endpoint
