@@ -10,6 +10,8 @@ Shows per-VM backup status, local/cloud coverage, storage usage, and historical 
 >
 > The GUI can trigger real backup and restore operations on your Proxmox host. A restore from cloud will stop PBS, overwrite your local datastore, and restart PBS. Make sure you understand what each operation does before using it.
 
+![til](./p-b-g_ui.gif)
+
 ## Features
 
 - **Per-VM/LXC overview** — snapshot count, latest backup age, local/cloud coverage badges

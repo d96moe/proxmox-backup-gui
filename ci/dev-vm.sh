@@ -29,16 +29,13 @@ RESTIC_PASSWORD="$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} cat /etc/resti
 PBS_CI_PASSWORD="${PBS_CI_PASSWORD:-gui-test-pw}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# If script is run from the repo, REPO_ROOT is parent of ci/. Otherwise fall
-# back to cloning from GitHub into a temp dir.
-if [ -f "${SCRIPT_DIR}/../backend/app.py" ]; then
-    REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-else
-    REPO_ROOT="/tmp/proxmox-backup-gui-dev"
-    if [ ! -d "${REPO_ROOT}/.git" ]; then
-        git clone --depth 1 https://github.com/d96moe/proxmox-backup-gui.git "${REPO_ROOT}"
+# REPO_ROOT can be overridden via env var; otherwise derive from script location.
+if [ -z "${REPO_ROOT:-}" ]; then
+    if [ -f "${SCRIPT_DIR}/../backend/app.py" ]; then
+        REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
     else
-        git -C "${REPO_ROOT}" pull --ff-only
+        echo "ERROR: cannot find repo root. Set REPO_ROOT=/path/to/proxmox-backup-gui"
+        exit 1
     fi
 fi
 

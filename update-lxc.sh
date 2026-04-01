@@ -12,7 +12,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "=== Updating proxmox-backup-gui in LXC ${LXC_ID} ==="
 
-for f in app.py config.py pbs_client.py pve_client.py restic_client.py; do
+for f in app.py config.py pbs_client.py pve_client.py restic_client.py jobs.py; do
     pct push "${LXC_ID}" "${SCRIPT_DIR}/backend/${f}" "/opt/proxmox-backup-gui/backend/${f}"
     echo "  pushed: ${f}"
 done
