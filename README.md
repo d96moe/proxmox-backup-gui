@@ -65,14 +65,24 @@ ssh-copy-id root@<your-pve-host-ip>
 
 ## Architecture
 
+The GUI is designed to run **inside a dedicated LXC container** on your PVE host — not on the PVE host itself. This keeps it isolated from the hypervisor and makes it easy to deploy, update, and destroy independently.
+
 ```
-PVE/PBS ──────────────────────────► pbs_client.py ──┐
-PVE API ──────────────────────────► pve_client.py ──┤
-restic/rclone (Google Drive) ──────► restic_client.py ──┤
-                                                     └──► Flask app.py ──► index.html
+┌─ LXC 199 (GUI container) ──────────────────────────────┐
+│                                                         │
+│  pbs_client.py   ◄── PBS API (HTTPS)                   │
+│  pve_client.py   ◄── PVE API (HTTPS)                   │
+│  restic_client.py ◄── SSH → PVE host → restic/rclone   │
+│                                                         │
+│  Flask app.py ──► index.html                            │
+└─────────────────────────────────────────────────────────┘
+         ▲
+    browser (port 5000)
 ```
 
-Runs as a systemd service inside an LXC container (LXC 199 by default).
+**Why SSH for restic/rclone?** restic and rclone are installed on the PVE host (not inside the LXC), and restic must stop/start PBS to safely back up or restore the datastore. All cloud operations are therefore run remotely on the PVE host via `ssh root@<pve_host>`. The LXC itself needs no restic, rclone, or Google Drive access.
+
+> Running the GUI directly on the PVE host is technically possible but not recommended — it breaks isolation, and restic commands would then SSH to localhost (redundant). The setup scripts only support the LXC model.
 
 ## Deployment
 
