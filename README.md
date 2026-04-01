@@ -4,6 +4,8 @@ A self-hosted web dashboard for monitoring Proxmox Backup Server (PBS) and resti
 
 Shows per-VM backup status, local/cloud coverage, storage usage, and historical snapshots in a clean dark UI.
 
+![til](./p-b-g_ui.gif)
+
 > **⚠️ HOBBY PROJECT — USE AT YOUR OWN RISK**
 >
 > This is a personal homelab project built for fun and convenience. The code, the CI pipelines, the tests, and this README were all written with Claude Code assistance. It is not production software, has no guarantees, and comes with no support. It works on my hardware — it may or may not work on yours. If you use this and something goes wrong, that's on you.
@@ -46,11 +48,10 @@ ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N ""
 ssh-copy-id root@<your-pve-host-ip>
 ```
 
-![til](./p-b-g_ui.gif)
-
 ## Features
 
 - **Per-VM/LXC overview** — snapshot count, latest backup age, local/cloud coverage badges
+
 - **Cloud detection** — marks PBS snapshots as cloud-covered if restic ran after them
 - **Cloud-only snapshots** — shows older restic backups that no longer exist locally
 - **Storage meters** — PBS local usage and Google Drive family quota
