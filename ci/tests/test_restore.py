@@ -137,10 +137,14 @@ def items(host_id):
 @pytest.fixture
 def real_page(browser):
     ctx = browser.new_context(base_url=BACKEND_URL)
+    ctx.route("**fonts.googleapis.com**",
+              lambda r: r.fulfill(status=200, content_type="text/css", body=""))
+    ctx.route("**fonts.gstatic.com**",
+              lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/", wait_until="domcontentloaded")
+    pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading…'",
         timeout=15000,

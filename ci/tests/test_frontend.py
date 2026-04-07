@@ -237,6 +237,15 @@ class MockHandler(BaseHTTPRequestHandler):
 # Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _block_fonts(ctx):
+    """Route Google Fonts requests to empty responses so goto(wait_until='load')
+    never hangs on CI where outbound connections to googleapis.com are firewalled."""
+    ctx.route("**fonts.googleapis.com**",
+              lambda r: r.fulfill(status=200, content_type="text/css", body=""))
+    ctx.route("**fonts.gstatic.com**",
+              lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
+
+
 @pytest.fixture(scope="session")
 def mock_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockHandler)
@@ -267,11 +276,12 @@ def reset_server_config():
 def page(browser, mock_server):
     """Fresh page, loaded and ready (home host rendered)."""
     ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
     pg = ctx.new_page()
     # Capture JS console errors so tests can assert on them
     pg._js_errors: list[str] = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/", wait_until="domcontentloaded")
+    pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading…'",
         timeout=10000,
@@ -284,6 +294,7 @@ def page(browser, mock_server):
 def blank_page(browser, mock_server):
     """Page that has NOT loaded yet — lets tests control timing."""
     ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors: list[str] = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -573,10 +584,11 @@ def test_edge_empty_host_no_crash(browser, mock_server):
     HOSTS.append({"id": "empty", "label": "Empty"})
     try:
         ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-        pg.goto("/", wait_until="domcontentloaded")
+        pg.goto("/")
         pg.wait_for_function(
             "() => document.getElementById('content').innerText !== 'Loading…'",
             timeout=10000,
@@ -597,10 +609,11 @@ def test_edge_lxc_only_shows_containers(browser, mock_server):
     HOSTS.append({"id": "lxc-only", "label": "LXC Only"})
     try:
         ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-        pg.goto("/", wait_until="domcontentloaded")
+        pg.goto("/")
         pg.wait_for_function(
             "() => document.getElementById('content').innerText !== 'Loading…'",
             timeout=10000,
@@ -636,11 +649,15 @@ def test_edge_slow_backend_8s_eventually_loads(blank_page):
 async def _async_open_page(browser, base_url: str):
     """Open an isolated async browser context and wait for first render."""
     ctx = await browser.new_context(base_url=base_url)
+    ctx.route("**fonts.googleapis.com**",
+              lambda r: r.fulfill(status=200, content_type="text/css", body=""))
+    ctx.route("**fonts.gstatic.com**",
+              lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
     pg = await ctx.new_page()
     pg._js_errors = []
     pg._ctx = ctx
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    await pg.goto("/", wait_until="domcontentloaded")
+    await pg.goto("/")
     # Wait for actual content: must contain 'vm' (a VM card) or an error — not just "not Loading…"
     await pg.wait_for_function(
         "() => { const t = document.getElementById('content').innerText; "
@@ -982,10 +999,11 @@ def snap_test_page(browser, mock_server):
     orig_hosts = HOSTS[:]
     HOSTS.append({"id": "snap-test", "label": "Snap Test"})
     ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/", wait_until="domcontentloaded")
+    pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading…'", timeout=10000)
     pg.click("#nav-snap-test")
@@ -1423,10 +1441,11 @@ def _partly_in_viewport(pg, selector: str) -> bool:
 def vp_page(browser, mock_server):
     """1280x800 page — standard laptop viewport, home host loaded."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 1280, "height": 800})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/", wait_until="domcontentloaded")
+    pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading\u2026'",
         timeout=10000,
@@ -1441,10 +1460,11 @@ def vp_snap_page(browser, mock_server):
     orig_hosts = HOSTS[:]
     HOSTS.append({"id": "snap-test", "label": "Snap Test"})
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 1280, "height": 800})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/", wait_until="domcontentloaded")
+    pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading\u2026'",
         timeout=10000,
@@ -1699,10 +1719,11 @@ def test_layout_job_close_btn_visible(vp_page):
 def test_layout_narrow_no_js_errors(browser, mock_server):
     """At 768x1024 the page must load without JS errors."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/", wait_until="domcontentloaded")
+    pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading\u2026'",
         timeout=10000,
@@ -1714,10 +1735,11 @@ def test_layout_narrow_no_js_errors(browser, mock_server):
 def test_layout_narrow_vm_cards_rendered(browser, mock_server):
     """VM cards must render at 768px — no blank content."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/", wait_until="domcontentloaded")
+    pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
@@ -1730,10 +1752,11 @@ def test_layout_narrow_vm_cards_rendered(browser, mock_server):
 def test_layout_narrow_backup_modal_opens(browser, mock_server):
     """Backup modal must open without JS errors at 768px."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/", wait_until="domcontentloaded")
+    pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
@@ -1749,10 +1772,11 @@ def test_layout_narrow_backup_modal_opens(browser, mock_server):
 def test_layout_narrow_restore_modal_opens(browser, mock_server):
     """Restore modal must open without JS errors at 768px."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/", wait_until="domcontentloaded")
+    pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
@@ -1912,10 +1936,11 @@ def test_dedup_shows_dash_when_not_available(browser, mock_server):
     HOSTS.append({"id": "no-cloud", "label": "No Cloud"})
     try:
         ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-        pg.goto("/", wait_until="domcontentloaded")
+        pg.goto("/")
         pg.wait_for_function(
             "() => document.getElementById('content').innerText !== 'Loading\u2026'",
             timeout=10000,
@@ -1946,10 +1971,11 @@ def test_dedup_no_js_errors(page: Page):
 def mobile_page(browser, mock_server):
     """390x844 viewport — iPhone-sized portrait screen, home host loaded."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 390, "height": 844})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/", wait_until="domcontentloaded")
+    pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
