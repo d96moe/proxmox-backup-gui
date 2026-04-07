@@ -340,7 +340,7 @@ for backup_type in vm ct; do
         [[ "${id}" =~ ^[0-9]+$ ]] || continue
         for snap_dir in "${id_dir}"*/; do
             snap=$(basename "${snap_dir}")
-            ts=$(date -d "${snap}" +%s 2>/dev/null) || continue
+            ts=$(date -d "@${snap}" +%s 2>/dev/null) || continue
             TAG_ARGS+=("--tag" "${backup_type}-${id}-${ts}")
         done
     done
@@ -394,7 +394,7 @@ for backup_type in vm ct; do
         [[ "${id}" =~ ^[0-9]+$ ]] || continue
         for snap_dir in "${id_dir}"*/; do
             snap=$(basename "${snap_dir}")
-            ts=$(date -d "${snap}" +%s 2>/dev/null) || continue
+            ts=$(date -d "@${snap}" +%s 2>/dev/null) || continue
             TAG_ARGS+=("--tag" "${backup_type}-${id}-${ts}")
         done
     done
