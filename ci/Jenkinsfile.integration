@@ -25,7 +25,7 @@ pipeline {
     }
 
     triggers {
-        cron('H 2 * * *')   // nightly, randomised minute to avoid thundering herd
+        cron('H 4 * * *')   // nightly at ~04:00 — prod backup jobs run 02:00, clear by 04:00
     }
 
     environment {
