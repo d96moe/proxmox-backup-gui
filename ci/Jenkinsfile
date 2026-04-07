@@ -1,8 +1,8 @@
 // =============================================================================
 // Proxmox Backup GUI — Fast pipeline
 // Trigger : GitHub webhook (every push)
-// Runtime : ~60s on Jenkins LXC, no VM needed
-// Tests   : Playwright against mock server — never touches prod
+// Runtime : ~90s on Jenkins LXC, no VM needed
+// Tests   : Unit tests (backend logic) + Playwright mock-server tests
 // =============================================================================
 
 pipeline {
@@ -41,10 +41,20 @@ pipeline {
             }
         }
 
-        stage('Mock tests') {
+        stage('Unit tests') {
             steps {
                 sh '''
                     mkdir -p test-results
+                    .venv/bin/pytest ci/tests/test_unit.py \
+                        -v --tb=short \
+                        --junit-xml=test-results/unit.xml
+                '''
+            }
+        }
+
+        stage('Mock tests') {
+            steps {
+                sh '''
                     .venv/bin/pytest ci/tests/test_frontend.py \
                         -v --tb=short \
                         --junit-xml=test-results/frontend-mock.xml
@@ -55,10 +65,10 @@ pipeline {
 
     post {
         always {
-            junit 'test-results/frontend-mock.xml'
+            junit 'test-results/unit.xml, test-results/frontend-mock.xml'
             cleanWs()
         }
-        success { echo "All mock tests passed — safe to merge" }
-        failure { echo "Tests failed — check test-results/frontend-mock.xml" }
+        success { echo "All tests passed — safe to merge" }
+        failure { echo "Tests failed — check test-results/" }
     }
 }

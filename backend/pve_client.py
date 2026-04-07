@@ -28,8 +28,8 @@ class PVEClient:
         d = resp.json()["data"]
         return d["ticket"], d["CSRFPreventionToken"]
 
-    def _get(self, path: str) -> list | dict:
-        resp = self._session.get(f"{self._base}/api2/json{path}")
+    def _get(self, path: str, timeout: int | None = None) -> list | dict:
+        resp = self._session.get(f"{self._base}/api2/json{path}", timeout=timeout)
         resp.raise_for_status()
         return resp.json().get("data", [])
 

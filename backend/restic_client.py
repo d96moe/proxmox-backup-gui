@@ -152,6 +152,49 @@ class ResticClient:
 
         return by_vm, untagged
 
+    def get_snapshots_flat(self) -> list[dict]:
+        """Returns all restic snapshots as a flat list, newest first.
+
+        Each entry: { id, short_id, ts, size_bytes, covers: [{type, vmid, pbs_time}] }
+        size_bytes is the incremental packed data added by this snapshot.
+        """
+        raw = self._run("snapshots")
+        result = []
+        for snap in raw:
+            tags = snap.get("tags") or []
+            dt = datetime.fromisoformat(snap["time"].replace("Z", "+00:00"))
+            ts = int(dt.timestamp())
+            snap_id = snap.get("id", "")
+            short_id = snap.get("short_id", snap_id[:8] if snap_id else "")
+            summary = snap.get("summary", {})
+            size_bytes = summary.get("data_added_packed", summary.get("data_added", 0))
+
+            covers: list[dict] = []
+            seen: set[tuple] = set()
+            for t in tags:
+                m = re.match(r'^(vm|ct)-(\d+)-(\d+)$', t)
+                if m:
+                    key = (m.group(1), int(m.group(2)), int(m.group(3)))
+                    if key not in seen:
+                        seen.add(key)
+                        covers.append({"type": key[0], "vmid": key[1], "pbs_time": key[2]})
+                    continue
+                for prefix in ("vm-", "ct-"):
+                    if t.startswith(prefix) and t[len(prefix):].isdigit():
+                        key = (prefix[:-1], int(t[len(prefix):]), None)
+                        if key not in seen:
+                            seen.add(key)
+                            covers.append({"type": key[0], "vmid": key[1], "pbs_time": None})
+
+            result.append({
+                "id": snap_id,
+                "short_id": short_id,
+                "ts": ts,
+                "size_bytes": size_bytes,
+                "covers": covers,
+            })
+        return sorted(result, key=lambda x: x["ts"], reverse=True)
+
     def get_coverage(self) -> tuple[dict[int, int], int]:
         """Returns ({pve_id: latest_restic_ts}, untagged_latest) for cloud marking."""
         by_vm, untagged = self.get_snapshots_by_vm()
@@ -230,7 +273,7 @@ class ResticClient:
         """Restore a restic snapshot to the PBS datastore path on the PVE host."""
         snap = shlex.quote(snapshot_id)
         self._ssh_stream(
-            f"{self._env_prefix} restic restore {snap} --target / --no-lock",
+            f"{self._env_prefix} restic restore {snap} --target / --no-lock --verbose",
             log,
         )
 
