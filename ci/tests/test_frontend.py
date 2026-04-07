@@ -584,7 +584,7 @@ def test_edge_empty_host_no_crash(browser, mock_server):
     HOSTS.append({"id": "empty", "label": "Empty"})
     try:
         ctx = browser.new_context(base_url=mock_server)
-    _block_fonts(ctx)
+        _block_fonts(ctx)
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -609,7 +609,7 @@ def test_edge_lxc_only_shows_containers(browser, mock_server):
     HOSTS.append({"id": "lxc-only", "label": "LXC Only"})
     try:
         ctx = browser.new_context(base_url=mock_server)
-    _block_fonts(ctx)
+        _block_fonts(ctx)
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
