@@ -1936,7 +1936,7 @@ def test_dedup_shows_dash_when_not_available(browser, mock_server):
     HOSTS.append({"id": "no-cloud", "label": "No Cloud"})
     try:
         ctx = browser.new_context(base_url=mock_server)
-    _block_fonts(ctx)
+        _block_fonts(ctx)
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
