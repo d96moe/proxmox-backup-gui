@@ -352,10 +352,8 @@ done
 WAITPBS
                     echo "Restic backup complete (PBS stopped during snapshot for consistency)"
 
-                    # Step 3: PBS backup #2 — second local snapshot needed so that after
-                    # we delete PBS#1 the restic snapshot (from Step 2) is older than
-                    # oldest_local, making it appear as a cloud-only entry in the GUI.
-                    echo "Triggering PBS backup #2 (cloud-only seed)..."
+                    # Step 3: PBS backup #2 (T2) — exists at time of R2, will become local+cloud.
+                    echo "Triggering PBS backup #2 (T2)..."
                     JOB3=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
                     JOB3_ID=$(echo "${JOB3}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
@@ -370,9 +368,71 @@ WAITPBS
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #2 failed"; exit 1; }
                     done
 
-                    # Step 4: Delete PBS snapshot #1 — after deletion, oldest_local = T3
-                    # (PBS#2 time) and restic_ts = T2 (Step 2 time), so T2 < T3 and the
-                    # restic snapshot appears as cloud-only (no matching local PBS snapshot).
+                    # Step 3b: Restic backup R2 — covers BOTH T1 and T2.
+                    # This creates the multi-restic scenario: T1 is covered by R1 *and* R2.
+                    # When the integration test later deletes T1 (cloud-only), it must forget
+                    # both R1 and R2 — this verifies the step-4 multi-restic forget path.
+                    # R2 also gives T2 its cloud coverage (T2 will be local+cloud after T1 deleted).
+                    echo "Restic backup R2 (covers T1+T2, creates multi-restic scenario)..."
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "systemctl stop proxmox-backup proxmox-backup-proxy"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'RESTIC_BACKUP_R2'
+TAG_ARGS=()
+for backup_type in vm ct; do
+    type_dir="/mnt/ci-pbs/${backup_type}"
+    [ -d "${type_dir}" ] || continue
+    for id_dir in "${type_dir}"/*/; do
+        id=$(basename "${id_dir}")
+        [[ "${id}" =~ ^[0-9]+$ ]] || continue
+        for snap_dir in "${id_dir}"*/; do
+            snap=$(basename "${snap_dir}")
+            ts=$(date -d "${snap}" +%s 2>/dev/null) || continue
+            TAG_ARGS+=("--tag" "${backup_type}-${id}-${ts}")
+        done
+    done
+done
+RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
+    restic backup /mnt/ci-pbs "${TAG_ARGS[@]}" --json --no-lock 2>&1 | tail -3
+RESTIC_BACKUP_R2
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "systemctl start proxmox-backup proxmox-backup-proxy"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'WAITPBS2'
+for i in $(seq 1 24); do
+    proxmox-backup-manager datastore list --output-format json >/dev/null 2>&1 && { echo "PBS ready"; break; }
+    echo "  waiting for PBS... ($i/24)"
+    sleep 5
+done
+WAITPBS2
+                    echo "Restic R2 complete"
+
+                    # Step 3c: PBS backup #3 (T3) — local-only snapshot (taken after R2,
+                    # so T3 has no restic coverage). Provides the local-only test scenario.
+                    echo "Triggering PBS backup #3 (T3, local-only)..."
+                    JOB3C=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
+                    JOB3C_ID=$(echo "${JOB3C}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
+                    echo "PBS backup #3 job: ${JOB3C_ID}"
+
+                    for i in $(seq 1 60); do
+                        sleep 5
+                        STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                            "pct exec 300 -- python3 -c \\"import urllib.request; print(urllib.request.urlopen('http://localhost:5000/api/job/${JOB3C_ID}',timeout=5).read().decode())\\"" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                        echo "  PBS backup #3 status: ${STATUS}"
+                        [ "${STATUS}" = "done" ] && { echo "PBS backup #3 complete"; break; }
+                        [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #3 failed"; exit 1; }
+                    done
+
+                    # Seeded state after steps 1-3c:
+                    #   T1 = oldest PBS snap  (will be deleted → cloud-only via R1+R2)
+                    #   T2 = middle PBS snap  (kept → local+cloud via R2)
+                    #   T3 = newest PBS snap  (kept → local-only, no restic coverage)
+                    #   R1 = restic snap covering T1 only
+                    #   R2 = restic snap covering T1+T2
+
+                    # Step 4: Delete PBS snapshot T1 — after deletion:
+                    #   T1 cloud-only (covered by R1 AND R2 — multi-restic scenario)
+                    #   T2 local+cloud (covered by R2 — local+cloud scenario)
+                    #   T3 local-only  (no restic coverage — local-only scenario)
                     cat > /tmp/delete_oldest_snap.py << 'PYEOF'
 """Delete the oldest PBS snapshot for ct/301 to produce a cloud-only restic entry."""
 import json, ssl, urllib.parse, urllib.request

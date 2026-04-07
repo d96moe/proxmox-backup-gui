@@ -987,6 +987,53 @@ class TestDeleteCloudStep4:
         ids_forgotten = set(call_args[0][0])
         assert "R1id" in ids_forgotten, "Fallback must use the original restic_id from request"
 
+    def test_step4_fallback_when_pbs_time_is_none_old_style_tag(self, flask_client, mock_host):
+        """Old-style restic tags have no pbs_time (pbs_time=None). The condition
+        e.get('pbs_time') == backup_time evaluates to None == T1 → False for every
+        entry, so ids_to_forget is empty and the fallback [restic_id] is used.
+        This must not raise and must forget exactly the one restic_id from the request.
+        """
+        # Simulate entries with old-style tags: pbs_time=None (no timestamp in tag)
+        restic_by_vm_post = {
+            301: [
+                {"ts": TS_R1, "pbs_time": None, "id": "OldR1id", "short_id": "old1"},
+                {"ts": TS_R2, "pbs_time": None, "id": "OldR2id", "short_id": "old2"},
+            ]
+        }
+
+        job, mock_restic = self._run_delete_cloud(flask_client, mock_host, restic_by_vm_post)
+        assert job["status"] == "done", f"Job failed:\n" + "\n".join(job.get("logs", []))
+
+        call_args = mock_restic.forget_snapshots.call_args
+        assert call_args is not None
+        ids_forgotten = set(call_args[0][0])
+        # fallback: none of old-style entries match T1, so forget original restic_id only
+        assert ids_forgotten == {"R1id"}, (
+            f"Old-style tag fallback must forget only the request's restic_id 'R1id', "
+            f"got: {ids_forgotten}"
+        )
+
+    def test_step4_fallback_when_untagged_restic_snap(self, flask_client, mock_host):
+        """Restic snapshots with no tags at all (empty covers list or no vmid entry).
+        get_snapshots_by_vm returns an empty list for the vmid → fallback to restic_id.
+        """
+        # Simulate completely untagged restic snapshot: vmid=301 has no entries
+        restic_by_vm_post = {
+            999: [  # different vmid — 301 has no entries
+                {"ts": TS_R1, "pbs_time": T1, "id": "OtherVMid", "short_id": "oth1"},
+            ]
+        }
+
+        job, mock_restic = self._run_delete_cloud(flask_client, mock_host, restic_by_vm_post)
+        assert job["status"] == "done", f"Job failed:\n" + "\n".join(job.get("logs", []))
+
+        call_args = mock_restic.forget_snapshots.call_args
+        assert call_args is not None
+        ids_forgotten = set(call_args[0][0])
+        assert ids_forgotten == {"R1id"}, (
+            f"Untagged snapshot fallback must forget only 'R1id', got: {ids_forgotten}"
+        )
+
     def test_step4_only_forgets_matching_pbs_time(self, flask_client, mock_host):
         """R2 covers T1 (to forget) + T2 (keep). Only R2's T1-tagged entry should be forgotten."""
         restic_by_vm_post = {
