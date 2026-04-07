@@ -710,6 +710,7 @@ async function loadData(signal) {
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     if (currentHost !== host) return;
+    wrap.classList.remove('loading');
     renderData(data);
     setStatus('ok', `last sync just now`);
   } catch (err) {
