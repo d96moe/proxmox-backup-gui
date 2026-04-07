@@ -307,8 +307,10 @@ def expand_vm_card(pg: Page, vmid: int):
     Snapshots are collapsed by default (.snapshots { display:none }).
     Works for both in_pve=True (has backup-btn) and in_pve=False (no backup-btn).
     """
-    # Click the vm-header — works regardless of whether a backup-btn is present
-    pg.locator(f".vm-card:has([data-vmid='{vmid}'])").locator(".vm-header").first.click()
+    # Click .expand-btn directly — clicking .vm-header center can land on an inner
+    # button (backup-btn / del-all-btn) that calls event.stopPropagation(), which
+    # prevents toggleSnaps from firing, especially at mobile widths.
+    pg.locator(f".vm-card:has([data-vmid='{vmid}'])").locator(".expand-btn").first.click()
     # Wait for snapshots to become visible (any restore button in this card)
     pg.locator(f".restore-btn[data-vmid='{vmid}']").first.wait_for(
         state="visible", timeout=5000
