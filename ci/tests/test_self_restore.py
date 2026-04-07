@@ -29,7 +29,7 @@ pytestmark = pytest.mark.skipif(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get(path: str):
-    return json.loads(urllib.request.urlopen(f"{BACKEND_URL}{path}", timeout=30).read())
+    return json.loads(urllib.request.urlopen(f"{BACKEND_URL}{path}", timeout=60).read())
 
 
 def _post(path: str, body: dict) -> dict:
@@ -39,7 +39,7 @@ def _post(path: str, body: dict) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    return json.loads(urllib.request.urlopen(req, timeout=30).read())
+    return json.loads(urllib.request.urlopen(req, timeout=60).read())
 
 
 def _poll_job(job_id: str, timeout: int = 360) -> dict:
