@@ -271,7 +271,7 @@ def page(browser, mock_server):
     # Capture JS console errors so tests can assert on them
     pg._js_errors: list[str] = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
+    pg.goto("/", wait_until="domcontentloaded")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading…'",
         timeout=10000,
@@ -576,7 +576,7 @@ def test_edge_empty_host_no_crash(browser, mock_server):
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-        pg.goto("/")
+        pg.goto("/", wait_until="domcontentloaded")
         pg.wait_for_function(
             "() => document.getElementById('content').innerText !== 'Loading…'",
             timeout=10000,
@@ -600,7 +600,7 @@ def test_edge_lxc_only_shows_containers(browser, mock_server):
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-        pg.goto("/")
+        pg.goto("/", wait_until="domcontentloaded")
         pg.wait_for_function(
             "() => document.getElementById('content').innerText !== 'Loading…'",
             timeout=10000,
@@ -640,7 +640,7 @@ async def _async_open_page(browser, base_url: str):
     pg._js_errors = []
     pg._ctx = ctx
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    await pg.goto("/")
+    await pg.goto("/", wait_until="domcontentloaded")
     # Wait for actual content: must contain 'vm' (a VM card) or an error — not just "not Loading…"
     await pg.wait_for_function(
         "() => { const t = document.getElementById('content').innerText; "
@@ -984,7 +984,7 @@ def snap_test_page(browser, mock_server):
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
+    pg.goto("/", wait_until="domcontentloaded")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading…'", timeout=10000)
     pg.click("#nav-snap-test")
@@ -1425,7 +1425,7 @@ def vp_page(browser, mock_server):
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
+    pg.goto("/", wait_until="domcontentloaded")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading\u2026'",
         timeout=10000,
@@ -1443,7 +1443,7 @@ def vp_snap_page(browser, mock_server):
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
+    pg.goto("/", wait_until="domcontentloaded")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading\u2026'",
         timeout=10000,
@@ -1701,7 +1701,7 @@ def test_layout_narrow_no_js_errors(browser, mock_server):
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
+    pg.goto("/", wait_until="domcontentloaded")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading\u2026'",
         timeout=10000,
@@ -1716,7 +1716,7 @@ def test_layout_narrow_vm_cards_rendered(browser, mock_server):
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
+    pg.goto("/", wait_until="domcontentloaded")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
@@ -1732,7 +1732,7 @@ def test_layout_narrow_backup_modal_opens(browser, mock_server):
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
+    pg.goto("/", wait_until="domcontentloaded")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
@@ -1751,7 +1751,7 @@ def test_layout_narrow_restore_modal_opens(browser, mock_server):
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
+    pg.goto("/", wait_until="domcontentloaded")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
@@ -1914,7 +1914,7 @@ def test_dedup_shows_dash_when_not_available(browser, mock_server):
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-        pg.goto("/")
+        pg.goto("/", wait_until="domcontentloaded")
         pg.wait_for_function(
             "() => document.getElementById('content').innerText !== 'Loading\u2026'",
             timeout=10000,
@@ -1948,7 +1948,7 @@ def mobile_page(browser, mock_server):
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
+    pg.goto("/", wait_until="domcontentloaded")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,

@@ -140,7 +140,7 @@ def real_page(browser):
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
+    pg.goto("/", wait_until="domcontentloaded")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading…'",
         timeout=15000,
