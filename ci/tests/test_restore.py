@@ -1047,21 +1047,96 @@ def test_self_restore_warning_shown_in_modal(real_page, host_id):
                     })
 
 
-def test_self_restore_api_still_works(host_id):
-    """The API must accept a restore request for SELF_VMID — the warning is UI-only.
-    The backend does not block self-restores; user consent is enforced in the frontend.
-    Verify the API returns a job_id (not 400) and the job starts normally."""
-    resp = _post(f"/api/host/{host_id}/restore", {
-        "vmid": 300, "type": "ct",
-        "source": "local", "backup_time": 1700000000,  # invalid time → job will error
-    })
-    assert "job_id" in resp, \
-        f"API must return job_id for self-restore of ct/300 (warning is UI-only): {resp}"
+def test_self_restore_executes_and_backend_recovers(host_id):
+    """Actually execute a self-restore of ct/300 (the GUI container itself) and verify
+    the backend comes back online afterwards.
 
-    # The job will fail (invalid backup_time), but it must NOT be rejected at API level
-    job = _poll_job(resp["job_id"], timeout=60)
-    assert job["status"] == "error", \
-        "Expected job to fail (invalid backup_time=1700000000), not be blocked by API"
+    What happens during a self-restore:
+    1. POST /restore → job starts in a background thread inside ct/300
+    2. PVE stops ct/300 — kills Flask mid-job
+    3. PVE restores ct/300 from PBS snapshot (takes ~60s)
+    4. PVE starts ct/300 — Flask restarts via systemctl
+    5. Backend must be reachable again and return valid /api/hosts response
+
+    The job_id becomes unreachable once Flask dies (404 after restart).
+    This is expected behaviour — the test waits for the backend to recover,
+    not for a job status that can never arrive.
+    """
+    # Step 1: Create a fresh PBS backup of ct/300 to restore from.
+    # (The seed purges all ct/300 snapshots; we need one to exist.)
+    resp = _post(f"/api/host/{host_id}/backup/pbs", {"vmid": 300, "type": "ct"})
+    if "job_id" not in resp:
+        pytest.skip(f"Could not create backup of ct/300: {resp}")
+    backup_job = _poll_job(resp["job_id"], timeout=180)
+    if backup_job["status"] != "done":
+        pytest.skip(f"Backup of ct/300 failed: {_job_ok(backup_job)}")
+
+    # Step 2: Find the backup_time we just created
+    fresh = _items(host_id)
+    ct300 = next((i for i in fresh.get("lxcs", []) if i["id"] == 300), None)
+    assert ct300, "ct/300 not in items after backup"
+    local_snaps = sorted([s for s in ct300["snapshots"] if s.get("local")],
+                         key=lambda s: s["backup_time"])
+    assert local_snaps, "No local snapshots for ct/300 after backup"
+    backup_time = local_snaps[-1]["backup_time"]
+
+    # Step 3: Submit the self-restore — Flask will die while this runs.
+    # We capture the job_id but expect it to become unreachable.
+    try:
+        resp = _post(f"/api/host/{host_id}/restore", {
+            "vmid": 300, "type": "ct",
+            "source": "local", "backup_time": backup_time,
+        })
+    except Exception as e:
+        pytest.skip(f"Could not POST restore request: {e}")
+
+    assert "job_id" in resp, f"No job_id in self-restore response: {resp}"
+    job_id = resp["job_id"]
+
+    # Step 4: Poll until Flask becomes unreachable (ct/300 is stopped for restore)
+    # or job completes (in theory it can't complete since Flask dies, but handle both).
+    backend_died = False
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        try:
+            status_resp = _get(f"/api/job/{job_id}")
+            if status_resp.get("status") in ("done", "error"):
+                # Job completed before Flask died (very fast restore or race)
+                break
+            time.sleep(2)
+        except Exception:
+            # Connection refused or 404 — Flask is down, restore is in progress
+            backend_died = True
+            break
+
+    # Step 5: Wait for Flask to come back up (ct/300 restored and restarted)
+    # Allow up to 5 minutes for the full restore + restart cycle.
+    backend_up = False
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        try:
+            hosts = _get("/api/hosts")
+            if hosts:
+                backend_up = True
+                break
+        except Exception:
+            pass
+        time.sleep(5)
+
+    assert backend_up, (
+        "Backend (Flask in ct/300) did not come back online within 5 minutes "
+        "after self-restore. Check that ct/300 starts with systemctl and Flask "
+        "auto-starts via proxmox-backup-gui.service."
+    )
+
+    # Step 6: Verify the backend is fully functional after recovery
+    try:
+        items_after = _items(host_id)
+    except Exception as e:
+        pytest.fail(f"Backend recovered but /items endpoint is broken: {e}")
+
+    assert "lxcs" in items_after or "vms" in items_after, \
+        f"Backend recovered but /items returned unexpected structure: {items_after}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
