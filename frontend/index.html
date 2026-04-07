@@ -125,8 +125,8 @@
   /* Snapshots */
   .snapshots { border-top:1px solid var(--border); display:none; }
   .snapshots.open { display:block; }
-  .snapshot-header-row { display:grid; grid-template-columns:1fr 90px 90px 130px 90px; gap:16px; padding:7px 18px 7px 68px; background:var(--bg); border-bottom:1px solid var(--border); }
-  .snapshot-row { display:grid; grid-template-columns:1fr 90px 90px 130px 90px; align-items:center; gap:16px; padding:10px 18px 10px 68px; border-bottom:1px solid var(--border); transition:background .1s; }
+  .snapshot-header-row { display:grid; grid-template-columns:1fr 90px 90px 130px 260px; gap:16px; padding:7px 18px 7px 68px; background:var(--bg); border-bottom:1px solid var(--border); }
+  .snapshot-row { display:grid; grid-template-columns:1fr 90px 90px 130px 260px; align-items:center; gap:16px; padding:10px 18px 10px 68px; border-bottom:1px solid var(--border); transition:background .1s; }
   .snapshot-row:last-child { border-bottom:none; }
   .snapshot-row:hover { background:color-mix(in srgb, var(--text) 4%, transparent); }
   .col-label { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; }
@@ -137,8 +137,19 @@
   .no-backups { padding:16px 18px 16px 68px; font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--muted); }
   .restore-btn { padding:5px 12px; border-radius:5px; border:1px solid var(--border2); background:transparent; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:11px; cursor:pointer; transition:all .15s; white-space:nowrap; }
   .restore-btn:hover { background:color-mix(in srgb, var(--accent) 12%, transparent); border-color:var(--accent); color:var(--accent); }
-  /* On desktop, row-top/bottom wrappers are transparent — grid columns do the layout */
-  .snap-row-top, .snap-row-bottom { display: contents; }
+  .delete-btn { padding:5px 12px; border-radius:5px; border:1px solid var(--border2); background:transparent; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:11px; cursor:pointer; transition:all .15s; white-space:nowrap; }
+  .delete-btn:hover { background:color-mix(in srgb, var(--red) 12%, transparent); border-color:var(--red); color:var(--red); }
+  /* On desktop, snap-row-top is transparent; snap-row-bottom is a flex cell in the last grid column */
+  .snap-row-top { display: contents; }
+  .snap-row-bottom { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
+
+  /* Schedules sidebar section */
+  .schedule-item { display:flex; justify-content:space-between; font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); padding:3px 0; }
+  .schedule-item .sch-label { color:var(--text); }
+  .running-badge { display:flex; align-items:center; gap:6px; padding:5px 8px; border-radius:6px; font-family:'IBM Plex Mono',monospace; font-size:10px; margin-bottom:4px; }
+  .running-badge.pbs   { background:color-mix(in srgb, var(--green) 10%, transparent); border:1px solid color-mix(in srgb, var(--green) 25%, transparent); color:var(--green); }
+  .running-badge.cloud { background:color-mix(in srgb, var(--accent) 10%, transparent); border:1px solid color-mix(in srgb, var(--accent) 25%, transparent); color:var(--accent); }
+  .running-badge-dot { width:6px; height:6px; border-radius:50%; background:currentColor; animation:pulse 1s infinite; flex-shrink:0; }
 
   /* Error/loading states */
   .state-msg { padding:40px; text-align:center; font-family:'IBM Plex Mono',monospace; font-size:13px; color:var(--muted); }
@@ -179,7 +190,13 @@
   .modal-checkbox input { accent-color:var(--accent); width:14px; height:14px; cursor:pointer; }
   /* Progress modal */
   .modal.wide { width:640px; }
-  .job-log { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; height:220px; overflow-y:auto; font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); line-height:1.6; margin-bottom:16px; }
+  .job-progress { margin-bottom:14px; }
+  .job-progress-bar-track { height:4px; background:var(--border2); border-radius:2px; overflow:hidden; position:relative; }
+  .job-progress-bar-fill { height:100%; background:var(--accent); border-radius:2px; transition:width .4s ease; width:0%; }
+  .job-progress-bar-track.indeterminate .job-progress-bar-fill { width:40%; position:absolute; animation:indeterminate 1.4s infinite ease-in-out; }
+  @keyframes indeterminate { 0%{left:-40%} 100%{left:100%} }
+  .job-progress-label { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); margin-top:5px; }
+  .job-log { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; height:200px; overflow-y:auto; font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); line-height:1.6; margin-bottom:16px; }
   .job-log .log-error { color:var(--red); }
   .job-log .log-done  { color:var(--green); }
   .job-status-badge { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:20px; font-family:'IBM Plex Mono',monospace; font-size:10px; font-weight:600; }
@@ -208,6 +225,7 @@
     .sidebar { border-right: none; border-bottom: 1px solid var(--border); padding: 10px 0 6px; }
     .sidebar-section { padding: 0 12px; margin-bottom: 6px; }
     .sidebar-section:has(.storage-meter) { display: none; }
+    #schedules-section { display: none !important; }
     #hosts-section { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
     #hosts-section .sidebar-label { width: 100%; margin-bottom: 2px; }
     .nav-item.host-item { padding: 5px 10px; font-size: 11px; }
@@ -232,7 +250,7 @@
       min-width: unset;
     }
     .snap-row-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-    .snap-row-bottom { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .snap-row-bottom { flex-wrap: wrap; justify-content: flex-start; }
 
     /* Topbar: hide breadcrumb detail on very small screens */
     .logo-text span { display: none; }
@@ -284,6 +302,10 @@
         <div class="meter-label" style="margin-top:4px;font-size:11px;color:var(--muted)"><span>backups · restic</span><span id="cloud-backup-size">—</span></div>
       </div>
     </div>
+    <div class="sidebar-section" id="schedules-section" style="display:none">
+      <div class="sidebar-label">Schedules</div>
+      <div id="schedule-info"></div>
+    </div>
   </div>
 
   <div class="main">
@@ -293,7 +315,7 @@
         <div class="page-subtitle" id="page-subtitle">loading…</div>
       </div>
       <div class="toolbar">
-        <button class="btn" id="refresh-btn" onclick="loadData();loadStorage();loadInfo()">⟳ Refresh</button>
+        <button class="btn" id="refresh-btn" onclick="loadData();loadStorage();loadInfo();loadSchedules()">⟳ Refresh</button>
       </div>
     </div>
 
@@ -388,6 +410,57 @@
   </div>
 </div>
 
+<!-- Delete Snapshot Modal -->
+<div class="modal-overlay" id="delete-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">Delete snapshot</div>
+        <div class="modal-subtitle" id="delete-modal-subtitle"></div>
+      </div>
+      <button class="modal-close" onclick="closeDeleteModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-info-grid">
+        <div class="modal-info-item"><div class="modal-info-label">Name</div><div class="modal-info-value" id="delete-modal-vm"></div></div>
+        <div class="modal-info-item"><div class="modal-info-label">Date</div><div class="modal-info-value" id="delete-modal-date"></div></div>
+      </div>
+      <div class="modal-source-select" id="delete-scope-section">
+        <div class="source-label">Delete from</div>
+        <div class="source-options" id="delete-scope-options"></div>
+      </div>
+      <div class="modal-warning" id="delete-modal-warning"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeDeleteModal()">Cancel</button>
+      <button class="btn btn-danger" onclick="confirmDelete()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- Delete All Local Modal -->
+<div class="modal-overlay" id="delete-all-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">Delete all local snapshots</div>
+        <div class="modal-subtitle" id="delete-all-subtitle"></div>
+      </div>
+      <button class="modal-close" onclick="closeDeleteAllModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-warning cloud" id="delete-all-warning">⚠ &nbsp;All local PBS snapshots for this VM will be permanently deleted. Cloud restic copies (if any) are not affected.<br><br>Stop any scheduled backup jobs before proceeding.</div>
+      <div class="source-label" style="margin-top:16px">Type the VM name to confirm</div>
+      <input type="text" id="delete-all-confirm-input" placeholder="" oninput="updateDeleteAllBtn()"
+        style="width:100%;margin-top:8px;padding:8px 12px;background:var(--bg);border:1px solid var(--border2);border-radius:6px;color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:12px;outline:none;">
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeDeleteAllModal()">Cancel</button>
+      <button class="btn btn-danger" id="delete-all-confirm-btn" onclick="confirmDeleteAll()" disabled>Delete all</button>
+    </div>
+  </div>
+</div>
+
 <!-- Progress Modal -->
 <div class="modal-overlay" id="job-modal">
   <div class="modal wide">
@@ -399,6 +472,12 @@
       <span class="job-status-badge running" id="job-badge">running</span>
     </div>
     <div class="modal-body">
+      <div class="job-progress" id="job-progress" style="display:none">
+        <div class="job-progress-bar-track">
+          <div class="job-progress-bar-fill" id="job-progress-fill"></div>
+        </div>
+        <div class="job-progress-label" id="job-progress-label"></div>
+      </div>
       <div class="job-log" id="job-log"></div>
     </div>
     <div class="modal-footer">
@@ -458,6 +537,7 @@ function refreshData() {
   const signal = _abortController?.signal;
   loadData(signal);
   loadStorage(signal);
+  loadSchedules(signal);
 }
 
 function selectHost(id) {
@@ -480,9 +560,11 @@ function selectHost(id) {
   document.getElementById('local-bar').style.width = '0%';
   document.getElementById('cloud-bar').style.width = '0%';
   document.getElementById('pbs-dedup').textContent = '—';
+  _schedules = null;
   loadData(_abortController.signal);
   loadInfo(_abortController.signal);
   loadStorage(_abortController.signal);
+  loadSchedules(_abortController.signal);
 }
 
 // ─────────────────────────────────────────────
@@ -564,6 +646,56 @@ async function loadInfo(signal) {
     document.getElementById('footer-pbs').textContent = `PBS ${info.pbs ?? '—'}`;
     document.getElementById('footer-restic').textContent = `restic ${info.restic ?? '—'}`;
   } catch (_) {}
+}
+
+// ─────────────────────────────────────────────
+// Schedules
+// ─────────────────────────────────────────────
+let _schedules = null;
+
+async function loadSchedules(signal) {
+  if (!currentHost) return;
+  const host = currentHost;
+  try {
+    const res = await fetch(`${API_BASE}/api/host/${host}/schedules`, { signal });
+    if (!res.ok) return;
+    if (currentHost !== host) return;
+    _schedules = await res.json();
+    renderSchedules();
+  } catch (err) { if (err.name !== 'AbortError') {} }
+}
+
+function renderSchedules() {
+  const section = document.getElementById('schedules-section');
+  const container = document.getElementById('schedule-info');
+  if (!_schedules) { section.style.display = 'none'; return; }
+
+  const { pbs_jobs, pbs_running, restic_next, restic_running } = _schedules;
+  let html = '';
+
+  if (pbs_running)    html += `<div class="running-badge pbs"><div class="running-badge-dot"></div>PBS backup running</div>`;
+  if (restic_running) html += `<div class="running-badge cloud"><div class="running-badge-dot"></div>Restic backup running</div>`;
+
+  (pbs_jobs || []).forEach(j => {
+    if (j.schedule) html += `<div class="schedule-item"><span>PBS vzdump</span><span>${j.schedule}</span></div>`;
+  });
+  if (restic_next) html += `<div class="schedule-item"><span title="${restic_next.next}">Restic next</span><span>in ${restic_next.left}</span></div>`;
+
+  if (!html) { section.style.display = 'none'; return; }
+  section.style.display = '';
+  container.innerHTML = html;
+}
+
+function _scheduleHint() {
+  if (!_schedules) return '';
+  const { pbs_jobs, pbs_running, restic_next, restic_running } = _schedules;
+  const parts = [];
+  if (pbs_running)    parts.push('<strong style="color:var(--red)">⚠ PBS backup is running now</strong>');
+  if (restic_running) parts.push('<strong style="color:var(--red)">⚠ Restic backup is running now</strong>');
+  (pbs_jobs || []).forEach(j => { if (j.schedule) parts.push(`PBS: ${j.schedule}`); });
+  if (restic_next) parts.push(`Restic: ${restic_next.next} (in ${restic_next.left})`);
+  if (!parts.length) return '';
+  return `<br><br><span style="font-size:10px;color:var(--muted)">Scheduled: ${parts.join(' · ')}</span>`;
 }
 
 // ─────────────────────────────────────────────
@@ -669,6 +801,18 @@ function renderCard(item) {
               onclick="const d=this.dataset;openRestoreModal(d)">
               Restore →
             </button>
+            <button class="delete-btn"
+              data-vmid="${item.id}"
+              data-type="${item.type}"
+              data-vm="${item.name.replace(/"/g,'&quot;')}"
+              data-date="${(s.date||'').replace(/"/g,'&quot;')}"
+              data-backup-time="${s.backup_time}"
+              data-local="${s.local}"
+              data-cloud="${s.cloud}"
+              data-restic-id="${s.restic_id||''}"
+              onclick="const d=this.dataset;openDeleteModal(d)">
+              ✕ Delete
+            </button>
           </div>
         </div>`).join('');
 
@@ -692,6 +836,7 @@ function renderCard(item) {
           <span id="vm-job-${item.id}" style="display:none" onclick="event.stopPropagation();reopenJobModal(${item.id})"></span>
           ${hasLocalOnly ? `<button class="backup-btn" onclick="event.stopPropagation();triggerResticBackup(${item.id},'${item.name}')">☁ sync</button>` : ''}
           ${item.in_pve ? `<button class="backup-btn" data-vmid="${item.id}" onclick="event.stopPropagation();openBackupModal(${item.id},'${item.type}','${item.name.replace(/'/g,"\\'")}')">Backup now</button>` : ''}
+          ${item.snapshots.some(s => s.local) ? `<button class="backup-btn" style="color:var(--red);border-color:rgba(240,82,82,.3)" onclick="event.stopPropagation();openDeleteAllModal(${item.id},'${item.type}','${item.name.replace(/'/g,"\\'")}')">✕ Del all</button>` : ''}
         </div>
         <button class="expand-btn" onclick="event.stopPropagation();toggleSnaps(this.closest('.vm-header'))">▾</button>
       </div>
@@ -919,6 +1064,14 @@ function openJobModal(title, jobId, vmid) {
   document.getElementById('job-log').innerHTML = '';
   document.getElementById('job-badge').className = 'job-status-badge running';
   document.getElementById('job-badge').textContent = 'running';
+  const _prog = document.getElementById('job-progress');
+  const _track = _prog.querySelector('.job-progress-bar-track');
+  const _fill = document.getElementById('job-progress-fill');
+  _fill.style.width = '0%';
+  _fill.style.background = 'var(--accent)';
+  _track.classList.add('indeterminate');
+  _prog.style.display = '';
+  document.getElementById('job-progress-label').textContent = 'Running…';
   document.getElementById('job-close-btn').disabled = false;
   document.getElementById('job-modal').classList.add('open');
   if (_jobPollInterval) { clearInterval(_jobPollInterval); _jobPollInterval = null; }
@@ -952,16 +1105,29 @@ async function _pollJob(jobId, vmid) {
       if (!res.ok) return;
       const job = await res.json();
 
-      // Append new log lines
+      // Append new log lines and update progress bar
       const logEl = document.getElementById('job-log');
       if (logEl) {
         const newLines = job.logs.slice(lastLogCount);
         lastLogCount = job.logs.length;
         newLines.forEach(line => {
           const div = document.createElement('div');
-          div.className = line.startsWith('ERROR') ? 'log-error' : (job.status === 'done' && line.startsWith('Backup complete') || line.startsWith('Restore complete') ? 'log-done' : '');
+          div.className = line.startsWith('ERROR') ? 'log-error' : '';
           div.textContent = line;
           logEl.appendChild(div);
+
+          // Drive progress bar from "Step N/M — ..." lines
+          const m = line.match(/^Step\s+(\d+)\/(\d+)\s+[—\-]/);
+          if (m) {
+            const cur = parseInt(m[1]), total = parseInt(m[2]);
+            const pct = Math.round((cur - 1) / total * 100);
+            const fill = document.getElementById('job-progress-fill');
+            const label = document.getElementById('job-progress-label');
+            const track = fill && fill.closest('.job-progress-bar-track');
+            if (track) track.classList.remove('indeterminate');
+            if (fill) fill.style.width = pct + '%';
+            if (label) label.textContent = `Step ${cur}/${total} — ` + line.replace(/^Step\s+\d+\/\d+\s+[—\-]\s*/, '').split('(')[0].trim();
+          }
         });
         logEl.scrollTop = logEl.scrollHeight;
       }
@@ -978,6 +1144,17 @@ async function _pollJob(jobId, vmid) {
           badge.className = `job-status-badge ${job.status}`;
           badge.textContent = job.status;
         }
+        const fill = document.getElementById('job-progress-fill');
+        const track = fill && fill.closest('.job-progress-bar-track');
+        if (track) track.classList.remove('indeterminate');
+        if (job.status === 'done' && fill) {
+          fill.style.width = '100%';
+          fill.style.background = 'var(--green)';
+          document.getElementById('job-progress-label').textContent = 'Done';
+        } else if (job.status === 'error' && fill) {
+          fill.style.background = 'var(--red)';
+          document.getElementById('job-progress-label').textContent = 'Failed';
+        }
         if (job.status === 'done') refreshData();
       }
     } catch (_) {}
@@ -993,6 +1170,156 @@ document.getElementById('modal').addEventListener('click', e => {
 document.getElementById('backup-modal').addEventListener('click', e => {
   if (e.target === document.getElementById('backup-modal')) closeBackupModal();
 });
+document.getElementById('delete-modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('delete-modal')) closeDeleteModal();
+});
+document.getElementById('delete-all-modal').addEventListener('click', e => {
+  if (e.target === document.getElementById('delete-all-modal')) closeDeleteAllModal();
+});
+
+// ─────────────────────────────────────────────
+// Delete snapshot modal
+// ─────────────────────────────────────────────
+let _deleteState = {};
+
+function openDeleteModal(d) {
+  const hasLocal = d.local === 'true';
+  const hasCloud = d.cloud === 'true';
+
+  _deleteState = {
+    vmid:       parseInt(d.vmid),
+    type:       d.type,
+    backupTime: parseInt(d.backupTime),
+    resticId:   d.resticId || null,
+    hasLocal,
+    hasCloud,
+    scope:      hasLocal ? 'local' : 'cloud',
+  };
+
+  document.getElementById('delete-modal-vm').textContent   = d.vm;
+  document.getElementById('delete-modal-date').textContent = d.date;
+  document.getElementById('delete-modal-subtitle').textContent = d.vm + ' · ' + d.date;
+
+  const scopeSection = document.getElementById('delete-scope-section');
+  const scopeOptions = document.getElementById('delete-scope-options');
+
+  if (hasLocal && hasCloud) {
+    // Offer choice: keep cloud or delete everything
+    scopeSection.style.display = '';
+    scopeOptions.innerHTML = `
+      <div class="source-opt selected" data-scope="local" onclick="selectDeleteScope(this)">
+        <div class="source-opt-icon">💾</div>
+        <div class="source-opt-name">Local only</div>
+        <div class="source-opt-desc">keep cloud copy</div>
+      </div>
+      <div class="source-opt" data-scope="both" onclick="selectDeleteScope(this)">
+        <div class="source-opt-icon">💾☁</div>
+        <div class="source-opt-name">Local + Cloud</div>
+        <div class="source-opt-desc">permanent</div>
+      </div>`;
+    _deleteState.scope = 'local';
+  } else {
+    scopeSection.style.display = 'none';
+  }
+
+  updateDeleteWarning();
+  document.getElementById('delete-modal').classList.add('open');
+}
+
+function selectDeleteScope(el) {
+  el.closest('.source-options').querySelectorAll('.source-opt')
+    .forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+  _deleteState.scope = el.dataset.scope;
+  updateDeleteWarning();
+}
+
+function updateDeleteWarning() {
+  const w = document.getElementById('delete-modal-warning');
+  const { hasLocal, hasCloud, scope } = _deleteState;
+  const hint = _scheduleHint();
+
+  if (!hasLocal && hasCloud) {
+    w.className = 'modal-warning cloud';
+    w.innerHTML = '⚠ &nbsp;Deleting a cloud-only snapshot requires restoring the full PBS datastore from restic, removing the snapshot from PBS, re-backing up to cloud, then forgetting the old restic snapshot.<br><br><strong>PBS will be stopped during restore. Stop any scheduled backup jobs before proceeding.</strong>' + hint;
+  } else if (scope === 'both') {
+    w.className = 'modal-warning cloud';
+    w.innerHTML = '⚠ &nbsp;Both the local PBS snapshot and the cloud restic copy will be permanently deleted. This cannot be undone.' + hint;
+  } else {
+    w.className = 'modal-warning';
+    w.innerHTML = '⚠ &nbsp;The PBS snapshot will be permanently deleted. Cloud restic copies (if any) are not affected.' + hint;
+  }
+}
+
+function closeDeleteModal() {
+  document.getElementById('delete-modal').classList.remove('open');
+}
+
+async function confirmDelete() {
+  const { vmid, type, backupTime, resticId, hasLocal, hasCloud, scope } = _deleteState;
+  closeDeleteModal();
+
+  let endpoint, body;
+  if (!hasLocal && hasCloud) {
+    endpoint = 'delete/cloud';
+    body = { vmid, type, backup_time: backupTime, restic_id: resticId };
+  } else if (scope === 'both') {
+    endpoint = 'delete/both';
+    body = { vmid, type, backup_time: backupTime, restic_id: resticId };
+  } else {
+    endpoint = 'delete/pbs';
+    body = { vmid, type, backup_time: backupTime };
+  }
+
+  const res = await fetch(`${API_BASE}/api/host/${currentHost}/${endpoint}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) { alert(_apiError(res, await res.text())); return; }
+  const { job_id } = await res.json();
+  openJobModal('Delete snapshot', job_id, vmid);
+}
+
+// ─────────────────────────────────────────────
+// Delete all local snapshots modal
+// ─────────────────────────────────────────────
+let _deleteAllState = {};
+
+function openDeleteAllModal(vmid, type, name) {
+  _deleteAllState = { vmid, type, name };
+  document.getElementById('delete-all-subtitle').textContent = name;
+  document.getElementById('delete-all-warning').innerHTML =
+    '⚠ &nbsp;All local PBS snapshots for this VM will be permanently deleted. Cloud restic copies (if any) are not affected.<br><br>Stop any scheduled backup jobs before proceeding.' + _scheduleHint();
+  const input = document.getElementById('delete-all-confirm-input');
+  input.value = '';
+  input.placeholder = name;
+  document.getElementById('delete-all-confirm-btn').disabled = true;
+  document.getElementById('delete-all-modal').classList.add('open');
+  setTimeout(() => input.focus(), 100);
+}
+
+function updateDeleteAllBtn() {
+  const input = document.getElementById('delete-all-confirm-input').value;
+  document.getElementById('delete-all-confirm-btn').disabled = input !== _deleteAllState.name;
+}
+
+function closeDeleteAllModal() {
+  document.getElementById('delete-all-modal').classList.remove('open');
+}
+
+async function confirmDeleteAll() {
+  const { vmid, type } = _deleteAllState;
+  closeDeleteAllModal();
+  const res = await fetch(`${API_BASE}/api/host/${currentHost}/delete/pbs/all`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ vmid, type }),
+  });
+  if (!res.ok) { alert(_apiError(res, await res.text())); return; }
+  const { job_id } = await res.json();
+  openJobModal('Delete all local snapshots', job_id, vmid);
+}
 
 // ─────────────────────────────────────────────
 // Theme toggle

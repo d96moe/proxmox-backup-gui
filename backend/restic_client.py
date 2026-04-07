@@ -6,6 +6,7 @@ host where both the PBS datastore and the restic/rclone binaries live.
 from __future__ import annotations
 
 import json
+import re
 import shlex
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -111,10 +112,11 @@ class ResticClient:
     # ──────────────────────────────────────────────
 
     def get_snapshots_by_vm(self) -> tuple[dict[int, list[dict]], list[dict]]:
-        """Returns ({pve_id: [{ts, id, short_id}]}, untagged_snaps).
+        """Returns ({pve_id: [{ts, pbs_time, id, short_id}]}, untagged_snaps).
 
-        Tagged snapshots (vm-N/ct-N) map to specific VMs.
-        Untagged snapshots are full-datastore backups covering all VMs.
+        New tag format "ct-301-1775554738": pbs_time is the exact PBS backup timestamp.
+        Old tag format "ct-301": pbs_time is None (fallback to ts-based matching).
+        Untagged snapshots are full-datastore backups (legacy, no per-VM info).
         """
         raw = self._run("snapshots")
         by_vm: dict[int, list[dict]] = {}
@@ -127,18 +129,24 @@ class ResticClient:
             snap_id = snap.get("id", "")
             short_id = snap.get("short_id", snap_id[:8] if snap_id else "")
 
-            vm_tags = [
-                t for t in tags
-                if (t.startswith("vm-") and t[3:].isdigit())
-                or (t.startswith("ct-") and t[3:].isdigit())
-            ]
+            vm_tags: list[tuple[int, int | None]] = []
+            for t in tags:
+                # New format: ct-301-1775554738
+                m = re.match(r'^(?:vm|ct)-(\d+)-(\d+)$', t)
+                if m:
+                    vm_tags.append((int(m.group(1)), int(m.group(2))))
+                    continue
+                # Old format: ct-301 or vm-100
+                if (t.startswith("vm-") and t[3:].isdigit()) or \
+                   (t.startswith("ct-") and t[3:].isdigit()):
+                    vm_tags.append((int(t[3:]), None))
 
             if vm_tags:
-                for tag in vm_tags:
-                    pve_id = int(tag[3:])
-                    by_vm.setdefault(pve_id, []).append(
-                        {"ts": ts, "id": snap_id, "short_id": short_id}
-                    )
+                for pve_id, pbs_time in vm_tags:
+                    entry: dict = {"ts": ts, "id": snap_id, "short_id": short_id}
+                    if pbs_time is not None:
+                        entry["pbs_time"] = pbs_time
+                    by_vm.setdefault(pve_id, []).append(entry)
             else:
                 untagged.append({"ts": ts, "id": snap_id, "short_id": short_id})
 
@@ -184,17 +192,31 @@ class ResticClient:
 
         return result
 
-    def backup_datastore(self, datastore_path: str, log) -> None:
-        """Back up the PBS datastore to the restic repo on the PVE host."""
+    def backup_datastore(self, datastore_path: str, log,
+                         pbs_snapshots: list[tuple[str, int, int]] | None = None) -> None:
+        """Back up the PBS datastore to the restic repo on the PVE host.
+
+        pbs_snapshots: list of (backup_type, vmid, backup_time) for every snapshot
+        currently in the PBS datastore, e.g. [('ct', 301, 1775554738)].
+        Each becomes a restic tag "ct-301-1775554738" so that get_snapshots_by_vm()
+        can match cloud entries back to exact PBS snapshots.
+        """
         log("Stopping PBS...")
         self._ssh_run(
             "systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true"
         )
         try:
             path = shlex.quote(datastore_path)
+            tag_flags = ""
+            if pbs_snapshots:
+                tags = " ".join(
+                    f"--tag {shlex.quote(f'{btype}-{vmid}-{btime}')}"
+                    for btype, vmid, btime in pbs_snapshots
+                )
+                tag_flags = f" {tags}"
             log(f"Running restic backup of {datastore_path}...")
             self._ssh_stream(
-                f"{self._env_prefix} restic backup {path} --no-lock",
+                f"{self._env_prefix} restic backup {path}{tag_flags} --no-lock",
                 log,
             )
         finally:
@@ -211,6 +233,51 @@ class ResticClient:
             f"{self._env_prefix} restic restore {snap} --target / --no-lock",
             log,
         )
+
+    def forget_snapshots(self, snapshot_ids: list[str], log) -> None:
+        """Remove specific restic snapshots and prune unreferenced data.
+
+        Passes the exact snapshot IDs rather than a retention policy to avoid
+        accidentally removing snapshots other than the intended ones.
+        """
+        if not snapshot_ids:
+            log("No restic snapshots to forget.")
+            return
+        ids_quoted = " ".join(shlex.quote(sid) for sid in snapshot_ids)
+        log(f"Forgetting restic snapshot(s): {', '.join(s[:8] for s in snapshot_ids)}...")
+        self._ssh_stream(
+            f"{self._env_prefix} restic forget {ids_quoted} --prune",
+            log,
+        )
+        log("Restic forget + prune complete.")
+
+    def is_running(self) -> bool:
+        """Return True if a restic backup is currently in progress (active lock exists)."""
+        return self._is_locked()
+
+    def get_next_run(self) -> dict | None:
+        """Return next scheduled run of the restic systemd timer on the PVE host.
+
+        Parses `systemctl list-timers` output. Returns
+        {"next": "Mon 2026-04-06 03:00:00 CEST", "left": "11h"} or None.
+        """
+        try:
+            stdout = self._ssh_run(
+                "systemctl list-timers --no-pager 2>/dev/null | grep -i restic | head -1",
+                timeout=10,
+            )
+            line = stdout.strip()
+            if not line:
+                return None
+            # NEXT (3 tokens: day date time) + TZ + LEFT (Nh) + "left" + ...
+            tokens = line.split()
+            if len(tokens) >= 6:
+                next_at = " ".join(tokens[:4])   # "Mon 2026-04-06 03:00:00 CEST"
+                left    = tokens[4]               # "11h" / "3h" etc.
+                return {"next": next_at, "left": left}
+        except Exception:
+            pass
+        return None
 
     def get_version(self) -> str:
         try:

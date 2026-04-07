@@ -321,8 +321,25 @@ fi
 FORGET_OLD
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl stop proxmox-backup proxmox-backup-proxy"
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic backup /mnt/ci-pbs --tag ct-301 --json --no-lock 2>&1 | tail -3"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'RESTIC_BACKUP'
+# Build tags from PBS datastore snapshot dirs (same logic as backup-restic-vms.sh)
+TAG_ARGS=()
+for backup_type in vm ct; do
+    type_dir="/mnt/ci-pbs/${backup_type}"
+    [ -d "${type_dir}" ] || continue
+    for id_dir in "${type_dir}"/*/; do
+        id=$(basename "${id_dir}")
+        [[ "${id}" =~ ^[0-9]+$ ]] || continue
+        for snap_dir in "${id_dir}"*/; do
+            snap=$(basename "${snap_dir}")
+            ts=$(date -d "${snap}" +%s 2>/dev/null) || continue
+            TAG_ARGS+=("--tag" "${backup_type}-${id}-${ts}")
+        done
+    done
+done
+RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
+    restic backup /mnt/ci-pbs "${TAG_ARGS[@]}" --json --no-lock 2>&1 | tail -3
+RESTIC_BACKUP
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl start proxmox-backup proxmox-backup-proxy"
                     # Wait for PBS API to be ready before proceeding to step 3

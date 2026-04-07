@@ -55,6 +55,20 @@ _restic_locks: dict[str, threading.Lock] = {}
 _restic_locks_guard = threading.Lock()
 
 
+def _pbs_vm_ids(host: HostConfig) -> list[tuple[str, int, int]]:
+    """Return [(backup_type, vmid, backup_time), ...] for every snapshot in PBS."""
+    try:
+        pbs = PBSClient(host)
+        groups = pbs.get_snapshots()
+        return [
+            (g["backup_type"], g["pve_id"], s["backup_time"])
+            for g in groups
+            for s in g["snapshots"]
+        ]
+    except Exception:
+        return []
+
+
 def _get_restic_lock(host_id: str) -> threading.Lock:
     with _restic_locks_guard:
         if host_id not in _restic_locks:
@@ -134,50 +148,89 @@ def get_items(host_id: str):
 
         untagged_latest = max((e["ts"] for e in untagged_snaps), default=0)
 
-        # Build per-vmid snapshot lists from PBS, mark cloud where covered
+        # Build per-vmid snapshot lists from PBS, mark cloud where covered.
+        #
+        # New tag format (ct-301-<pbs_time>): exact lookup by pbs_time.
+        # Old tag format (ct-301, no timestamp): fallback to ts > backup_time heuristic.
+        restic_by_pbs_time: dict[int, dict[int, dict]] = {}  # vid → {pbs_time → entry}
+        for vid, entries in restic_by_vm.items():
+            for e in entries:
+                pt = e.get("pbs_time")
+                if pt is not None:
+                    restic_by_pbs_time.setdefault(vid, {})[pt] = e
+
         snap_map: dict[int, list] = {}
         for group in pbs_snaps:
             vid = group["pve_id"]
-            all_entries = sorted(
-                restic_by_vm.get(vid, []) + untagged_snaps,
+            old_entries_sorted = sorted(
+                [e for e in restic_by_vm.get(vid, []) if "pbs_time" not in e]
+                + untagged_snaps,
                 key=lambda e: e["ts"], reverse=True,
             )
             for snap in group["snapshots"]:
                 snap["local"] = True
-                covering = next((e for e in all_entries if e["ts"] > snap["backup_time"]), None)
+                # Exact match first (new tag format)
+                covering = restic_by_pbs_time.get(vid, {}).get(snap["backup_time"])
+                if covering is None:
+                    # Fallback: find newest old-style restic entry newer than this PBS snap
+                    covering = next(
+                        (e for e in old_entries_sorted if e["ts"] > snap["backup_time"]),
+                        None,
+                    )
                 if covering:
                     snap["cloud"] = True
                     snap["restic_id"] = covering.get("id")
                     snap["restic_short_id"] = covering.get("short_id")
             snap_map.setdefault(vid, []).extend(group["snapshots"])
 
-        # Add cloud-only restic snapshots (contain PBS snapshots pruned locally)
-        pbs_times: dict[int, set[int]] = {
+        # Add cloud-only restic snapshots.
+        #
+        # New tag format (pbs_time present): cloud-only if the exact PBS snapshot
+        # no longer exists locally for this VM.
+        # Old tag format / untagged: cloud-only if older than oldest local PBS (legacy).
+        used_restic_ids: set[str] = set()
+        for snaps in snap_map.values():
+            for snap in snaps:
+                if snap.get("restic_id"):
+                    used_restic_ids.add(snap["restic_id"])
+
+        pbs_times_set: dict[int, set[int]] = {
             vid: {s["backup_time"] for s in snaps}
             for vid, snaps in snap_map.items()
         }
+        pbs_oldest: dict[int, int] = {
+            vid: min(times) for vid, times in pbs_times_set.items() if times
+        }
+
         all_restic_vmids = set(restic_by_vm.keys()) | (
             set(pve_meta.keys()) if untagged_snaps else set()
         )
         for vid in all_restic_vmids:
-            # Tagged entries per VM + all untagged (full-datastore) snapshots
-            entries = restic_by_vm.get(vid, []) + untagged_snaps
-            known = pbs_times.get(vid, set())
-            oldest_local = min(known) if known else None
-            for e in entries:
-                ts = e["ts"]
-                # Only add cloud-only entry if restic snapshot is OLDER than oldest local PBS
-                # snapshot — meaning it contains PBS snapshots that have since been pruned.
-                if oldest_local is None or ts < oldest_local:
+            local_times = pbs_times_set.get(vid, set())
+            oldest_local = pbs_oldest.get(vid)
+            all_entries = restic_by_vm.get(vid, []) + untagged_snaps
+            for e in all_entries:
+                rid = e.get("id", "")
+                if rid in used_restic_ids:
+                    continue
+                pbs_time = e.get("pbs_time")
+                if pbs_time is not None:
+                    # New format: cloud-only if exact PBS snapshot gone locally
+                    is_cloud_only = pbs_time not in local_times
+                else:
+                    # Old format / untagged: cloud-only if older than oldest local PBS
+                    is_cloud_only = (oldest_local is None or e["ts"] < oldest_local)
+                if is_cloud_only:
+                    ts = e["ts"]
                     dt = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
                     snap_map.setdefault(vid, []).append({
-                        "backup_time": ts,
+                        "backup_time": pbs_time if pbs_time is not None else ts,
                         "date": dt,
                         "local": False,
                         "cloud": True,
                         "incremental": True,
                         "size": "—",
-                        "restic_id": e.get("id"),
+                        "restic_id": rid,
                         "restic_short_id": e.get("short_id"),
                     })
 
@@ -375,6 +428,38 @@ def get_info(host_id: str):
     return jsonify(_cached(f"info:{host_id}", fetch))
 
 
+@app.get("/api/host/<host_id>/schedules")
+def get_schedules(host_id: str):
+    """Return next scheduled PBS (vzdump) and restic backup times for the host."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+
+    result: dict = {
+        "pbs_jobs": [],
+        "pbs_running": False,
+        "restic_next": None,
+        "restic_running": False,
+    }
+
+    try:
+        pve = PVEClient(host)
+        result["pbs_jobs"] = pve.get_backup_schedules()
+        result["pbs_running"] = pve.is_backup_running()
+    except Exception:
+        pass
+
+    if host.restic_repo and host.restic_password:
+        try:
+            restic = ResticClient(host)
+            result["restic_next"] = restic.get_next_run()
+            result["restic_running"] = restic.is_running()
+        except Exception:
+            pass
+
+    return jsonify(result)
+
+
 # ──────────────────────────────────────────────
 # Backup / Restore
 # ──────────────────────────────────────────────
@@ -417,7 +502,7 @@ def backup_pbs(host_id: str):
             log("Backup complete.")
             if run_restic_after and host.restic_repo:
                 restic = ResticClient(host)
-                restic.backup_datastore(host.pbs_datastore_path, log)
+                restic.backup_datastore(host.pbs_datastore_path, log, _pbs_vm_ids(host))
             _cache.pop(f"items:{host_id}", None)
         finally:
             if restic_lock:
@@ -567,8 +652,236 @@ def backup_restic(host_id: str):
     def work(log):
         try:
             restic = ResticClient(host)
-            restic.backup_datastore(host.pbs_datastore_path, log)
+            restic.backup_datastore(host.pbs_datastore_path, log, _pbs_vm_ids(host))
             _cache.pop(f"items:{host_id}", None)
+        finally:
+            restic_lock.release()
+
+    run_job(job_id, work)
+    return jsonify({"job_id": job_id})
+
+
+# ──────────────────────────────────────────────
+# Delete
+# ──────────────────────────────────────────────
+
+@app.post("/api/host/<host_id>/delete/pbs")
+def delete_pbs(host_id: str):
+    """Delete a single local PBS snapshot.
+
+    Body: { vmid, type, backup_time }
+    """
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    body = request.get_json() or {}
+    vmid        = int(body.get("vmid", 0))
+    vm_type     = body.get("type", "vm")
+    if vm_type == "lxc":
+        vm_type = "ct"
+    backup_time = body.get("backup_time")
+    if not vmid or backup_time is None:
+        abort(400, "vmid and backup_time required")
+
+    dt_label = datetime.fromtimestamp(backup_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+    job_id = create_job(f"Delete local PBS snapshot {vm_type}/{vmid} @ {dt_label}")
+
+    def work(log):
+        pbs = PBSClient(host)
+        log(f"Deleting PBS snapshot {vm_type}/{vmid} @ {dt_label}...")
+        pbs.delete_snapshot(vm_type, str(vmid), backup_time)
+        log("Done.")
+        _cache.pop(f"items:{host_id}", None)
+
+    run_job(job_id, work)
+    return jsonify({"job_id": job_id})
+
+
+@app.post("/api/host/<host_id>/delete/pbs/all")
+def delete_pbs_all(host_id: str):
+    """Delete all local PBS snapshots for a VM/LXC.
+
+    Body: { vmid, type }
+    """
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    body = request.get_json() or {}
+    vmid    = int(body.get("vmid", 0))
+    vm_type = body.get("type", "vm")
+    if vm_type == "lxc":
+        vm_type = "ct"
+    if not vmid:
+        abort(400, "vmid required")
+
+    job_id = create_job(f"Delete all local PBS snapshots for {vm_type}/{vmid}")
+
+    def work(log):
+        pbs = PBSClient(host)
+        count = pbs.delete_all_snapshots_for_vm(vm_type, str(vmid), log)
+        log(f"Deleted {count} snapshot(s).")
+        _cache.pop(f"items:{host_id}", None)
+
+    run_job(job_id, work)
+    return jsonify({"job_id": job_id})
+
+
+@app.post("/api/host/<host_id>/delete/cloud")
+def delete_cloud(host_id: str):
+    """Delete a snapshot that exists ONLY in cloud (no local PBS copy).
+
+    Sequence: restore PBS from restic → delete PBS snapshot → re-backup PBS
+              → forget old restic snapshot.
+
+    Body: { vmid, type, backup_time, restic_id }
+    """
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.restic_repo:
+        abort(400, "restic not configured for this host")
+
+    body = request.get_json() or {}
+    vmid        = int(body.get("vmid", 0))
+    vm_type     = body.get("type", "vm")
+    if vm_type == "lxc":
+        vm_type = "ct"
+    backup_time = body.get("backup_time")
+    restic_id   = body.get("restic_id")
+    if not vmid or backup_time is None or not restic_id:
+        abort(400, "vmid, backup_time and restic_id required")
+
+    restic_lock = _get_restic_lock(host_id)
+    if not restic_lock.acquire(blocking=False):
+        abort(409, "A restic operation is already running for this host")
+
+    dt_label = datetime.fromtimestamp(backup_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+    job_id = create_job(f"Delete cloud-only snapshot {vm_type}/{vmid} @ {dt_label}")
+
+    def work(log):
+        restic = ResticClient(host)
+        pbs    = PBSClient(host)
+
+        try:
+            # Step 1/4 — restore PBS datastore from restic
+            log("Step 1/4 — Restoring PBS datastore from restic snapshot...")
+            log("WARNING: PBS will be stopped during this operation.")
+            restic._ssh_run(
+                "systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true"
+            )
+            try:
+                restic.restore_datastore(restic_id, log)
+            finally:
+                restic._ssh_run(
+                    "systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true"
+                )
+            log("PBS restarted. Waiting for it to become ready...")
+            for attempt in range(1, 25):
+                try:
+                    pbs.get_snapshots()
+                    log(f"PBS ready after {attempt * 5}s.")
+                    break
+                except Exception as e:
+                    log(f"PBS not ready yet ({attempt}/24): {e}")
+                    time.sleep(5)
+            else:
+                raise RuntimeError("PBS did not become ready within 120s after restore")
+
+            # Step 2/4 — delete the target PBS snapshot.
+            # After restore the PBS snapshot time comes from the datastore, not from
+            # the restic snapshot timestamp (the two differ by a few seconds).
+            # Find the closest PBS snapshot within ±120s of the restic snapshot time.
+            log(f"Step 2/4 — Deleting PBS snapshot {vm_type}/{vmid} @ {dt_label}...")
+            pbs_groups = pbs.get_snapshots()
+            pbs_times_for_vm = [
+                s["backup_time"]
+                for g in pbs_groups
+                if g["pve_id"] == vmid and g["backup_type"] == vm_type
+                for s in g["snapshots"]
+            ]
+            # Pick the PBS snapshot whose time is closest to the restic snapshot time
+            actual_backup_time = min(
+                pbs_times_for_vm,
+                key=lambda t: abs(t - backup_time),
+                default=None,
+            )
+            if actual_backup_time is None or abs(actual_backup_time - backup_time) > 120:
+                raise RuntimeError(
+                    f"Could not find PBS snapshot for {vm_type}/{vmid} near {dt_label} "
+                    f"(candidates: {pbs_times_for_vm})"
+                )
+            pbs.delete_snapshot(vm_type, str(vmid), actual_backup_time)
+            log("PBS snapshot deleted.")
+
+            # Step 3/4 — re-backup PBS datastore to restic (without the deleted snapshot)
+            log("Step 3/4 — Re-uploading PBS datastore to restic...")
+            restic.backup_datastore(host.pbs_datastore_path, log, _pbs_vm_ids(host))
+
+            # Step 4/4 — forget the old restic snapshot
+            log(f"Step 4/4 — Removing old restic snapshot {restic_id[:8]}...")
+            restic.forget_snapshots([restic_id], log)
+
+            _cache.pop(f"items:{host_id}", None)
+            log("Done.")
+        finally:
+            restic_lock.release()
+
+    run_job(job_id, work)
+    return jsonify({"job_id": job_id})
+
+
+@app.post("/api/host/<host_id>/delete/both")
+def delete_both(host_id: str):
+    """Delete a snapshot that exists locally AND in cloud.
+
+    Sequence: delete PBS snapshot → re-backup PBS → forget old restic snapshot.
+    (No restore needed since local PBS copy exists.)
+
+    Body: { vmid, type, backup_time, restic_id }
+    """
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.restic_repo:
+        abort(400, "restic not configured for this host")
+
+    body = request.get_json() or {}
+    vmid        = int(body.get("vmid", 0))
+    vm_type     = body.get("type", "vm")
+    if vm_type == "lxc":
+        vm_type = "ct"
+    backup_time = body.get("backup_time")
+    restic_id   = body.get("restic_id")
+    if not vmid or backup_time is None or not restic_id:
+        abort(400, "vmid, backup_time and restic_id required")
+
+    restic_lock = _get_restic_lock(host_id)
+    if not restic_lock.acquire(blocking=False):
+        abort(409, "A restic operation is already running for this host")
+
+    dt_label = datetime.fromtimestamp(backup_time, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+    job_id = create_job(f"Delete local+cloud snapshot {vm_type}/{vmid} @ {dt_label}")
+
+    def work(log):
+        restic = ResticClient(host)
+        pbs    = PBSClient(host)
+
+        try:
+            # Step 1/3 — delete local PBS snapshot
+            log(f"Step 1/3 — Deleting local PBS snapshot {vm_type}/{vmid} @ {dt_label}...")
+            pbs.delete_snapshot(vm_type, str(vmid), backup_time)
+            log("PBS snapshot deleted.")
+
+            # Step 2/3 — re-backup PBS datastore to restic (without the deleted snapshot)
+            log("Step 2/3 — Re-uploading PBS datastore to restic...")
+            restic.backup_datastore(host.pbs_datastore_path, log, _pbs_vm_ids(host))
+
+            # Step 3/3 — forget the old restic snapshot
+            log(f"Step 3/3 — Removing old restic snapshot {restic_id[:8]}...")
+            restic.forget_snapshots([restic_id], log)
+
+            _cache.pop(f"items:{host_id}", None)
+            log("Done.")
         finally:
             restic_lock.release()
 

@@ -65,6 +65,37 @@ class PVEClient:
                 }
         return result
 
+    def get_backup_schedules(self) -> list[dict]:
+        """Returns enabled vzdump backup jobs with their schedule strings."""
+        try:
+            jobs = self._get("/cluster/backup")
+            return [
+                {
+                    "id": j.get("id", ""),
+                    "schedule": j.get("schedule") or _format_starttime(j.get("starttime")),
+                    "storage": j.get("storage", ""),
+                }
+                for j in (jobs if isinstance(jobs, list) else [])
+                if j.get("enabled", 1)
+            ]
+        except Exception:
+            return []
+
+    def is_backup_running(self) -> bool:
+        """Return True if a vzdump task is currently running on any node."""
+        try:
+            for node in self.get_nodes():
+                resp = self._session.get(
+                    f"{self._base}/api2/json/nodes/{node}/tasks",
+                    params={"typefilter": "vzdump", "statusfilter": "running"},
+                )
+                resp.raise_for_status()
+                if resp.json().get("data"):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def backup_vm(self, vmid: int, vm_type: str, storage: str, node: str) -> str:
         """Trigger vzdump backup of a single VM/LXC to PBS storage. Returns PVE task UPID."""
         params: dict = dict(storage=storage, mode="snapshot", compress="zstd", remove=0)
@@ -131,6 +162,14 @@ class PVEClient:
                     log(f"Task failed: {exit_status}")
                     return False
             time.sleep(poll_interval)
+
+
+def _format_starttime(t) -> str | None:
+    """Convert legacy PVE starttime (seconds from midnight) to HH:MM string."""
+    if t is None:
+        return None
+    h, m = divmod(int(t) // 60, 60)
+    return f"daily {h:02d}:{m:02d}"
 
 
 def _guess_os(name: str) -> str:
