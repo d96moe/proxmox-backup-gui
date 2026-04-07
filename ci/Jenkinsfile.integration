@@ -305,13 +305,18 @@ EOF
                     # via SSH — this keeps backup and restore symmetric.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic init --no-lock 2>&1" || true
+                    # Write password to a temp file on remote so quoted heredocs can read it.
+                    # Quoted heredocs prevent local bash from expanding ${RESTIC_PASSWORD}
+                    # (which would be empty on remote), while still running complex scripts remotely.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "printf '%s' '${RESTIC_PASSWORD}' > /tmp/.restic_pw && chmod 600 /tmp/.restic_pw"
                     # Forget ALL previous ct-301 snapshots before taking a fresh one.
                     # Old snapshots from prior CI runs may be corrupt (taken inside an
                     # unprivileged container). The GUI picks the oldest cloud-only entry,
                     # which would be one of those corrupt snapshots.
                     # restic forget <id>... removes specific snapshots without needing a policy.
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << FORGET_OLD
-RESTIC_ENV="RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'FORGET_OLD'
+RESTIC_ENV="RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=$(cat /tmp/.restic_pw) RCLONE_CONFIG=/root/.config/rclone/rclone.conf"
 # Forget ALL snapshots (tagged or not) — some old ones have no tag and survive --tag filter
 IDS=$(eval "$RESTIC_ENV restic snapshots --json --no-lock 2>/dev/null" | \
     python3 -c "import json,sys; snaps=json.load(sys.stdin); print(' '.join(s['id'] for s in snaps))" 2>/dev/null || true)
@@ -340,7 +345,7 @@ for backup_type in vm ct; do
         done
     done
 done
-RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
+RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=$(cat /tmp/.restic_pw) RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
     restic backup /mnt/ci-pbs "${TAG_ARGS[@]}" --json --no-lock 2>&1 | tail -3
 RESTIC_BACKUP
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
@@ -394,9 +399,10 @@ for backup_type in vm ct; do
         done
     done
 done
-RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
+RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=$(cat /tmp/.restic_pw) RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
     restic backup /mnt/ci-pbs "${TAG_ARGS[@]}" --json --no-lock 2>&1 | tail -3
 RESTIC_BACKUP_R2
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "rm -f /tmp/.restic_pw"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl start proxmox-backup proxmox-backup-proxy"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'WAITPBS2'

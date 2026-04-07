@@ -649,10 +649,10 @@ def test_edge_slow_backend_8s_eventually_loads(blank_page):
 async def _async_open_page(browser, base_url: str):
     """Open an isolated async browser context and wait for first render."""
     ctx = await browser.new_context(base_url=base_url)
-    ctx.route("**fonts.googleapis.com**",
-              lambda r: r.fulfill(status=200, content_type="text/css", body=""))
-    ctx.route("**fonts.gstatic.com**",
-              lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
+    await ctx.route("**fonts.googleapis.com**",
+                    lambda r: r.fulfill(status=200, content_type="text/css", body=""))
+    await ctx.route("**fonts.gstatic.com**",
+                    lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
     pg = await ctx.new_page()
     pg._js_errors = []
     pg._ctx = ctx
