@@ -104,11 +104,21 @@ class PBSClient:
         return result
 
     def delete_snapshot(self, backup_type: str, backup_id: str, backup_time: int) -> None:
-        """Delete a single PBS snapshot. Raises on failure."""
-        self._delete(
-            f"/admin/datastore/{self._datastore}/snapshots",
-            **{"backup-type": backup_type, "backup-id": backup_id, "backup-time": backup_time},
-        )
+        """Delete a single PBS snapshot. Raises on failure.
+
+        Treats 400/404 as "already gone" — PBS returns 400 (not 404) when the
+        snapshot doesn't exist, so we swallow those to keep delete workflows
+        idempotent.
+        """
+        try:
+            self._delete(
+                f"/admin/datastore/{self._datastore}/snapshots",
+                **{"backup-type": backup_type, "backup-id": backup_id, "backup-time": backup_time},
+            )
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code in (400, 404):
+                return  # snapshot already gone — treat as success
+            raise
 
     def delete_all_snapshots_for_vm(self, backup_type: str, backup_id: str, log) -> int:
         """Delete all PBS snapshots for a given VM/LXC. Returns number deleted."""

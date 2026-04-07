@@ -250,6 +250,16 @@ class ResticClient:
             log,
         )
         log("Restic forget + prune complete.")
+        # Deleted packs end up in GDrive trash and count against quota until emptied.
+        try:
+            repo_path = ":".join(self._repo.split(":")[1:])
+            log("Emptying cloud trash...")
+            self._ssh_run(
+                f"{self._env_prefix} rclone cleanup {shlex.quote(repo_path)} 2>/dev/null || true",
+                timeout=30,
+            )
+        except Exception:
+            pass
 
     def is_running(self) -> bool:
         """Return True if a restic backup is currently in progress (active lock exists)."""

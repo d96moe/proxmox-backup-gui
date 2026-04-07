@@ -488,20 +488,24 @@ def backup_pbs(host_id: str):
     job_id = create_job(label)
 
     def work(log):
+        total = 2 if (run_restic_after and host.restic_repo) else 2
         try:
             pve = PVEClient(host)
             nodes = pve.get_nodes()
             node = nodes[0]
-            log(f"Triggering PBS backup: {vm_type}/{vmid} on node {node}")
+            log(f"Step 1/{total} — Triggering PBS backup: {vm_type}/{vmid} on node {node}")
             upid = pve.backup_vm(vmid, vm_type, host.pbs_storage_id, node)
             log(f"Task started: {upid}")
             if isinstance(upid, str) and upid.startswith("UPID:"):
+                if not (run_restic_after and host.restic_repo):
+                    log(f"Step 2/{total} — Backup running, waiting for completion...")
                 ok = pve.wait_for_task(node, upid, log)
                 if not ok:
                     raise RuntimeError("PBS backup task failed")
             log("Backup complete.")
             if run_restic_after and host.restic_repo:
                 restic = ResticClient(host)
+                log(f"Step 2/{total} — Uploading to cloud (restic)...")
                 restic.backup_datastore(host.pbs_datastore_path, log, _pbs_vm_ids(host))
             _cache.pop(f"items:{host_id}", None)
         finally:
@@ -555,11 +559,17 @@ def restore(host_id: str):
         nodes = pve.get_nodes()
         node = nodes[0]
 
+        total = (3 if source == "cloud" else 2) + (1 if run_backup_after else 0)
+        step = 0
+        def s(msg):
+            nonlocal step; step += 1
+            log(f"Step {step}/{total} — {msg}")
+
         if source == "cloud":
             if not restic_id:
                 raise ValueError("restic_id required for cloud restore")
             restic = ResticClient(host)
-            log(f"Starting restic restore of snapshot {restic_id} → {host.pbs_datastore_path}")
+            s(f"Restoring PBS datastore from restic snapshot {restic_id[:8]}...")
             log("WARNING: This will overwrite the current PBS datastore.")
             log(f"Connecting to PVE host {restic._ssh_host} via SSH...")
             log("Stopping PBS...")
@@ -567,7 +577,6 @@ def restore(host_id: str):
                 "systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true"
             )
             try:
-                log("Running restic restore...")
                 restic.restore_datastore(restic_id, log)
             finally:
                 log("Starting PBS...")
@@ -604,19 +613,20 @@ def restore(host_id: str):
         backup_time_iso = datetime.fromtimestamp(backup_ts, tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
-        log(f"Stopping {vm_type}/{vmid} before restore...")
+        s(f"Stopping {vm_type}/{vmid} and initiating PBS restore...")
         pve.stop_vm(vmid, vm_type, node)
         log(f"Restoring {vm_type}/{vmid} snapshot {backup_time_iso} from {host.pbs_storage_id}")
         upid = pve.restore_vm(vmid, vm_type, backup_time_iso, host.pbs_storage_id, node,
                               host.pbs_datastore)
         log(f"Task started: {upid}")
+        s("Restore running, waiting for completion...")
         ok = pve.wait_for_task(node, upid, log)
         if not ok:
             raise RuntimeError("Restore task failed")
         log("Restore complete.")
 
         if run_backup_after:
-            log("Triggering PBS backup of all VMs...")
+            s("Triggering PBS backup after restore...")
             upid2 = pve.backup_vm(0, vm_type, host.pbs_storage_id, node)
             pve.wait_for_task(node, upid2, log)
             log("Post-restore backup complete.")
@@ -652,6 +662,7 @@ def backup_restic(host_id: str):
     def work(log):
         try:
             restic = ResticClient(host)
+            log("Step 1/1 — Uploading PBS datastore to cloud (restic)...")
             restic.backup_datastore(host.pbs_datastore_path, log, _pbs_vm_ids(host))
             _cache.pop(f"items:{host_id}", None)
         finally:
@@ -688,7 +699,7 @@ def delete_pbs(host_id: str):
 
     def work(log):
         pbs = PBSClient(host)
-        log(f"Deleting PBS snapshot {vm_type}/{vmid} @ {dt_label}...")
+        log(f"Step 1/1 — Deleting PBS snapshot {vm_type}/{vmid} @ {dt_label}...")
         pbs.delete_snapshot(vm_type, str(vmid), backup_time)
         log("Done.")
         _cache.pop(f"items:{host_id}", None)
@@ -718,6 +729,7 @@ def delete_pbs_all(host_id: str):
 
     def work(log):
         pbs = PBSClient(host)
+        log(f"Step 1/1 — Deleting all PBS snapshots for {vm_type}/{vmid}...")
         count = pbs.delete_all_snapshots_for_vm(vm_type, str(vmid), log)
         log(f"Deleted {count} snapshot(s).")
         _cache.pop(f"items:{host_id}", None)
@@ -817,9 +829,21 @@ def delete_cloud(host_id: str):
             log("Step 3/4 — Re-uploading PBS datastore to restic...")
             restic.backup_datastore(host.pbs_datastore_path, log, _pbs_vm_ids(host))
 
-            # Step 4/4 — forget the old restic snapshot
-            log(f"Step 4/4 — Removing old restic snapshot {restic_id[:8]}...")
-            restic.forget_snapshots([restic_id], log)
+            # Step 4/4 — forget ALL restic snapshots that carry the deleted PBS timestamp.
+            # Other restic snapshots (e.g. BU3 which was taken when T1+T2+T3 all existed)
+            # also contain the ct-{vmid}-{backup_time} tag and would re-surface T2 as
+            # cloud-only unless forgotten here too.
+            log("Step 4/4 — Finding all restic snapshots covering the deleted timestamp...")
+            by_vm_post, _ = restic.get_snapshots_by_vm()
+            ids_to_forget = list({
+                e["id"] for e in by_vm_post.get(vmid, [])
+                if e.get("pbs_time") == backup_time
+            })
+            if not ids_to_forget:
+                ids_to_forget = [restic_id]  # fallback: old-style tags without pbs_time
+            log(f"Step 4/4 — Removing {len(ids_to_forget)} restic snapshot(s) "
+                f"tagged {vm_type}-{vmid}-{backup_time}...")
+            restic.forget_snapshots(ids_to_forget, log)
 
             _cache.pop(f"items:{host_id}", None)
             log("Done.")
