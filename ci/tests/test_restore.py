@@ -978,15 +978,12 @@ def test_delete_all_local_snaps_removed_from_items(host_id):
         f"{[s['backup_time'] for s in local_snaps]}"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# SELF-RESTORE WARNING — restoring the GUI container itself (ct/300)
-#
-# When the user tries to restore the LXC that runs the Flask backend (SELF_VMID),
-# the restore modal must show a prominent warning and require a checkbox to confirm.
-# This prevents accidental self-restore that would kill the running backend.
-# ─────────────────────────────────────────────────────────────────────────────
+# Self-restore tests have been moved to test_self_restore.py.
+# pytest runs files alphabetically: test_restore.py → test_self_restore.py.
+# The self-restore execution test kills Flask (ct/300 stops mid-job), so it
+# MUST run after all other integration tests to avoid breaking the session.
 
-def test_self_restore_warning_shown_in_modal(real_page, host_id):
+def _MOVED_test_self_restore_warning_shown_in_modal(real_page, host_id):
     """Restore modal for the GUI container (ct/300 = SELF_VMID) must show a self-restore warning."""
     # We need a PBS snapshot for ct/300. The purge step deletes all ct/300 snapshots
     # to prevent restore tests from accidentally killing the app. But for this test
@@ -1047,7 +1044,7 @@ def test_self_restore_warning_shown_in_modal(real_page, host_id):
                     })
 
 
-def test_self_restore_executes_and_backend_recovers(host_id):
+def _MOVED_test_self_restore_executes_and_backend_recovers(host_id):
     """Actually execute a self-restore of ct/300 (the GUI container itself) and verify
     the backend comes back online afterwards.
 
