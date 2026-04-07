@@ -924,15 +924,23 @@ def test_job_no_js_errors_open_close(page: Page):
     assert page._js_errors == [], f"JS errors during job modal lifecycle: {page._js_errors}"
 
 def test_job_refresh_btn_enabled_after_done_and_close(page: Page):
-    """Full lifecycle: open → done → close must leave refresh button enabled."""
+    """Full lifecycle: open → done → close must leave refresh button enabled.
+
+    When the job completes, refreshData() is called which temporarily disables
+    the button while /items loads. We wait for it to become enabled again.
+    """
     cfg.job_status = "done"
     cfg.job_logs = ["Backup complete."]
     page.evaluate("openJobModal('Test', 'mock-job-1')")
     page.wait_for_function(
-        "() => !document.getElementById('job-close-btn').disabled",
+        "() => document.getElementById('job-badge').textContent === 'done'",
         timeout=6000,
     )
     page.evaluate("closeJobModal()")
+    page.wait_for_function(
+        "() => !document.getElementById('refresh-btn').disabled",
+        timeout=6000,
+    )
     assert not page.locator("#refresh-btn").is_disabled(), \
         "Refresh button should be enabled after job done + modal closed"
 
