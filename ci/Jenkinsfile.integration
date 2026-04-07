@@ -158,6 +158,9 @@ FIXHOSTS
 set -e
 # Stop LXC 300 so we can clone it and set bind mounts
 pct stop 300 2>/dev/null || true
+# Remove LXC 301 if it already exists in the template (baked in from a previous run)
+pct stop 301 2>/dev/null || true
+pct destroy 301 --purge 1 2>/dev/null || true
 # Clone LXC 300 → LXC 301 as restore test target (stays stopped, never conflicts)
 pct clone 300 301 --full 1
 pct start 300
