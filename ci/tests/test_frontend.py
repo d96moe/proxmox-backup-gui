@@ -947,7 +947,8 @@ def test_job_modal_reopen_works_correctly(page: Page):
     # Second cycle — must work cleanly
     page.evaluate("openJobModal('Second', 'mock-job-1')")
     page.wait_for_function(
-        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+        "() => ['done','error'].includes(document.getElementById('job-badge').textContent)",
+        timeout=6000)
     assert page.locator("#job-badge").inner_text() == "done"
     assert page._js_errors == [], f"JS errors on second modal open: {page._js_errors}"
     page.evaluate("closeJobModal()")
