@@ -576,6 +576,18 @@ PYEOF
                             exit 1
                         }
 
+                        # Diagnose restic/cloud coverage before tests run
+                        echo "--- PRE-TEST RESTIC DIAGNOSTICS ---"
+                        curl -sf "http://10.10.0.100:5000/api/host/ci/items" 2>/dev/null | \
+                            python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+snaps=[(s['backup_time'],s.get('local'),s.get('cloud'),s.get('restic_id','')[:8] if s.get('restic_id') else '') for l in d.get('lxcs',[]) for s in l.get('snapshots',[])]
+print('LXC snapshots (backup_time,local,cloud,restic_short):')
+[print(' ',s) for s in snaps]
+" 2>/dev/null || echo "items endpoint failed"
+                        echo "--- END DIAGNOSTICS ---"
+
                         cd /opt/ci/proxmox-backup-gui
                         BACKEND_URL=http://10.10.0.100:5000 \
                         pytest tests/ \
