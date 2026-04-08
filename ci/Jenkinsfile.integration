@@ -329,9 +329,6 @@ fi
 FORGET_OLD
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl stop proxmox-backup proxmox-backup-proxy"
-                    echo "--- DEBUG: PBS datastore structure ---"
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "find /mnt/ci-pbs/ct /mnt/ci-pbs/vm -maxdepth 2 -mindepth 2 2>/dev/null | head -20 || echo 'No ct/vm dirs found under /mnt/ci-pbs'"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'RESTIC_BACKUP'
 # Build tags from PBS datastore snapshot dirs (same logic as backup-restic-vms.sh)
 TAG_ARGS=()
@@ -345,11 +342,9 @@ for backup_type in vm ct; do
             snap=$(basename "${snap_dir}")
             ts=$(date -d "${snap}" +%s 2>/dev/null) || continue
             TAG_ARGS+=("--tag" "${backup_type}-${id}-${ts}")
-            echo "  DEBUG tag: ${backup_type}-${id}-${ts} (snap=${snap})"
         done
     done
 done
-echo "DEBUG R1: TAG_ARGS count=${#TAG_ARGS[@]}"
 RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=$(cat /tmp/.restic_pw) RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
     restic backup /mnt/ci-pbs "${TAG_ARGS[@]}" --json --no-lock 2>&1 | tail -3
 RESTIC_BACKUP
