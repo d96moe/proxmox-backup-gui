@@ -154,6 +154,10 @@ FIXHOSTS
                         ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "cat > /usr/local/bin/restic && chmod +x /usr/local/bin/restic"
                     echo "rclone + restic deployed to CI VM PVE host"
 
+                    # Write password to VM so quoted STEP_B heredoc can read it
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "printf '%s' '${RESTIC_PASSWORD}' > /tmp/.restic_pw && chmod 600 /tmp/.restic_pw"
+
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'STEP_B'
 set -e
 # Stop LXC 300 so we can clone it and set bind mounts
@@ -181,7 +185,7 @@ pct exec 300 -- python3 -c "
 import json
 with open('/opt/proxmox-backup-gui/backend/hosts.json') as f: h=json.load(f)
 h[0]['restic_repo'] = 'rclone:gdrive:bu/gui-ci-test'
-h[0]['restic_password'] = '${RESTIC_PASSWORD}'
+h[0]['restic_password'] = '$(cat /tmp/.restic_pw)'
 h[0]['restic_env'] = {'RCLONE_CONFIG': '/root/.config/rclone/rclone.conf'}
 h[0]['pbs_storage_id'] = 'pbs-local'
 h[0]['pbs_datastore_path'] = '/mnt/ci-pbs'
