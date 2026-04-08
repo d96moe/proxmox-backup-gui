@@ -272,6 +272,31 @@ EOF
                 sh '''
                     VM_IP=$(cat vm_ip.txt)
 
+                    # Purge stale PBS backups left over from the QEMU template (e.g. ct/300
+                    # backed up during template preparation). Only ct/301 should exist in PBS
+                    # during CI tests — restoring any other vmid could kill the Flask backend.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'PURGE_STALE_PBS'
+systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true
+for id_dir in /mnt/ci-pbs/ct/*/; do
+    id=$(basename "$id_dir")
+    [ "$id" = "301" ] && continue
+    echo "Removing stale PBS ct/$id backups from template..."
+    rm -rf "$id_dir"
+done
+for id_dir in /mnt/ci-pbs/vm/*/; do
+    id=$(basename "$id_dir")
+    echo "Removing stale PBS vm/$id backups from template..."
+    rm -rf "$id_dir"
+done
+systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true
+# Wait for PBS to be ready
+for i in $(seq 1 24); do
+    proxmox-backup-manager datastore list --output-format json >/dev/null 2>&1 && { echo "PBS ready after purge"; break; }
+    echo "  waiting for PBS... ($i/24)"
+    sleep 5
+done
+PURGE_STALE_PBS
+
                     # Step 1: PBS backup of LXC 301 (clone of 300, already stopped).
                     # Tests restore ct/301 to avoid self-restore deadlock (app runs in ct/300).
                     echo "Triggering PBS backup of LXC 301..."
@@ -586,9 +611,12 @@ PYEOF
                             python3 -c "
 import json,sys
 d=json.load(sys.stdin)
-snaps=[(s['backup_time'],s.get('local'),s.get('cloud'),s.get('restic_id','')[:8] if s.get('restic_id') else '') for l in d.get('lxcs',[]) for s in l.get('snapshots',[])]
-print('LXC snapshots (backup_time,local,cloud,restic_short):')
-[print(' ',s) for s in snaps]
+print('LXC snapshots (vmid, backup_time, local, cloud, restic_short):')
+for item in d.get('lxcs',[]):
+    vmid=item['id']
+    for s in item.get('snapshots',[]):
+        rid=s.get('restic_id','')
+        print(' ',vmid,s['backup_time'],s.get('local'),s.get('cloud'),rid[:8] if rid else '')
 " 2>/dev/null || echo "items endpoint failed"
                         echo "--- END DIAGNOSTICS ---"
 
