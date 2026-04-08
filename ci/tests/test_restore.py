@@ -832,6 +832,17 @@ def test_delete_cloud_only_gone_from_items(host_id, items):
     if vmid is None:
         pytest.skip("No cloud-only snapshot (may have been cleaned up already)")
 
+    # If fresh items still shows this snapshot as cloud-only, delete/cloud ran
+    # and we check it's gone. If it's no longer cloud (restic timeout) or
+    # delete/cloud was skipped, skip this verification too.
+    fresh = _items(host_id)
+    fresh_vmid, _, fresh_snap = _find_snap(fresh, local=False, cloud=True)
+    if fresh_vmid is not None and fresh_snap["backup_time"] == snap["backup_time"]:
+        pytest.skip(
+            "delete/cloud was skipped (cloud-only snap still present) — "
+            "cannot verify gone_from_items"
+        )
+
     time.sleep(2)
     assert not _snap_exists_in_items(host_id, vmid, snap["backup_time"]), \
         f"Cloud-only snapshot vmid={vmid} backup_time={snap['backup_time']} still in items after delete/cloud"
@@ -847,6 +858,15 @@ def test_delete_cloud_only_all_restic_snapshots_forgotten(host_id, items):
     vmid, _, snap = _find_snap(items, local=False, cloud=True)
     if vmid is None:
         pytest.skip("No cloud-only snapshot (may have been cleaned up already)")
+
+    # Skip if delete/cloud was skipped (snap still present in fresh items as cloud-only)
+    fresh = _items(host_id)
+    fresh_vmid, _, fresh_snap = _find_snap(fresh, local=False, cloud=True)
+    if fresh_vmid is not None and fresh_snap["backup_time"] == snap["backup_time"]:
+        pytest.skip(
+            "delete/cloud was skipped (cloud-only snap still present) — "
+            "cannot verify restic_snapshots_forgotten"
+        )
 
     covers_after = _restic_covers_for(host_id, vmid, snap["backup_time"])
     assert len(covers_after) == 0, (

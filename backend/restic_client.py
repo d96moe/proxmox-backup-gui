@@ -103,7 +103,7 @@ class ResticClient:
         quoted_args = " ".join(shlex.quote(a) for a in args)
         stdout = self._ssh_run(
             f"{self._env_prefix} restic {quoted_args} --json --no-lock",
-            timeout=30,
+            timeout=120,
         )
         return json.loads(stdout)
 
