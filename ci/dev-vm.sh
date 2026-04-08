@@ -100,6 +100,7 @@ deploy_code() {
     scp ${SSH_OPTS} -i ${SSH_KEY} \
         "${REPO_ROOT}/ci/tests/test_frontend.py" \
         "${REPO_ROOT}/ci/tests/test_restore.py" \
+        "${REPO_ROOT}/ci/tests/test_self_restore.py" \
         "${REPO_ROOT}/ci/tests/conftest.py" \
         root@${VM_IP}:/tmp/gui-update/tests/
 
@@ -116,9 +117,10 @@ sleep 3
 pct exec 300 -- systemctl is-active proxmox-backup-gui
 
 mkdir -p /opt/ci/proxmox-backup-gui/tests /opt/ci/proxmox-backup-gui/frontend
-cp /tmp/gui-update/tests/test_frontend.py /opt/ci/proxmox-backup-gui/tests/
-cp /tmp/gui-update/tests/test_restore.py  /opt/ci/proxmox-backup-gui/tests/
-cp /tmp/gui-update/tests/conftest.py      /opt/ci/proxmox-backup-gui/tests/
+cp /tmp/gui-update/tests/test_frontend.py     /opt/ci/proxmox-backup-gui/tests/
+cp /tmp/gui-update/tests/test_restore.py      /opt/ci/proxmox-backup-gui/tests/
+cp /tmp/gui-update/tests/test_self_restore.py /opt/ci/proxmox-backup-gui/tests/ 2>/dev/null || true
+cp /tmp/gui-update/tests/conftest.py          /opt/ci/proxmox-backup-gui/tests/
 cp /tmp/gui-update/index.html             /opt/ci/proxmox-backup-gui/frontend/
 echo "Deploy klar."
 DEPLOY
@@ -469,6 +471,43 @@ for i in $(seq 1 60); do
     [ "${STATUS}" = "error" ] && { echo "ERROR: T3 misslyckades"; exit 1; }
 done
 
+# ── SEED: Steg 3d — Ghost PBS-backup för ct/399 (in_pve=False-scenario) ──────
+echo "=== Seed: Skapar ghost PBS-backup för ct/399 (in_pve=False) ==="
+ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'GHOST_PBS'
+PBS_FP=$(proxmox-backup-manager cert info 2>&1 | grep -i 'fingerprint.*sha256' | sed 's/.*: //' | tr -d ' ')
+PBS_PW=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_password'])")
+PBS_USER=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_user'])")
+PBS_URL=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_url'])")
+PBS_DS=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_datastore'])")
+
+# Försök med proxmox-backup-client inuti LXC 300
+pct exec 300 -- bash -c "
+    mkdir -p /tmp/ghost399
+    echo ghost > /tmp/ghost399/ghost.txt
+    PBS_PASSWORD='${PBS_PW}' proxmox-backup-client backup \
+        ghost.pxar:/tmp/ghost399 \
+        --repository '${PBS_USER}@${PBS_URL#https://}:${PBS_DS}' \
+        --backup-type ct --backup-id 399 \
+        --fingerprint '${PBS_FP}' \
+        --change-detection-mode=data \
+        2>&1 | tail -3
+" 2>&1 && echo "proxmox-backup-client OK" || {
+    # Fallback: injicera snapshot direkt i filsystemet
+    echo "proxmox-backup-client ej tillgänglig — injicerar via filsystem..."
+    systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true
+    SNAP_DIR="/mnt/ci-pbs/ct/399/$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    mkdir -p "$SNAP_DIR"
+    touch "$SNAP_DIR/ghost.log.blob"
+    systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true
+    for i in $(seq 1 24); do
+        proxmox-backup-manager datastore list --output-format json >/dev/null 2>&1 \
+            && { echo "PBS redo efter ghost inject"; break; }
+        echo "  väntar på PBS... ($i/24)"; sleep 5
+    done
+}
+echo "Ghost ct/399 klar (in_pve=False scenario)"
+GHOST_PBS
+
 # ── SEED: Steg 4 — Ta bort T1 (äldst PBS-snapshot) → cloud-only ──────────────
 echo "=== Seed: Tar bort T1 från PBS (skapar cloud-only scenario) ==="
 cat > /tmp/delete_oldest_snap.py << 'PYEOF'
@@ -579,6 +618,7 @@ echo " Dev-VM redo!  Seedad state:"
 echo "   T1: cloud-only  (täcks av R1 + R2)"
 echo "   T2: local+cloud (täcks av R2)"
 echo "   T3: local-only  (ingen restic-täckning)"
+echo "   ct/399: ghost PBS-snap (in_pve=False, ingen LXC 399 i PVE)"
 echo ""
 echo " GUI-åtkomst (öppna ny terminal):"
 echo "   ssh -L 5000:10.10.0.100:5000 root@${VM_IP}"

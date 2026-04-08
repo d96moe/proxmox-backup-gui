@@ -226,7 +226,8 @@ STEP_B
 
                     # Push latest test files to VM (so we always run the current test suite)
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
-                        ci/tests/test_frontend.py ci/tests/test_restore.py ci/tests/conftest.py \
+                        ci/tests/test_frontend.py ci/tests/test_restore.py \
+                        ci/tests/test_self_restore.py ci/tests/conftest.py \
                         root@${VM_IP}:/tmp/gui-update/tests/
 
                     # Push into LXC 300 and restart service
@@ -258,6 +259,8 @@ STEP_B
                             /opt/ci/proxmox-backup-gui/tests/test_frontend.py
                         cp /tmp/gui-update/tests/test_restore.py \
                             /opt/ci/proxmox-backup-gui/tests/test_restore.py
+                        cp /tmp/gui-update/tests/test_self_restore.py \
+                            /opt/ci/proxmox-backup-gui/tests/test_self_restore.py
                         cp /tmp/gui-update/tests/conftest.py \
                             /opt/ci/proxmox-backup-gui/tests/conftest.py
                         cp /tmp/gui-update/index.html \
@@ -460,10 +463,60 @@ WAITPBS2
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #3 failed"; exit 1; }
                     done
 
-                    # Seeded state after steps 1-3c:
+                    # Step 3d: Create a ghost PBS snapshot for ct/399 — a vmid that does
+                    # not exist in PVE. This produces an in_pve=False item in the GUI,
+                    # required by test_backup_btn_absent_for_non_pve_items.
+                    echo "Creating ghost PBS backup for ct/399 (in_pve=False scenario)..."
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'GHOST_PBS'
+# proxmox-backup-client needs the PBS password — read from hosts.json written by STEP_B
+PBS_PW=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_password'])")
+PBS_USER=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_user'])")
+PBS_URL=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_url'])")
+PBS_DS=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_datastore'])")
+PBS_FP=$(proxmox-backup-manager cert info 2>&1 | grep -i 'fingerprint.*sha256' | sed 's/.*: //' | tr -d ' ')
+
+# Run inside LXC 300 so we have network access to PBS (10.10.0.1)
+pct exec 300 -- bash -c "
+    mkdir -p /tmp/ghost399
+    echo 'ghost-vm-for-ci-test' > /tmp/ghost399/rootfs.pxar.didx 2>/dev/null || \
+        dd if=/dev/urandom bs=1k count=1 2>/dev/null > /tmp/ghost399/data.img
+    echo ghost > /tmp/ghost399/ghost.txt
+    PBS_PASSWORD='${PBS_PW}' proxmox-backup-client backup \
+        ghost.pxar:/tmp/ghost399 \
+        --repository '${PBS_USER}@${PBS_URL#https://}:${PBS_DS}' \
+        --backup-type ct --backup-id 399 \
+        --fingerprint '${PBS_FP}' \
+        --change-detection-mode=data \
+        2>&1 | tail -3 || echo 'proxmox-backup-client not available, using direct API'
+
+    # Fallback: inject snapshot directly via filesystem (no client needed)
+    # PBS stores snapshots as directories: <datastore>/<type>/<id>/<ISO8601Z>/
+" 2>&1 || true
+
+# Filesystem fallback if proxmox-backup-client is not installed in LXC 300
+if ! pct exec 300 -- which proxmox-backup-client >/dev/null 2>&1; then
+    echo "Using filesystem injection for ct/399 ghost snapshot..."
+    systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true
+    SNAP_DIR="/mnt/ci-pbs/ct/399/$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    mkdir -p "$SNAP_DIR"
+    # Minimal chunk: PBS needs at least an index file to list the snapshot
+    echo '{"backup-type":"ct","backup-id":"399"}' > "$SNAP_DIR/.pbs-ghost"
+    touch "$SNAP_DIR/ghost.log.blob"
+    chown -R root:root "$SNAP_DIR"
+    systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true
+    for i in $(seq 1 24); do
+        proxmox-backup-manager datastore list --output-format json >/dev/null 2>&1 && { echo "PBS ready after ghost inject"; break; }
+        echo "  waiting for PBS... ($i/24)"; sleep 5
+    done
+fi
+echo "Ghost ct/399 snapshot created (in_pve=False scenario ready)"
+GHOST_PBS
+
+                    # Seeded state after steps 1-3d:
                     #   T1 = oldest PBS snap  (will be deleted → cloud-only via R1+R2)
                     #   T2 = middle PBS snap  (kept → local+cloud via R2)
                     #   T3 = newest PBS snap  (kept → local-only, no restic coverage)
+                    #   ct/399 ghost PBS snap (in_pve=False, no LXC 399 in PVE)
                     #   R1 = restic snap covering T1 only
                     #   R2 = restic snap covering T1+T2
 
