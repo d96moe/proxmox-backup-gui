@@ -279,17 +279,16 @@ EOF
                     # backed up during template preparation). Only ct/301 should exist in PBS
                     # during CI tests — restoring any other vmid could kill the Flask backend.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'PURGE_STALE_PBS'
+# Remove ALL PBS snapshots — the seed creates exactly what's needed (T1/T2/T3/ghost).
+# Keeping old ct/301 backups from the template or prior runs causes R1 to tag them all,
+# bloating the restic snapshot and making the items endpoint slow.
 systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true
-for id_dir in /mnt/ci-pbs/ct/*/; do
-    id=$(basename "$id_dir")
-    [ "$id" = "301" ] && continue
-    echo "Removing stale PBS ct/$id backups from template..."
-    rm -rf "$id_dir"
-done
-for id_dir in /mnt/ci-pbs/vm/*/; do
-    id=$(basename "$id_dir")
-    echo "Removing stale PBS vm/$id backups from template..."
-    rm -rf "$id_dir"
+for btype in ct vm; do
+    for id_dir in /mnt/ci-pbs/${btype}/*/; do
+        id=$(basename "$id_dir")
+        echo "Removing stale PBS ${btype}/${id} backups..."
+        rm -rf "$id_dir"
+    done
 done
 systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true
 # Wait for PBS to be ready
