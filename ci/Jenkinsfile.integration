@@ -349,12 +349,25 @@ PURGE_STALE_PBS
                     # restic forget <id>... removes specific snapshots without needing a policy.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'FORGET_OLD'
 RESTIC_ENV="RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=$(cat /tmp/.restic_pw) RCLONE_CONFIG=/root/.config/rclone/rclone.conf"
-# Forget ALL snapshots (tagged or not) — some old ones have no tag and survive --tag filter
+# Forget ALL snapshots in batches of 1 to avoid GDrive rate limits / timeouts.
+# Large repos (3+ snapshots) can take >30 min with a single forget --prune call.
 IDS=$(eval "$RESTIC_ENV restic snapshots --json --no-lock 2>/dev/null" | \
-    python3 -c "import json,sys; snaps=json.load(sys.stdin); print(' '.join(s['id'] for s in snaps))" 2>/dev/null || true)
+    python3 -c "import json,sys; snaps=json.load(sys.stdin); print('\n'.join(s['id'] for s in snaps))" 2>/dev/null || true)
 if [ -n "$IDS" ]; then
-    echo "Forgetting all snapshots: $IDS"
-    eval "$RESTIC_ENV restic forget $IDS --prune 2>&1"
+    COUNT=$(echo "$IDS" | wc -l)
+    echo "Forgetting ${COUNT} snapshot(s) one by one..."
+    echo "$IDS" | while read ID; do
+        [ -z "$ID" ] && continue
+        echo "  Forgetting ${ID:0:8}..."
+        eval "$RESTIC_ENV restic forget $ID --prune 2>&1" || echo "  WARNING: forget $ID failed, continuing"
+    done
+    # Verify repo is empty after forget
+    REMAINING=$(eval "$RESTIC_ENV restic snapshots --json --no-lock 2>/dev/null" | \
+        python3 -c "import json,sys; print(len(json.load(sys.stdin)))" 2>/dev/null || echo "?")
+    echo "Snapshots remaining after forget: ${REMAINING}"
+    # Empty GDrive trash so deleted packs don't count against quota
+    eval "$RESTIC_ENV rclone cleanup rclone:gdrive:bu/gui-ci-test 2>/dev/null || true"
+    echo "GDrive trash emptied"
 else
     echo "No existing snapshots to forget"
 fi
