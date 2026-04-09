@@ -9,6 +9,8 @@ import json
 import re
 import shlex
 import subprocess
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
@@ -56,8 +58,13 @@ class ResticClient:
             )
         return result.stdout
 
-    def _ssh_stream(self, remote_cmd: str, log) -> None:
-        """Run remote_cmd on PVE host, streaming output through log(). Raises on non-zero exit."""
+    def _ssh_stream(self, remote_cmd: str, log, heartbeat_secs: int = 10,
+                    parse_json: bool = False) -> None:
+        """Run remote_cmd on PVE host, streaming output through log(). Raises on non-zero exit.
+
+        heartbeat_secs: inject "[Xs elapsed]" when no output received for this long.
+        parse_json: parse restic --json status lines into human-readable progress messages.
+        """
         proc = subprocess.Popen(
             ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
              f"root@{self._ssh_host}", remote_cmd],
@@ -65,9 +72,46 @@ class ResticClient:
             stderr=subprocess.STDOUT,
             text=True,
         )
-        for line in proc.stdout:
-            log(line.rstrip())
-        proc.wait()
+        start = time.monotonic()
+        last_output = [start]
+        stop_event = threading.Event()
+
+        def _heartbeat():
+            while not stop_event.wait(1.0):
+                if time.monotonic() - last_output[0] >= heartbeat_secs:
+                    elapsed = int(time.monotonic() - start)
+                    log(f"[{elapsed}s elapsed]")
+                    last_output[0] = time.monotonic()
+
+        hb = threading.Thread(target=_heartbeat, daemon=True)
+        hb.start()
+        try:
+            for raw in proc.stdout:
+                last_output[0] = time.monotonic()
+                line = raw.rstrip()
+                if parse_json and line.startswith('{'):
+                    try:
+                        d = json.loads(line)
+                        mtype = d.get('message_type', '')
+                        if mtype == 'status':
+                            pct = int(d.get('percent_done', 0) * 100)
+                            elapsed = int(d.get('seconds_elapsed', 0))
+                            files_done = d.get('files_done', 0)
+                            total_files = d.get('total_files', 0)
+                            mb = round(d.get('bytes_done', 0) / 1024 ** 2)
+                            log(f"[{pct}% — {files_done}/{total_files} files, {mb} MB ({elapsed}s elapsed)]")
+                            continue
+                        elif mtype == 'summary':
+                            added = d.get('data_added_packed', d.get('data_added', 0))
+                            mb = round(added / 1024 ** 2)
+                            log(f"Uploaded {mb} MB to cloud.")
+                            continue
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        pass
+                log(line)
+        finally:
+            stop_event.set()
+            proc.wait()
         if proc.returncode != 0:
             raise RuntimeError(
                 f"SSH restic command on {self._ssh_host} failed (exit {proc.returncode})"
@@ -259,8 +303,9 @@ class ResticClient:
                 tag_flags = f" {tags}"
             log(f"Running restic backup of {datastore_path}...")
             self._ssh_stream(
-                f"{self._env_prefix} restic backup {path}{tag_flags} --no-lock",
+                f"{self._env_prefix} restic backup {path}{tag_flags} --no-lock --json",
                 log,
+                parse_json=True,
             )
         finally:
             log("Starting PBS...")

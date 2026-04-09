@@ -1238,9 +1238,9 @@ async function _pollJob(jobId, vmid) {
           logEl.appendChild(div);
 
           // Drive progress bar from "Step N/M — ..." lines
-          const m = line.match(/^Step\s+(\d+)\/(\d+)\s+[—\-]/);
-          if (m) {
-            const cur = parseInt(m[1]), total = parseInt(m[2]);
+          const mStep = line.match(/^Step\s+(\d+)\/(\d+)\s+[—\-]/);
+          if (mStep) {
+            const cur = parseInt(mStep[1]), total = parseInt(mStep[2]);
             const pct = Math.round((cur - 1) / total * 100);
             const fill = document.getElementById('job-progress-fill');
             const label = document.getElementById('job-progress-label');
@@ -1248,6 +1248,23 @@ async function _pollJob(jobId, vmid) {
             if (track) track.classList.remove('indeterminate');
             if (fill) fill.style.width = pct + '%';
             if (label) label.textContent = `Step ${cur}/${total} — ` + line.replace(/^Step\s+\d+\/\d+\s+[—\-]\s*/, '').split('(')[0].trim();
+          }
+          // Drive progress bar from "[X% — ...files, MB (Xs elapsed)]" (restic backup JSON)
+          const mPct = line.match(/^\[(\d+)%\s+[—\-]/);
+          if (mPct) {
+            const pct = parseInt(mPct[1]);
+            const fill = document.getElementById('job-progress-fill');
+            const label = document.getElementById('job-progress-label');
+            const track = fill && fill.closest('.job-progress-bar-track');
+            if (track) track.classList.remove('indeterminate');
+            if (fill) fill.style.width = pct + '%';
+            if (label) label.textContent = line.replace(/^\[/, '').replace(/\]$/, '');
+          }
+          // Update label for heartbeat lines "[Xs elapsed]" without touching the bar
+          const mElapsed = line.match(/^\[(\d+)s elapsed\]$/);
+          if (mElapsed) {
+            const label = document.getElementById('job-progress-label');
+            if (label) label.textContent = `${mElapsed[1]}s elapsed…`;
           }
         });
         logEl.scrollTop = logEl.scrollHeight;
