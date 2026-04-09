@@ -753,22 +753,14 @@ def test_seeded_local_only_has_no_restic_coverage(host_id, items):
 
 
 def test_seeded_restic_snapshot_count(host_id):
-    """Seed must produce exactly 2 restic snapshots covering ct/301 (R1 and R2).
-
-    Extra snapshots from other CI builds on the shared GDrive repo (no ct/301
-    coverage, no tags) are intentionally ignored.
-    """
+    """Seed must produce exactly 2 restic snapshots (R1 and R2)."""
     try:
         snaps = _get(f"/api/host/{host_id}/restic/snapshots")
     except Exception as e:
         pytest.skip(f"restic/snapshots endpoint error: {e}")
-    ct301_snaps = [
-        s for s in snaps
-        if any(c.get("vmid") == 301 for c in s.get("covers", []))
-    ]
-    assert len(ct301_snaps) == 2, (
-        f"Expected exactly 2 restic snapshots covering ct/301 (R1 and R2), "
-        f"got {len(ct301_snaps)}. All IDs: {[s['id'][:8] for s in snaps]}"
+    assert len(snaps) == 2, (
+        f"Expected exactly 2 restic snapshots (R1 and R2) after seeding, "
+        f"got {len(snaps)}. IDs: {[s['id'][:8] for s in snaps]}"
     )
 
 
