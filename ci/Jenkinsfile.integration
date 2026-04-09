@@ -341,10 +341,26 @@ PURGE_STALE_PBS
                     # This is simpler and more reliable than restic forget --prune, which
                     # can leave orphaned pack files, is slow on large repos, and fails when
                     # the remote was written by a different build that holds a lock.
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone purge rclone:gdrive:bu/gui-ci-test 2>&1 || true"
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic init 2>&1"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'PURGE_AND_INIT'
+RESTIC_ENV="RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=$(cat /tmp/.restic_pw) RCLONE_CONFIG=/root/.config/rclone/rclone.conf"
+# Permanently delete GDrive folder (--drive-use-trash=false bypasses trash)
+echo "Purging GDrive test repo..."
+RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone purge rclone:gdrive:bu/gui-ci-test --drive-use-trash=false 2>&1 || echo "Purge returned non-zero (folder may not have existed)"
+# Initialise fresh repo; if purge didn't fully clear it, init will fail — that's ok
+eval "$RESTIC_ENV restic init 2>&1" && echo "Fresh repo initialised" || echo "Init failed — repo may already exist, will forget all snapshots"
+# Safety net: forget any snapshots that survived the purge
+IDS=$(eval "$RESTIC_ENV restic snapshots --json --no-lock 2>/dev/null" | \
+    python3 -c "import json,sys; snaps=json.load(sys.stdin); print('\n'.join(s['id'] for s in snaps))" 2>/dev/null || true)
+if [ -n "$IDS" ]; then
+    echo "Leftover snapshots found — forgetting: $(echo "$IDS" | tr '\n' ' ')"
+    echo "$IDS" | while read ID; do
+        [ -z "$ID" ] && continue
+        eval "$RESTIC_ENV restic forget $ID --prune 2>&1" || true
+    done
+else
+    echo "Repo is clean (0 snapshots)"
+fi
+PURGE_AND_INIT
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl stop proxmox-backup proxmox-backup-proxy"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'RESTIC_BACKUP'
