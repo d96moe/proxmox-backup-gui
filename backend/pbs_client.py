@@ -40,6 +40,11 @@ class PBSClient:
         resp.raise_for_status()
         return resp.json().get("data", {})
 
+    def _delete(self, path: str, **params) -> dict:
+        resp = self._session.delete(f"{self._base}/api2/json{path}", params=params)
+        resp.raise_for_status()
+        return resp.json().get("data", {})
+
     def get_storage_info(self) -> dict:
         """Returns local_used, local_total in GB, and PBS dedup factor."""
         data = self._get(f"/admin/datastore/{self._datastore}/status")
@@ -97,6 +102,39 @@ class PBSClient:
                 "snapshots": snapshots,
             })
         return result
+
+    def delete_snapshot(self, backup_type: str, backup_id: str, backup_time: int) -> None:
+        """Delete a single PBS snapshot. Raises on failure.
+
+        Treats 400/404 as "already gone" — PBS returns 400 (not 404) when the
+        snapshot doesn't exist, so we swallow those to keep delete workflows
+        idempotent.
+        """
+        try:
+            self._delete(
+                f"/admin/datastore/{self._datastore}/snapshots",
+                **{"backup-type": backup_type, "backup-id": backup_id, "backup-time": backup_time},
+            )
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code in (400, 404):
+                return  # snapshot already gone — treat as success
+            raise
+
+    def delete_all_snapshots_for_vm(self, backup_type: str, backup_id: str, log) -> int:
+        """Delete all PBS snapshots for a given VM/LXC. Returns number deleted."""
+        snaps = self._get(
+            f"/admin/datastore/{self._datastore}/snapshots",
+            **{"backup-type": backup_type, "backup-id": backup_id},
+        )
+        # Sort oldest-first — conventional safe order for incremental chains
+        sorted_snaps = sorted(snaps, key=lambda s: s["backup-time"])
+        for snap in sorted_snaps:
+            ts = snap["backup-time"]
+            dt = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+            log(f"Deleting PBS snapshot {backup_type}/{backup_id} @ {dt}...")
+            self.delete_snapshot(backup_type, backup_id, ts)
+        log(f"Deleted {len(sorted_snaps)} PBS snapshot(s).")
+        return len(sorted_snaps)
 
     def get_versions(self) -> dict:
         """Returns PBS version string."""

@@ -237,6 +237,15 @@ class MockHandler(BaseHTTPRequestHandler):
 # Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _block_fonts(ctx):
+    """Route Google Fonts requests to empty responses so goto(wait_until='load')
+    never hangs on CI where outbound connections to googleapis.com are firewalled."""
+    ctx.route("**fonts.googleapis.com**",
+              lambda r: r.fulfill(status=200, content_type="text/css", body=""))
+    ctx.route("**fonts.gstatic.com**",
+              lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
+
+
 @pytest.fixture(scope="session")
 def mock_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), MockHandler)
@@ -267,6 +276,7 @@ def reset_server_config():
 def page(browser, mock_server):
     """Fresh page, loaded and ready (home host rendered)."""
     ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
     pg = ctx.new_page()
     # Capture JS console errors so tests can assert on them
     pg._js_errors: list[str] = []
@@ -284,6 +294,7 @@ def page(browser, mock_server):
 def blank_page(browser, mock_server):
     """Page that has NOT loaded yet — lets tests control timing."""
     ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors: list[str] = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -307,8 +318,10 @@ def expand_vm_card(pg: Page, vmid: int):
     Snapshots are collapsed by default (.snapshots { display:none }).
     Works for both in_pve=True (has backup-btn) and in_pve=False (no backup-btn).
     """
-    # Click the vm-header — works regardless of whether a backup-btn is present
-    pg.locator(f".vm-card:has([data-vmid='{vmid}'])").locator(".vm-header").first.click()
+    # Click .expand-btn directly — clicking .vm-header center can land on an inner
+    # button (backup-btn / del-all-btn) that calls event.stopPropagation(), which
+    # prevents toggleSnaps from firing, especially at mobile widths.
+    pg.locator(f".vm-card:has([data-vmid='{vmid}'])").locator(".expand-btn").first.click()
     # Wait for snapshots to become visible (any restore button in this card)
     pg.locator(f".restore-btn[data-vmid='{vmid}']").first.wait_for(
         state="visible", timeout=5000
@@ -571,6 +584,7 @@ def test_edge_empty_host_no_crash(browser, mock_server):
     HOSTS.append({"id": "empty", "label": "Empty"})
     try:
         ctx = browser.new_context(base_url=mock_server)
+        _block_fonts(ctx)
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -595,6 +609,7 @@ def test_edge_lxc_only_shows_containers(browser, mock_server):
     HOSTS.append({"id": "lxc-only", "label": "LXC Only"})
     try:
         ctx = browser.new_context(base_url=mock_server)
+        _block_fonts(ctx)
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -634,6 +649,10 @@ def test_edge_slow_backend_8s_eventually_loads(blank_page):
 async def _async_open_page(browser, base_url: str):
     """Open an isolated async browser context and wait for first render."""
     ctx = await browser.new_context(base_url=base_url)
+    await ctx.route("**fonts.googleapis.com**",
+                    lambda r: r.fulfill(status=200, content_type="text/css", body=""))
+    await ctx.route("**fonts.gstatic.com**",
+                    lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
     pg = await ctx.new_page()
     pg._js_errors = []
     pg._ctx = ctx
@@ -905,15 +924,23 @@ def test_job_no_js_errors_open_close(page: Page):
     assert page._js_errors == [], f"JS errors during job modal lifecycle: {page._js_errors}"
 
 def test_job_refresh_btn_enabled_after_done_and_close(page: Page):
-    """Full lifecycle: open → done → close must leave refresh button enabled."""
+    """Full lifecycle: open → done → close must leave refresh button enabled.
+
+    When the job completes, refreshData() is called which temporarily disables
+    the button while /items loads. We wait for it to become enabled again.
+    """
     cfg.job_status = "done"
     cfg.job_logs = ["Backup complete."]
     page.evaluate("openJobModal('Test', 'mock-job-1')")
     page.wait_for_function(
-        "() => !document.getElementById('job-close-btn').disabled",
+        "() => document.getElementById('job-badge').textContent === 'done'",
         timeout=6000,
     )
     page.evaluate("closeJobModal()")
+    page.wait_for_function(
+        "() => !document.getElementById('refresh-btn').disabled",
+        timeout=6000,
+    )
     assert not page.locator("#refresh-btn").is_disabled(), \
         "Refresh button should be enabled after job done + modal closed"
 
@@ -945,7 +972,8 @@ def test_job_modal_reopen_works_correctly(page: Page):
     # Second cycle — must work cleanly
     page.evaluate("openJobModal('Second', 'mock-job-1')")
     page.wait_for_function(
-        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+        "() => ['done','error'].includes(document.getElementById('job-badge').textContent)",
+        timeout=6000)
     assert page.locator("#job-badge").inner_text() == "done"
     assert page._js_errors == [], f"JS errors on second modal open: {page._js_errors}"
     page.evaluate("closeJobModal()")
@@ -979,6 +1007,7 @@ def snap_test_page(browser, mock_server):
     orig_hosts = HOSTS[:]
     HOSTS.append({"id": "snap-test", "label": "Snap Test"})
     ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1420,6 +1449,7 @@ def _partly_in_viewport(pg, selector: str) -> bool:
 def vp_page(browser, mock_server):
     """1280x800 page — standard laptop viewport, home host loaded."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 1280, "height": 800})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1438,6 +1468,7 @@ def vp_snap_page(browser, mock_server):
     orig_hosts = HOSTS[:]
     HOSTS.append({"id": "snap-test", "label": "Snap Test"})
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 1280, "height": 800})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1696,6 +1727,7 @@ def test_layout_job_close_btn_visible(vp_page):
 def test_layout_narrow_no_js_errors(browser, mock_server):
     """At 768x1024 the page must load without JS errors."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1711,6 +1743,7 @@ def test_layout_narrow_no_js_errors(browser, mock_server):
 def test_layout_narrow_vm_cards_rendered(browser, mock_server):
     """VM cards must render at 768px — no blank content."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1727,6 +1760,7 @@ def test_layout_narrow_vm_cards_rendered(browser, mock_server):
 def test_layout_narrow_backup_modal_opens(browser, mock_server):
     """Backup modal must open without JS errors at 768px."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1746,6 +1780,7 @@ def test_layout_narrow_backup_modal_opens(browser, mock_server):
 def test_layout_narrow_restore_modal_opens(browser, mock_server):
     """Restore modal must open without JS errors at 768px."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1909,6 +1944,7 @@ def test_dedup_shows_dash_when_not_available(browser, mock_server):
     HOSTS.append({"id": "no-cloud", "label": "No Cloud"})
     try:
         ctx = browser.new_context(base_url=mock_server)
+        _block_fonts(ctx)
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1943,6 +1979,7 @@ def test_dedup_no_js_errors(page: Page):
 def mobile_page(browser, mock_server):
     """390x844 viewport — iPhone-sized portrait screen, home host loaded."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 390, "height": 844})
+    _block_fonts(ctx)
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))

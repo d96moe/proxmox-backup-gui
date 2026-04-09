@@ -28,8 +28,8 @@ class PVEClient:
         d = resp.json()["data"]
         return d["ticket"], d["CSRFPreventionToken"]
 
-    def _get(self, path: str) -> list | dict:
-        resp = self._session.get(f"{self._base}/api2/json{path}")
+    def _get(self, path: str, timeout: int | None = None) -> list | dict:
+        resp = self._session.get(f"{self._base}/api2/json{path}", timeout=timeout)
         resp.raise_for_status()
         return resp.json().get("data", [])
 
@@ -64,6 +64,37 @@ class PVEClient:
                     "status": ct.get("status", "unknown"),
                 }
         return result
+
+    def get_backup_schedules(self) -> list[dict]:
+        """Returns enabled vzdump backup jobs with their schedule strings."""
+        try:
+            jobs = self._get("/cluster/backup")
+            return [
+                {
+                    "id": j.get("id", ""),
+                    "schedule": j.get("schedule") or _format_starttime(j.get("starttime")),
+                    "storage": j.get("storage", ""),
+                }
+                for j in (jobs if isinstance(jobs, list) else [])
+                if j.get("enabled", 1)
+            ]
+        except Exception:
+            return []
+
+    def is_backup_running(self) -> bool:
+        """Return True if a vzdump task is currently running on any node."""
+        try:
+            for node in self.get_nodes():
+                resp = self._session.get(
+                    f"{self._base}/api2/json/nodes/{node}/tasks",
+                    params={"typefilter": "vzdump", "statusfilter": "running"},
+                )
+                resp.raise_for_status()
+                if resp.json().get("data"):
+                    return True
+        except Exception:
+            pass
+        return False
 
     def backup_vm(self, vmid: int, vm_type: str, storage: str, node: str) -> str:
         """Trigger vzdump backup of a single VM/LXC to PBS storage. Returns PVE task UPID."""
@@ -115,6 +146,17 @@ class PVEClient:
         except Exception:
             pass  # Already stopped or other non-critical error
 
+    def start_vm(self, vmid: int, vm_type: str, node: str) -> None:
+        """Start a VM/LXC. Silently succeeds if already running."""
+        endpoint = (f"/nodes/{node}/lxc/{vmid}/status/start" if vm_type == "ct"
+                    else f"/nodes/{node}/qemu/{vmid}/status/start")
+        try:
+            upid = self._post(endpoint)
+            if upid:
+                self.wait_for_task(node, upid, lambda _: None, poll_interval=2)
+        except Exception:
+            pass  # Already running or other non-critical error
+
     def wait_for_task(self, node: str, upid: str, log: callable, poll_interval: int = 3) -> bool:
         """Poll a PVE task until completion. Returns True on success."""
         import time
@@ -131,6 +173,14 @@ class PVEClient:
                     log(f"Task failed: {exit_status}")
                     return False
             time.sleep(poll_interval)
+
+
+def _format_starttime(t) -> str | None:
+    """Convert legacy PVE starttime (seconds from midnight) to HH:MM string."""
+    if t is None:
+        return None
+    h, m = divmod(int(t) // 60, 60)
+    return f"daily {h:02d}:{m:02d}"
 
 
 def _guess_os(name: str) -> str:

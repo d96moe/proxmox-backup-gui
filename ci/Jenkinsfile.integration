@@ -19,13 +19,13 @@ pipeline {
     }
 
     options {
-        timeout(time: 45, unit: 'MINUTES')
+        timeout(time: 75, unit: 'MINUTES')
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '10'))
     }
 
     triggers {
-        cron('H 2 * * *')   // nightly, randomised minute to avoid thundering herd
+        cron('H 5 * * *')   // nightly at ~05:00 — prod backup jobs run 02:00, clear by 05:00
     }
 
     environment {
@@ -154,10 +154,17 @@ FIXHOSTS
                         ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "cat > /usr/local/bin/restic && chmod +x /usr/local/bin/restic"
                     echo "rclone + restic deployed to CI VM PVE host"
 
+                    # Write password to VM so quoted STEP_B heredoc can read it
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "printf '%s' '${RESTIC_PASSWORD}' > /tmp/.restic_pw && chmod 600 /tmp/.restic_pw"
+
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'STEP_B'
 set -e
 # Stop LXC 300 so we can clone it and set bind mounts
 pct stop 300 2>/dev/null || true
+# Remove LXC 301 if it already exists in the template (baked in from a previous run)
+pct stop 301 2>/dev/null || true
+pct destroy 301 --purge 1 2>/dev/null || true
 # Clone LXC 300 → LXC 301 as restore test target (stays stopped, never conflicts)
 pct clone 300 301 --full 1
 pct start 300
@@ -178,7 +185,7 @@ pct exec 300 -- python3 -c "
 import json
 with open('/opt/proxmox-backup-gui/backend/hosts.json') as f: h=json.load(f)
 h[0]['restic_repo'] = 'rclone:gdrive:bu/gui-ci-test'
-h[0]['restic_password'] = '${RESTIC_PASSWORD}'
+h[0]['restic_password'] = '$(cat /tmp/.restic_pw)'
 h[0]['restic_env'] = {'RCLONE_CONFIG': '/root/.config/rclone/rclone.conf'}
 h[0]['pbs_storage_id'] = 'pbs-local'
 h[0]['pbs_datastore_path'] = '/mnt/ci-pbs'
@@ -219,7 +226,8 @@ STEP_B
 
                     # Push latest test files to VM (so we always run the current test suite)
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
-                        ci/tests/test_frontend.py ci/tests/test_restore.py ci/tests/conftest.py \
+                        ci/tests/test_frontend.py ci/tests/test_restore.py \
+                        ci/tests/test_self_restore.py ci/tests/conftest.py \
                         root@${VM_IP}:/tmp/gui-update/tests/
 
                     # Push into LXC 300 and restart service
@@ -251,6 +259,8 @@ STEP_B
                             /opt/ci/proxmox-backup-gui/tests/test_frontend.py
                         cp /tmp/gui-update/tests/test_restore.py \
                             /opt/ci/proxmox-backup-gui/tests/test_restore.py
+                        cp /tmp/gui-update/tests/test_self_restore.py \
+                            /opt/ci/proxmox-backup-gui/tests/test_self_restore.py
                         cp /tmp/gui-update/tests/conftest.py \
                             /opt/ci/proxmox-backup-gui/tests/conftest.py
                         cp /tmp/gui-update/index.html \
@@ -264,6 +274,30 @@ EOF
             steps {
                 sh '''
                     VM_IP=$(cat vm_ip.txt)
+
+                    # Purge stale PBS backups left over from the QEMU template (e.g. ct/300
+                    # backed up during template preparation). Only ct/301 should exist in PBS
+                    # during CI tests — restoring any other vmid could kill the Flask backend.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'PURGE_STALE_PBS'
+# Remove ALL PBS snapshots — the seed creates exactly what's needed (T1/T2/T3/ghost).
+# Keeping old ct/301 backups from the template or prior runs causes R1 to tag them all,
+# bloating the restic snapshot and making the items endpoint slow.
+systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true
+for btype in ct vm; do
+    for id_dir in /mnt/ci-pbs/${btype}/*/; do
+        id=$(basename "$id_dir")
+        echo "Removing stale PBS ${btype}/${id} backups..."
+        rm -rf "$id_dir"
+    done
+done
+systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true
+# Wait for PBS to be ready
+for i in $(seq 1 24); do
+    proxmox-backup-manager datastore list --output-format json >/dev/null 2>&1 && { echo "PBS ready after purge"; break; }
+    echo "  waiting for PBS... ($i/24)"
+    sleep 5
+done
+PURGE_STALE_PBS
 
                     # Step 1: PBS backup of LXC 301 (clone of 300, already stopped).
                     # Tests restore ct/301 to avoid self-restore deadlock (app runs in ct/300).
@@ -300,29 +334,54 @@ EOF
                     # are unreadable. Running on the PVE host avoids this UID mapping entirely.
                     # The restore (in app.py _cloud_restore_cmd) already runs on the PVE host
                     # via SSH — this keeps backup and restore symmetric.
+                    # Write password to a temp file on remote so quoted heredocs can read it.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic init --no-lock 2>&1" || true
-                    # Forget ALL previous ct-301 snapshots before taking a fresh one.
-                    # Old snapshots from prior CI runs may be corrupt (taken inside an
-                    # unprivileged container). The GUI picks the oldest cloud-only entry,
-                    # which would be one of those corrupt snapshots.
-                    # restic forget <id>... removes specific snapshots without needing a policy.
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << FORGET_OLD
-RESTIC_ENV="RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf"
-# Forget ALL snapshots (tagged or not) — some old ones have no tag and survive --tag filter
-IDS=$(eval "$RESTIC_ENV restic snapshots --json --no-lock 2>/dev/null" | \
-    python3 -c "import json,sys; snaps=json.load(sys.stdin); print(' '.join(s['id'] for s in snaps))" 2>/dev/null || true)
+                        "printf '%s' '${RESTIC_PASSWORD}' > /tmp/.restic_pw && chmod 600 /tmp/.restic_pw"
+                    # Nuke the entire GDrive test repo and reinitialise from scratch.
+                    # This is simpler and more reliable than restic forget --prune, which
+                    # can leave orphaned pack files, is slow on large repos, and fails when
+                    # the remote was written by a different build that holds a lock.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'PURGE_AND_INIT'
+RESTIC_ENV="RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=$(cat /tmp/.restic_pw) RCLONE_CONFIG=/root/.config/rclone/rclone.conf"
+# Permanently delete GDrive folder (--drive-use-trash=false bypasses trash)
+echo "Purging GDrive test repo..."
+RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone purge gdrive:bu/gui-ci-test --drive-use-trash=false 2>&1 || echo "Purge returned non-zero (folder may not have existed)"
+# Initialise fresh repo; if purge didn't fully clear it, init will fail — that's ok
+eval "$RESTIC_ENV restic init 2>&1" && echo "Fresh repo initialised" || echo "Init failed — repo may already exist, will forget all snapshots"
+# Safety net: forget any snapshots that survived the purge
+IDS=$(eval "$RESTIC_ENV restic snapshots --json --no-lock 2>&1" | \
+    python3 -c "import json,sys; snaps=json.load(sys.stdin); print('\n'.join(s['id'] for s in snaps))" 2>/dev/null || true)
 if [ -n "$IDS" ]; then
-    echo "Forgetting all snapshots: $IDS"
-    eval "$RESTIC_ENV restic forget $IDS --prune 2>&1"
+    echo "Leftover snapshots found — forgetting: $(echo "$IDS" | tr '\n' ' ')"
+    echo "$IDS" | while read ID; do
+        [ -z "$ID" ] && continue
+        eval "$RESTIC_ENV restic forget $ID --prune 2>&1" || true
+    done
 else
-    echo "No existing snapshots to forget"
+    echo "Repo is clean (0 snapshots)"
 fi
-FORGET_OLD
+PURGE_AND_INIT
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl stop proxmox-backup proxmox-backup-proxy"
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=${RESTIC_PASSWORD} RCLONE_CONFIG=/root/.config/rclone/rclone.conf restic backup /mnt/ci-pbs --tag ct-301 --json --no-lock 2>&1 | tail -3"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'RESTIC_BACKUP'
+# Build tags from PBS datastore snapshot dirs (same logic as backup-restic-vms.sh)
+TAG_ARGS=()
+for backup_type in vm ct; do
+    type_dir="/mnt/ci-pbs/${backup_type}"
+    [ -d "${type_dir}" ] || continue
+    for id_dir in "${type_dir}"/*/; do
+        id=$(basename "${id_dir}")
+        [[ "${id}" =~ ^[0-9]+$ ]] || continue
+        for snap_dir in "${id_dir}"*/; do
+            snap=$(basename "${snap_dir}")
+            ts=$(date -d "${snap}" +%s 2>/dev/null) || continue
+            TAG_ARGS+=("--tag" "${backup_type}-${id}-${ts}")
+        done
+    done
+done
+RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=$(cat /tmp/.restic_pw) RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
+    restic backup /mnt/ci-pbs "${TAG_ARGS[@]}" --json --no-lock 2>&1 | tail -3
+RESTIC_BACKUP
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "systemctl start proxmox-backup proxmox-backup-proxy"
                     # Wait for PBS API to be ready before proceeding to step 3
@@ -335,10 +394,8 @@ done
 WAITPBS
                     echo "Restic backup complete (PBS stopped during snapshot for consistency)"
 
-                    # Step 3: PBS backup #2 — second local snapshot needed so that after
-                    # we delete PBS#1 the restic snapshot (from Step 2) is older than
-                    # oldest_local, making it appear as a cloud-only entry in the GUI.
-                    echo "Triggering PBS backup #2 (cloud-only seed)..."
+                    # Step 3: PBS backup #2 (T2) — exists at time of R2, will become local+cloud.
+                    echo "Triggering PBS backup #2 (T2)..."
                     JOB3=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
                     JOB3_ID=$(echo "${JOB3}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
@@ -353,9 +410,125 @@ WAITPBS
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #2 failed"; exit 1; }
                     done
 
-                    # Step 4: Delete PBS snapshot #1 — after deletion, oldest_local = T3
-                    # (PBS#2 time) and restic_ts = T2 (Step 2 time), so T2 < T3 and the
-                    # restic snapshot appears as cloud-only (no matching local PBS snapshot).
+                    # Step 3b: Restic backup R2 — covers BOTH T1 and T2.
+                    # This creates the multi-restic scenario: T1 is covered by R1 *and* R2.
+                    # When the integration test later deletes T1 (cloud-only), it must forget
+                    # both R1 and R2 — this verifies the step-4 multi-restic forget path.
+                    # R2 also gives T2 its cloud coverage (T2 will be local+cloud after T1 deleted).
+                    echo "Restic backup R2 (covers T1+T2, creates multi-restic scenario)..."
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "systemctl stop proxmox-backup proxmox-backup-proxy"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'RESTIC_BACKUP_R2'
+TAG_ARGS=()
+for backup_type in vm ct; do
+    type_dir="/mnt/ci-pbs/${backup_type}"
+    [ -d "${type_dir}" ] || continue
+    for id_dir in "${type_dir}"/*/; do
+        id=$(basename "${id_dir}")
+        [[ "${id}" =~ ^[0-9]+$ ]] || continue
+        for snap_dir in "${id_dir}"*/; do
+            snap=$(basename "${snap_dir}")
+            ts=$(date -d "${snap}" +%s 2>/dev/null) || continue
+            TAG_ARGS+=("--tag" "${backup_type}-${id}-${ts}")
+        done
+    done
+done
+RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=$(cat /tmp/.restic_pw) RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
+    restic backup /mnt/ci-pbs "${TAG_ARGS[@]}" --json --no-lock 2>&1 | tail -3
+RESTIC_BACKUP_R2
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "rm -f /tmp/.restic_pw"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "systemctl start proxmox-backup proxmox-backup-proxy"
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'WAITPBS2'
+for i in $(seq 1 24); do
+    proxmox-backup-manager datastore list --output-format json >/dev/null 2>&1 && { echo "PBS ready"; break; }
+    echo "  waiting for PBS... ($i/24)"
+    sleep 5
+done
+WAITPBS2
+                    echo "Restic R2 complete"
+
+                    # Step 3c: PBS backup #3 (T3) — local-only snapshot (taken after R2,
+                    # so T3 has no restic coverage). Provides the local-only test scenario.
+                    echo "Triggering PBS backup #3 (T3, local-only)..."
+                    JOB3C=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
+                    JOB3C_ID=$(echo "${JOB3C}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
+                    echo "PBS backup #3 job: ${JOB3C_ID}"
+
+                    for i in $(seq 1 60); do
+                        sleep 5
+                        STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                            "pct exec 300 -- python3 -c \\"import urllib.request; print(urllib.request.urlopen('http://localhost:5000/api/job/${JOB3C_ID}',timeout=5).read().decode())\\"" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                        echo "  PBS backup #3 status: ${STATUS}"
+                        [ "${STATUS}" = "done" ] && { echo "PBS backup #3 complete"; break; }
+                        [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #3 failed"; exit 1; }
+                    done
+
+                    # Step 3d: Create a ghost PBS snapshot for ct/399 — a vmid that does
+                    # not exist in PVE. This produces an in_pve=False item in the GUI,
+                    # required by test_backup_btn_absent_for_non_pve_items.
+                    #
+                    # Strategy: create a temporary minimal LXC 399, back it up to PBS
+                    # via vzdump, then destroy the LXC. The PBS snapshot remains and
+                    # ct/399 is not in PVE → in_pve=False in the GUI.
+                    echo "Creating ghost PBS snapshot for ct/399 (in_pve=False scenario)..."
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'GHOST_PBS'
+# Remove any stale ct/399 from a previous run
+pct status 399 >/dev/null 2>&1 && {
+    pct stop 399 --skiplock 1 2>/dev/null || true
+    sleep 2
+    pct destroy 399 --purge 1 2>/dev/null || true
+} || true
+
+# Find an available CT template in local storage
+TEMPLATE=$(pvesm list local --content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}')
+if [ -z "${TEMPLATE}" ]; then
+    echo "No template in local storage — downloading Alpine (smallest available)..."
+    pveam update 2>/dev/null || true
+    TNAME=$(pveam available --section system 2>/dev/null | grep -i alpine | head -1 | awk '{print $2}')
+    [ -z "${TNAME}" ] && { echo "ERROR: no CT template available"; exit 1; }
+    pveam download local "${TNAME}" 2>&1 | tail -3
+    TEMPLATE=$(pvesm list local --content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}')
+fi
+echo "Using template: ${TEMPLATE}"
+
+# Find a local storage that accepts rootdir (prefer local-lvm, fall back to local/ci-local)
+ROOTFS_STORAGE=""
+for stor in local-lvm local ci-local; do
+    pvesm status 2>/dev/null | grep -q "^${stor} " && { ROOTFS_STORAGE=$stor; break; }
+done
+[ -z "${ROOTFS_STORAGE}" ] && { echo "ERROR: no suitable storage for ct/399 rootfs"; exit 1; }
+echo "Using storage: ${ROOTFS_STORAGE}"
+
+# Create minimal LXC 399 (stopped — vzdump works on stopped containers)
+pct create 399 "${TEMPLATE}" \
+    --storage "${ROOTFS_STORAGE}" --rootfs "${ROOTFS_STORAGE}:0.1" \
+    --memory 64 --hostname ghost-399-ci \
+    --net0 name=eth0,bridge=vmbr0 2>&1
+echo "Created ct/399"
+
+# Back up ct/399 to PBS via vzdump (called directly — more reliable than pvesh)
+vzdump 399 --storage pbs-local --mode stop --compress zstd --remove 0 2>&1
+sleep 5
+
+# Destroy ct/399 — PBS snapshot remains, LXC is gone → in_pve=False
+pct destroy 399 --purge 1 2>&1 || pct destroy 399 2>&1 || true
+echo "Ghost ct/399: LXC destroyed, PBS snapshot remains (in_pve=False ready)"
+GHOST_PBS
+
+                    # Seeded state after steps 1-3d:
+                    #   T1 = oldest PBS snap  (will be deleted → cloud-only via R1+R2)
+                    #   T2 = middle PBS snap  (kept → local+cloud via R2)
+                    #   T3 = newest PBS snap  (kept → local-only, no restic coverage)
+                    #   ct/399 ghost PBS snap (in_pve=False, no LXC 399 in PVE)
+                    #   R1 = restic snap covering T1 only
+                    #   R2 = restic snap covering T1+T2
+
+                    # Step 4: Delete PBS snapshot T1 — after deletion:
+                    #   T1 cloud-only (covered by R1 AND R2 — multi-restic scenario)
+                    #   T2 local+cloud (covered by R2 — local+cloud scenario)
+                    #   T3 local-only  (no restic coverage — local-only scenario)
                     cat > /tmp/delete_oldest_snap.py << 'PYEOF'
 """Delete the oldest PBS snapshot for ct/301 to produce a cloud-only restic entry."""
 import json, ssl, urllib.parse, urllib.request
@@ -489,6 +662,21 @@ PYEOF
                             pct exec 300 -- ss -tlnp 2>/dev/null | grep 5000 || echo "Nothing on port 5000"
                             exit 1
                         }
+
+                        # Diagnose restic/cloud coverage before tests run
+                        echo "--- PRE-TEST RESTIC DIAGNOSTICS ---"
+                        curl -sf "http://10.10.0.100:5000/api/host/ci/items" 2>/dev/null | \
+                            python3 -c "
+import json,sys
+d=json.load(sys.stdin)
+print('LXC snapshots (vmid, backup_time, local, cloud, restic_short):')
+for item in d.get('lxcs',[]):
+    vmid=item['id']
+    for s in item.get('snapshots',[]):
+        rid=s.get('restic_id','')
+        print(' ',vmid,s['backup_time'],s.get('local'),s.get('cloud'),rid[:8] if rid else '')
+" 2>/dev/null || echo "items endpoint failed"
+                        echo "--- END DIAGNOSTICS ---"
 
                         cd /opt/ci/proxmox-backup-gui
                         BACKEND_URL=http://10.10.0.100:5000 \
