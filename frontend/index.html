@@ -347,6 +347,13 @@
       <div class="sidebar-label">Schedules</div>
       <div id="schedule-info"></div>
     </div>
+    <div class="sidebar-section" id="global-job-section" style="display:none">
+      <div class="sidebar-label">Running</div>
+      <div id="global-job-indicator" class="job-indicator" onclick="_reopenLastJob()" style="width:100%;box-sizing:border-box">
+        <div class="job-indicator-dot"></div>
+        <span id="global-job-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+      </div>
+    </div>
   </div>
 
   <div class="main">
@@ -1162,23 +1169,49 @@ async function triggerResticBackup(vmid, name) {
 // ─────────────────────────────────────────────
 let _jobPollInterval = null;
 let _activeJobs = {};  // vmid → { jobId, title }
+let _lastJob = null;   // { jobId, vmid, title } — for global sidebar indicator
 
-function _setJobIndicator(vmid, running, title) {
-  const el = document.getElementById(`vm-job-${vmid}`);
-  if (!el) return;
-  if (running) {
-    el.className = 'job-indicator';
-    el.innerHTML = `<div class="job-indicator-dot"></div>${title}`;
-    el.style.display = '';
+function _reopenLastJob() {
+  if (!_lastJob) return;
+  if (_lastJob.vmid != null) {
+    reopenJobModal(_lastJob.vmid);
   } else {
-    el.style.display = 'none';
+    // Job has no vmid (e.g. triggered from cloud tab) — reopen directly by jobId
+    openJobModal(_lastJob.title, _lastJob.jobId, null);
   }
 }
 
+function _updateGlobalJobIndicator() {
+  const section = document.getElementById('global-job-section');
+  const label = document.getElementById('global-job-label');
+  const anyRunning = Object.keys(_activeJobs).length > 0;
+  if (section) section.style.display = anyRunning ? '' : 'none';
+  if (label && _lastJob) label.textContent = _lastJob.title;
+}
+
+function _setJobIndicator(vmid, running, title) {
+  const el = document.getElementById(`vm-job-${vmid}`);
+  if (el) {
+    if (running) {
+      el.className = 'job-indicator';
+      el.innerHTML = `<div class="job-indicator-dot"></div>${title}`;
+      el.style.display = '';
+    } else {
+      el.style.display = 'none';
+    }
+  }
+  _updateGlobalJobIndicator();
+}
+
 function openJobModal(title, jobId, vmid) {
+  _lastJob = { jobId, vmid, title };
   if (vmid != null) {
     _activeJobs[vmid] = { jobId, title };
     _setJobIndicator(vmid, true, title);
+  } else {
+    // No vmid (e.g. cloud tab) — track in global indicator only
+    _activeJobs[`_noid_${jobId}`] = { jobId, title };
+    _updateGlobalJobIndicator();
   }
   document.getElementById('job-title').textContent = title;
   document.getElementById('job-subtitle').textContent = `job ${jobId}`;
@@ -1276,6 +1309,9 @@ async function _pollJob(jobId, vmid) {
         if (vmid != null) {
           delete _activeJobs[vmid];
           _setJobIndicator(vmid, false);
+        } else {
+          delete _activeJobs[`_noid_${jobId}`];
+          _updateGlobalJobIndicator();
         }
         const badge = document.getElementById('job-badge');
         if (badge) {
