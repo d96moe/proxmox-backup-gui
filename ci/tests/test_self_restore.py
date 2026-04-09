@@ -123,19 +123,19 @@ def test_self_restore_warning_shown_in_modal(real_page, host_id):
 
     real_page.wait_for_selector("#modal.open", timeout=5000)
 
-    warning = real_page.locator("#self-restore-warning")
+    warning = real_page.locator("#modal-self-warning")
     assert warning.is_visible(), \
-        "Self-restore warning (#self-restore-warning) not visible for ct/300"
+        "Self-restore warning (#modal-self-warning) not visible for ct/300"
 
     confirm_btn = real_page.locator("#modal-confirm-btn")
     assert not confirm_btn.is_enabled(), \
         "Confirm button must be DISABLED before self-restore ack checkbox is checked"
 
-    real_page.locator("#self-restore-ack").check()
+    real_page.locator("#modal-self-confirm").check()
     assert confirm_btn.is_enabled(), \
         "Confirm button must be ENABLED after checking self-restore ack checkbox"
 
-    real_page.evaluate("closeRestoreModal()")
+    real_page.evaluate("closeModal()")
     assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
 
     # Clean up: delete the ct/300 snapshot we created

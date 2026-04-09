@@ -472,40 +472,71 @@ for i in $(seq 1 60); do
 done
 
 # ── SEED: Steg 3d — Ghost PBS-backup för ct/399 (in_pve=False-scenario) ──────
+# Strategi: skapa tillfällig LXC 399, ta PBS-backup via vzdump, förstör LXC.
+# PBS-snapshot kvarstår men ct/399 finns ej i PVE → in_pve=False i GUI.
 echo "=== Seed: Skapar ghost PBS-backup för ct/399 (in_pve=False) ==="
 ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'GHOST_PBS'
-PBS_FP=$(proxmox-backup-manager cert info 2>&1 | grep -i 'fingerprint.*sha256' | sed 's/.*: //' | tr -d ' ')
-PBS_PW=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_password'])")
-PBS_USER=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_user'])")
-PBS_URL=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_url'])")
-PBS_DS=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_datastore'])")
+set -e
 
-# Försök med proxmox-backup-client inuti LXC 300
-pct exec 300 -- bash -c "
-    mkdir -p /tmp/ghost399
-    echo ghost > /tmp/ghost399/ghost.txt
-    PBS_PASSWORD='${PBS_PW}' proxmox-backup-client backup \
-        ghost.pxar:/tmp/ghost399 \
-        --repository '${PBS_USER}@${PBS_URL#https://}:${PBS_DS}' \
-        --backup-type ct --backup-id 399 \
-        --fingerprint '${PBS_FP}' \
-        --change-detection-mode=data \
-        2>&1 | tail -3
-" 2>&1 && echo "proxmox-backup-client OK" || {
-    # Fallback: injicera snapshot direkt i filsystemet
-    echo "proxmox-backup-client ej tillgänglig — injicerar via filsystem..."
-    systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true
-    SNAP_DIR="/mnt/ci-pbs/ct/399/$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    mkdir -p "$SNAP_DIR"
-    touch "$SNAP_DIR/ghost.log.blob"
-    systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true
-    for i in $(seq 1 24); do
-        proxmox-backup-manager datastore list --output-format json >/dev/null 2>&1 \
-            && { echo "PBS redo efter ghost inject"; break; }
-        echo "  väntar på PBS... ($i/24)"; sleep 5
-    done
+# Rensa eventuell gammal ct/399
+pct status 399 >/dev/null 2>&1 && {
+    pct stop 399 --skiplock 1 2>/dev/null || true
+    sleep 2
+    pct destroy 399 --purge 1 2>/dev/null || true
 }
-echo "Ghost ct/399 klar (in_pve=False scenario)"
+
+# Hitta tillgänglig CT-mall i local-lagring
+TEMPLATE=$(pvesm list local --content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}')
+if [ -z "${TEMPLATE}" ]; then
+    echo "Ingen mall i local — laddar ner Alpine..."
+    pveam update 2>/dev/null || true
+    TNAME=$(pveam available --section system 2>/dev/null | grep -i alpine | head -1 | awk '{print $2}')
+    [ -z "${TNAME}" ] && { echo "ERROR: ingen CT-mall tillgänglig"; exit 1; }
+    pveam download local "${TNAME}" 2>&1 | tail -3
+    TEMPLATE=$(pvesm list local --content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}')
+fi
+echo "Använder mall: ${TEMPLATE}"
+
+# Skapa minimal LXC 399 (stoppad — vzdump fungerar på stoppade containers)
+pct create 399 "${TEMPLATE}" \
+    --storage local-lvm --rootfs local-lvm:0.1 \
+    --memory 64 --hostname ghost-399-ci \
+    --net0 name=eth0,bridge=vmbr0 2>&1 || \
+pct create 399 "${TEMPLATE}" \
+    --storage local --rootfs local:0.1 \
+    --memory 64 --hostname ghost-399-ci \
+    --net0 name=eth0,bridge=vmbr0 2>&1
+echo "Skapade ct/399"
+
+# Säkerhetskopiera ct/399 till PBS-lagring
+NODE=$(hostname)
+UPID=$(pvesh create /nodes/${NODE}/vzdump \
+    --vmid 399 --storage pbs-local \
+    --mode stop --compress zstd --remove 0 \
+    --output-format json 2>/dev/null | \
+    python3 -c "import sys,json; print(json.load(sys.stdin).get('data',''))" 2>/dev/null || echo "")
+
+if [ -z "${UPID}" ]; then
+    echo "ERROR: vzdump returnerade inget UPID för ct/399"
+    pct destroy 399 --purge 1 2>/dev/null || true
+    exit 1
+fi
+echo "vzdump-task: ${UPID}"
+
+# Vänta på att vzdump-task är klar (upp till 3 min)
+for i in $(seq 1 60); do
+    ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${UPID}',safe=''))")
+    TSTATUS=$(pvesh get /nodes/${NODE}/tasks/${ENCODED}/status \
+        --output-format json 2>/dev/null | \
+        python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('exitstatus','') if d.get('status')=='stopped' else 'running')" 2>/dev/null || echo "unknown")
+    [ "${TSTATUS}" = "OK" ] && { echo "  Ghost-backup klar (steg $i)"; break; }
+    [ "${TSTATUS}" = "running" ] && { sleep 3; continue; }
+    echo "  backup-status: ${TSTATUS} (steg $i/60)"; sleep 3
+done
+
+# Förstör ct/399 — PBS-snapshot finns kvar, LXC är borta → in_pve=False
+pct destroy 399 --purge 1 2>&1 || pct destroy 399 2>&1 || true
+echo "Ghost ct/399: LXC förstörd, PBS-snapshot kvarstår (in_pve=False redo)"
 GHOST_PBS
 
 # ── SEED: Steg 4 — Ta bort T1 (äldst PBS-snapshot) → cloud-only ──────────────

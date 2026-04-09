@@ -146,6 +146,17 @@ class PVEClient:
         except Exception:
             pass  # Already stopped or other non-critical error
 
+    def start_vm(self, vmid: int, vm_type: str, node: str) -> None:
+        """Start a VM/LXC. Silently succeeds if already running."""
+        endpoint = (f"/nodes/{node}/lxc/{vmid}/status/start" if vm_type == "ct"
+                    else f"/nodes/{node}/qemu/{vmid}/status/start")
+        try:
+            upid = self._post(endpoint)
+            if upid:
+                self.wait_for_task(node, upid, lambda _: None, poll_interval=2)
+        except Exception:
+            pass  # Already running or other non-critical error
+
     def wait_for_task(self, node: str, upid: str, log: callable, poll_interval: int = 3) -> bool:
         """Poll a PVE task until completion. Returns True on success."""
         import time

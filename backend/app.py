@@ -208,6 +208,12 @@ def get_items(host_id: str):
                 if pt is not None:
                     restic_by_pbs_time.setdefault(vid, {})[pt] = e
 
+        # Map vmid → PBS backup_type ("ct"/"vm") for orphaned snapshots not in PVE.
+        pbs_type_map: dict[int, str] = {
+            group["pve_id"]: group.get("backup_type", "vm")
+            for group in pbs_snaps
+        }
+
         snap_map: dict[int, list] = {}
         for group in pbs_snaps:
             vid = group["pve_id"]
@@ -321,8 +327,10 @@ def get_items(host_id: str):
         all_vmids = set(pve_meta.keys()) | set(snap_map.keys())
 
         for vmid in sorted(all_vmids):
+            _pbs_btype = pbs_type_map.get(vmid, "vm")
+            _orphan_type = "lxc" if _pbs_btype == "ct" else "vm"
             meta = pve_meta.get(vmid, {
-                "name": f"id-{vmid}", "type": "vm", "os": "linux", "status": "unknown"
+                "name": f"id-{vmid}", "type": _orphan_type, "os": "linux", "status": "unknown"
             })
             item = {
                 "id": vmid,
@@ -696,6 +704,8 @@ def restore(host_id: str):
         if not ok:
             raise RuntimeError("Restore task failed")
         log("Restore complete.")
+        log(f"Starting {vm_type}/{vmid}...")
+        pve.start_vm(vmid, vm_type, node)
 
         if run_backup_after:
             s("Triggering PBS backup after restore...")

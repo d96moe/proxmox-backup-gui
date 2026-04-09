@@ -466,50 +466,73 @@ WAITPBS2
                     # Step 3d: Create a ghost PBS snapshot for ct/399 — a vmid that does
                     # not exist in PVE. This produces an in_pve=False item in the GUI,
                     # required by test_backup_btn_absent_for_non_pve_items.
-                    echo "Creating ghost PBS backup for ct/399 (in_pve=False scenario)..."
+                    #
+                    # Strategy: create a temporary minimal LXC 399, back it up to PBS
+                    # via vzdump, then destroy the LXC. The PBS snapshot remains and
+                    # ct/399 is not in PVE → in_pve=False in the GUI.
+                    echo "Creating ghost PBS snapshot for ct/399 (in_pve=False scenario)..."
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'GHOST_PBS'
-# proxmox-backup-client needs the PBS password — read from hosts.json written by STEP_B
-PBS_PW=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_password'])")
-PBS_USER=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_user'])")
-PBS_URL=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_url'])")
-PBS_DS=$(python3 -c "import json; h=open('/opt/proxmox-backup-gui/backend/hosts.json').read(); print(json.loads(h)[0]['pbs_datastore'])")
-PBS_FP=$(proxmox-backup-manager cert info 2>&1 | grep -i 'fingerprint.*sha256' | sed 's/.*: //' | tr -d ' ')
+set -e
 
-# Run inside LXC 300 so we have network access to PBS (10.10.0.1)
-pct exec 300 -- bash -c "
-    mkdir -p /tmp/ghost399
-    echo 'ghost-vm-for-ci-test' > /tmp/ghost399/rootfs.pxar.didx 2>/dev/null || \
-        dd if=/dev/urandom bs=1k count=1 2>/dev/null > /tmp/ghost399/data.img
-    echo ghost > /tmp/ghost399/ghost.txt
-    PBS_PASSWORD='${PBS_PW}' proxmox-backup-client backup \
-        ghost.pxar:/tmp/ghost399 \
-        --repository '${PBS_USER}@${PBS_URL#https://}:${PBS_DS}' \
-        --backup-type ct --backup-id 399 \
-        --fingerprint '${PBS_FP}' \
-        --change-detection-mode=data \
-        2>&1 | tail -3 || echo 'proxmox-backup-client not available, using direct API'
+# Remove any stale ct/399 from a previous run
+pct status 399 >/dev/null 2>&1 && {
+    pct stop 399 --skiplock 1 2>/dev/null || true
+    sleep 2
+    pct destroy 399 --purge 1 2>/dev/null || true
+}
 
-    # Fallback: inject snapshot directly via filesystem (no client needed)
-    # PBS stores snapshots as directories: <datastore>/<type>/<id>/<ISO8601Z>/
-" 2>&1 || true
-
-# Filesystem fallback if proxmox-backup-client is not installed in LXC 300
-if ! pct exec 300 -- which proxmox-backup-client >/dev/null 2>&1; then
-    echo "Using filesystem injection for ct/399 ghost snapshot..."
-    systemctl stop proxmox-backup proxmox-backup-proxy 2>/dev/null || true
-    SNAP_DIR="/mnt/ci-pbs/ct/399/$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    mkdir -p "$SNAP_DIR"
-    # Minimal chunk: PBS needs at least an index file to list the snapshot
-    echo '{"backup-type":"ct","backup-id":"399"}' > "$SNAP_DIR/.pbs-ghost"
-    touch "$SNAP_DIR/ghost.log.blob"
-    chown -R root:root "$SNAP_DIR"
-    systemctl start proxmox-backup proxmox-backup-proxy 2>/dev/null || true
-    for i in $(seq 1 24); do
-        proxmox-backup-manager datastore list --output-format json >/dev/null 2>&1 && { echo "PBS ready after ghost inject"; break; }
-        echo "  waiting for PBS... ($i/24)"; sleep 5
-    done
+# Find an available CT template in local storage
+TEMPLATE=$(pvesm list local --content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}')
+if [ -z "${TEMPLATE}" ]; then
+    echo "No template in local storage — downloading Alpine (smallest available)..."
+    pveam update 2>/dev/null || true
+    TNAME=$(pveam available --section system 2>/dev/null | grep -i alpine | head -1 | awk '{print $2}')
+    [ -z "${TNAME}" ] && { echo "ERROR: no CT template available"; exit 1; }
+    pveam download local "${TNAME}" 2>&1 | tail -3
+    TEMPLATE=$(pvesm list local --content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}')
 fi
-echo "Ghost ct/399 snapshot created (in_pve=False scenario ready)"
+echo "Using template: ${TEMPLATE}"
+
+# Create minimal LXC 399 (stopped — vzdump works on stopped containers)
+pct create 399 "${TEMPLATE}" \
+    --storage local-lvm --rootfs local-lvm:0.1 \
+    --memory 64 --hostname ghost-399-ci \
+    --net0 name=eth0,bridge=vmbr0 2>&1 || \
+pct create 399 "${TEMPLATE}" \
+    --storage local --rootfs local:0.1 \
+    --memory 64 --hostname ghost-399-ci \
+    --net0 name=eth0,bridge=vmbr0 2>&1
+echo "Created ct/399"
+
+# Back up ct/399 to PBS storage
+NODE=$(hostname)
+UPID=$(pvesh create /nodes/${NODE}/vzdump \
+    --vmid 399 --storage pbs-local \
+    --mode stop --compress zstd --remove 0 \
+    --output-format json 2>/dev/null | \
+    python3 -c "import sys,json; print(json.load(sys.stdin).get('data',''))" 2>/dev/null || echo "")
+
+if [ -z "${UPID}" ]; then
+    echo "ERROR: vzdump did not return a UPID for ct/399"
+    pct destroy 399 --purge 1 2>/dev/null || true
+    exit 1
+fi
+echo "vzdump task: ${UPID}"
+
+# Wait for vzdump task to complete (up to 3 min)
+for i in $(seq 1 60); do
+    ENCODED=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote('${UPID}',safe=''))")
+    TSTATUS=$(pvesh get /nodes/${NODE}/tasks/${ENCODED}/status \
+        --output-format json 2>/dev/null | \
+        python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('exitstatus','') if d.get('status')=='stopped' else 'running')" 2>/dev/null || echo "unknown")
+    [ "${TSTATUS}" = "OK" ] && { echo "  Ghost backup complete (step $i)"; break; }
+    [ "${TSTATUS}" = "running" ] && { sleep 3; continue; }
+    echo "  backup status: ${TSTATUS} (step $i/60)"; sleep 3
+done
+
+# Destroy ct/399 — PBS snapshot remains, LXC is gone → in_pve=False
+pct destroy 399 --purge 1 2>&1 || pct destroy 399 2>&1 || true
+echo "Ghost ct/399: LXC destroyed, PBS snapshot remains (in_pve=False ready)"
 GHOST_PBS
 
                     # Seeded state after steps 1-3d:

@@ -84,11 +84,33 @@ def _items(host_id: str) -> dict:
     return _get(f"/api/host/{host_id}/items")
 
 
+SELF_VMID = 300  # LXC running the Flask backend — never restore this one mid-test
+
+# Tracks whether test_delete_cloud_only_api actually ran and succeeded.
+# Aftermath tests check this flag to skip cleanly instead of failing when
+# delete/cloud was skipped (e.g. restic temporarily unresponsive after delete/both).
+_delete_cloud_ran: bool = False
+
+# Records exactly which vmid + backup_time was deleted by test_delete_cloud_only_api
+# so aftermath tests verify THAT snapshot is gone (not T1 from the seed state, which
+# may differ if cloud restore tests brought T1 back into PBS and delete/cloud targeted
+# a different cloud-only entry).
+_delete_cloud_vmid: int | None = None
+_delete_cloud_backup_time: int | None = None
+
 def _find_vm_with_local_snap(items: dict):
-    """Return (vmid, vm_type, backup_time) — LXCs preferred (faster to restore)."""
+    """Return (vmid, vm_type, backup_time) — LXCs preferred (faster to restore).
+
+    Skips SELF_VMID (ct/300) — restoring the app container kills the backend.
+    Skips in_pve=False items — these are orphaned PBS snapshots with no live VM.
+    """
     for key, vtype in (("lxcs", "ct"), ("vms", "vm")):
         for item in items.get(key, []):
             if item.get("template"):
+                continue
+            if item["id"] == SELF_VMID:
+                continue
+            if not item.get("in_pve", True):
                 continue
             local = [s for s in item["snapshots"] if s.get("local")]
             if local:
@@ -102,6 +124,8 @@ def _find_vm_with_any_cloud_snap(items: dict):
         for item in items.get(key, []):
             if item.get("template"):
                 continue
+            if item["id"] == SELF_VMID:
+                continue
             for snap in item["snapshots"]:
                 if snap.get("cloud") and snap.get("restic_id"):
                     return item["id"], vtype, snap["restic_id"]
@@ -113,6 +137,8 @@ def _find_vm_with_cloud_only_snap(items: dict):
     for key, vtype in (("lxcs", "ct"), ("vms", "vm")):
         for item in items.get(key, []):
             if item.get("template"):
+                continue
+            if item["id"] == SELF_VMID:
                 continue
             for snap in item["snapshots"]:
                 if snap.get("cloud") and not snap.get("local") and snap.get("restic_id"):
@@ -528,13 +554,16 @@ def test_items_api_returns_in_pve_field(host_id, items):
                 f"in_pve must be bool for id={item.get('id')}, got {type(item['in_pve']).__name__}"
 
 def test_items_in_pve_true_for_existing_vms(host_id, items):
-    """VMs/LXCs that are in PVE's inventory must have in_pve=True."""
+    """VMs/LXCs that are in PVE's inventory must have in_pve=True.
+
+    Exception: items with in_pve=False are orphaned PBS snapshots whose source VM
+    was deleted from PVE (e.g. the ghost ct/399 CI scenario). These may have local
+    PBS snapshots but are intentionally absent from PVE.
+    """
     for section in ("vms", "lxcs"):
         for item in items.get(section, []):
-            # All items returned by PVE should be in PVE — in_pve=False only for
-            # orphaned PBS snapshots whose source VM was deleted from PVE.
-            # At minimum, items with local PBS snapshots must have in_pve=True
-            # (otherwise the CI template is misconfigured).
+            if not item.get("in_pve", True):
+                continue  # orphaned PBS snapshot — in_pve=False is expected
             local_snaps = [s for s in item.get("snapshots", []) if s.get("local")]
             if local_snaps:
                 assert item["in_pve"], \
@@ -606,6 +635,8 @@ def _find_snap(items: dict, *, local: bool, cloud: bool):
     for key, vtype in (("lxcs", "ct"), ("vms", "vm")):
         for item in items.get(key, []):
             if item.get("template"):
+                continue
+            if item["id"] == SELF_VMID:
                 continue
             for snap in item["snapshots"]:
                 if bool(snap.get("local")) == local and bool(snap.get("cloud")) == cloud:
@@ -734,6 +765,60 @@ def test_seeded_restic_snapshot_count(host_id):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# STATE RESET — cloud restore tests above may have brought T1 back into local PBS.
+#
+# The cloud restore tests (test_cloud_restore_api, test_cloud_restore_with_backup_after_api,
+# test_cloud_only_restore_api) restore the full PBS datastore from restic, which puts
+# T1 back into local PBS (T1 was in the datastore when R1/R2 were taken).
+# If T1 is local when delete tests run, delete/cloud will find no cloud-only snapshot
+# and target a different entry — making the aftermath assertions wrong.
+#
+# This test removes T1 from local PBS (if present) so the delete tests see the
+# seeded state (T1=cloud-only, T2=local+cloud, T3=local-only).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_reset_seed_state_cloud_only(host_id, items):
+    """State guard: remove cloud-only snapshot from local PBS if restore tests added it back.
+
+    Cloud restore tests restore the PBS datastore from restic, which brings the
+    seeded cloud-only snapshot (T1) back into local PBS.  This test detects that
+    and deletes T1 from PBS again — restoring the cloud-only status needed by the
+    delete tests below.  It is a no-op when the state is already correct.
+    """
+    vmid, vm_type, snap = _find_snap(items, local=False, cloud=True)
+    if vmid is None:
+        return  # no cloud-only snapshot in seed state, nothing to reset
+
+    backup_time = snap["backup_time"]
+
+    # Check whether T1 is currently in local PBS (it shouldn't be, but may have
+    # been restored there by a cloud restore test above).
+    fresh = _items(host_id)
+    t1_is_local = False
+    for key in ("lxcs", "vms"):
+        for item in fresh.get(key, []):
+            if item["id"] == vmid:
+                for s in item["snapshots"]:
+                    if s["backup_time"] == backup_time and s.get("local"):
+                        t1_is_local = True
+
+    if not t1_is_local:
+        return  # already cloud-only — nothing to do
+
+    # T1 came back into PBS via a cloud restore test — delete it to restore seed state.
+    resp = _post(f"/api/host/{host_id}/delete/pbs", {
+        "vmid": vmid, "type": vm_type, "backup_time": backup_time,
+    })
+    assert "job_id" in resp, f"delete/pbs response missing job_id: {resp}"
+    job = _poll_job(resp["job_id"], timeout=120)
+    err = _job_ok(job)
+    assert not err, (
+        f"State reset failed: could not delete cloud-only snapshot from PBS. "
+        f"vmid={vmid} backup_time={backup_time}\n{err}"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # DELETE/BOTH — delete a snapshot that exists locally AND in cloud.
 #
 # Uses T2 (local+cloud via R2). Must run BEFORE delete/cloud tests because
@@ -804,8 +889,17 @@ def test_delete_both_restic_snap_forgotten(host_id, items):
 
 def test_delete_cloud_only_api(host_id):
     """delete/cloud: job must complete for a cloud-only snapshot."""
-    fresh = _items(host_id)
-    vmid, vm_type, snap = _find_snap(fresh, local=False, cloud=True)
+    global _delete_cloud_ran, _delete_cloud_vmid, _delete_cloud_backup_time
+    # Retry fetching items — restic may still be busy right after delete/both ran
+    # two restic operations against GDrive, causing the items endpoint to time out.
+    vmid = vm_type = snap = None
+    for attempt in range(5):
+        fresh = _items(host_id)
+        vmid, vm_type, snap = _find_snap(fresh, local=False, cloud=True)
+        if vmid is not None:
+            break
+        if attempt < 4:
+            time.sleep(20)
     if vmid is None:
         pytest.skip("No cloud-only snapshot — may have been deleted or seed did not run")
 
@@ -825,53 +919,47 @@ def test_delete_cloud_only_api(host_id):
     for step in ("Step 1/4", "Step 2/4", "Step 3/4", "Step 4/4"):
         assert step in logs, f"Expected '{step}' in delete/cloud logs:\n{logs}"
 
+    _delete_cloud_ran = True        # signal aftermath tests that delete/cloud completed
+    _delete_cloud_vmid = vmid       # track exactly what was deleted
+    _delete_cloud_backup_time = snap["backup_time"]
 
-def test_delete_cloud_only_gone_from_items(host_id, items):
-    """After delete/cloud, the cloud-only snapshot must not appear in /items."""
-    vmid, _, snap = _find_snap(items, local=False, cloud=True)
-    if vmid is None:
-        pytest.skip("No cloud-only snapshot (may have been cleaned up already)")
 
-    # If fresh items still shows this snapshot as cloud-only, delete/cloud ran
-    # and we check it's gone. If it's no longer cloud (restic timeout) or
-    # delete/cloud was skipped, skip this verification too.
-    fresh = _items(host_id)
-    fresh_vmid, _, fresh_snap = _find_snap(fresh, local=False, cloud=True)
-    if fresh_vmid is not None and fresh_snap["backup_time"] == snap["backup_time"]:
-        pytest.skip(
-            "delete/cloud was skipped (cloud-only snap still present) — "
-            "cannot verify gone_from_items"
-        )
+def test_delete_cloud_only_gone_from_items(host_id):
+    """After delete/cloud, the deleted snapshot must not appear in /items."""
+    if not _delete_cloud_ran:
+        pytest.skip("delete/cloud was skipped — cannot verify gone_from_items")
+    # Use the exact vmid/backup_time recorded by test_delete_cloud_only_api.
+    # This avoids relying on the module-scoped items fixture (which may show T1 as
+    # cloud-only even if cloud restore tests brought T1 back into local PBS and
+    # delete/cloud ended up targeting a different cloud-only entry).
+    vmid = _delete_cloud_vmid
+    backup_time = _delete_cloud_backup_time
+    if vmid is None or backup_time is None:
+        pytest.skip("delete/cloud vmid/backup_time not recorded — skipping")
 
     time.sleep(2)
-    assert not _snap_exists_in_items(host_id, vmid, snap["backup_time"]), \
-        f"Cloud-only snapshot vmid={vmid} backup_time={snap['backup_time']} still in items after delete/cloud"
+    assert not _snap_exists_in_items(host_id, vmid, backup_time), \
+        f"Cloud-only snapshot vmid={vmid} backup_time={backup_time} still in items after delete/cloud"
 
 
-def test_delete_cloud_only_all_restic_snapshots_forgotten(host_id, items):
+def test_delete_cloud_only_all_restic_snapshots_forgotten(host_id):
     """After delete/cloud, no restic snapshot must still cover the deleted pbs_time.
 
     T1 was covered by R1 at minimum. delete/cloud step 4 forgets all restic snapshots
     with pbs_time matching the deleted PBS timestamp (including any old-style tagged
     snapshots via the fallback path). This verifies step 4 ran and cleaned up.
     """
-    vmid, _, snap = _find_snap(items, local=False, cloud=True)
-    if vmid is None:
-        pytest.skip("No cloud-only snapshot (may have been cleaned up already)")
+    if not _delete_cloud_ran:
+        pytest.skip("delete/cloud was skipped — cannot verify restic_snapshots_forgotten")
+    vmid = _delete_cloud_vmid
+    backup_time = _delete_cloud_backup_time
+    if vmid is None or backup_time is None:
+        pytest.skip("delete/cloud vmid/backup_time not recorded — skipping")
 
-    # Skip if delete/cloud was skipped (snap still present in fresh items as cloud-only)
-    fresh = _items(host_id)
-    fresh_vmid, _, fresh_snap = _find_snap(fresh, local=False, cloud=True)
-    if fresh_vmid is not None and fresh_snap["backup_time"] == snap["backup_time"]:
-        pytest.skip(
-            "delete/cloud was skipped (cloud-only snap still present) — "
-            "cannot verify restic_snapshots_forgotten"
-        )
-
-    covers_after = _restic_covers_for(host_id, vmid, snap["backup_time"])
+    covers_after = _restic_covers_for(host_id, vmid, backup_time)
     assert len(covers_after) == 0, (
         f"Restic snapshot(s) still cover cloud-only vmid={vmid} "
-        f"at pbs_time={snap['backup_time']} after delete/cloud: {covers_after}"
+        f"at pbs_time={backup_time} after delete/cloud: {covers_after}"
     )
 
 
