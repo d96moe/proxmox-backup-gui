@@ -633,6 +633,30 @@ async function init() {
   if (hosts.length > 0) {
     selectHost(hosts[0].id);
   }
+
+  // Restore running job indicator after page reload
+  try {
+    const saved = localStorage.getItem('lastJob');
+    if (saved) {
+      const j = JSON.parse(saved);
+      const res = await fetch(`${API_BASE}/api/job/${j.jobId}`);
+      if (res.ok) {
+        const job = await res.json();
+        if (job.status === 'running' || job.status === 'pending') {
+          _lastJob = j;
+          if (j.vmid != null) {
+            _activeJobs[j.vmid] = { jobId: j.jobId, title: j.title };
+          } else {
+            _activeJobs[`_noid_${j.jobId}`] = { jobId: j.jobId, title: j.title };
+          }
+          _updateGlobalJobIndicator();
+          _pollJob(j.jobId, j.vmid);
+        } else {
+          localStorage.removeItem('lastJob');
+        }
+      }
+    }
+  } catch (_) {}
 }
 
 function renderHostNav() {
@@ -1205,6 +1229,7 @@ function _setJobIndicator(vmid, running, title) {
 
 function openJobModal(title, jobId, vmid) {
   _lastJob = { jobId, vmid, title };
+  localStorage.setItem('lastJob', JSON.stringify(_lastJob));
   if (vmid != null) {
     _activeJobs[vmid] = { jobId, title };
     _setJobIndicator(vmid, true, title);
@@ -1306,6 +1331,7 @@ async function _pollJob(jobId, vmid) {
       if (job.status === 'done' || job.status === 'error') {
         clearInterval(_jobPollInterval);
         _jobPollInterval = null;
+        localStorage.removeItem('lastJob');
         if (vmid != null) {
           delete _activeJobs[vmid];
           _setJobIndicator(vmid, false);
