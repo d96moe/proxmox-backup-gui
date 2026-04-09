@@ -1303,7 +1303,8 @@ async function _pollJob(jobId, vmid) {
             const fill = document.getElementById('job-progress-fill');
             const label = document.getElementById('job-progress-label');
             const track = fill && fill.closest('.job-progress-bar-track');
-            if (track) track.classList.remove('indeterminate');
+            // Only leave indeterminate mode when we have a real percentage to show
+            if (pct > 0 && track) track.classList.remove('indeterminate');
             if (fill) fill.style.width = pct + '%';
             if (label) label.textContent = `Step ${cur}/${total} — ` + line.replace(/^Step\s+\d+\/\d+\s+[—\-]\s*/, '').split('(')[0].trim();
           }
