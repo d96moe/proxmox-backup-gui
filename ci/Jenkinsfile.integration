@@ -345,11 +345,11 @@ PURGE_STALE_PBS
 RESTIC_ENV="RESTIC_REPOSITORY=rclone:gdrive:bu/gui-ci-test RESTIC_PASSWORD=$(cat /tmp/.restic_pw) RCLONE_CONFIG=/root/.config/rclone/rclone.conf"
 # Permanently delete GDrive folder (--drive-use-trash=false bypasses trash)
 echo "Purging GDrive test repo..."
-RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone purge rclone:gdrive:bu/gui-ci-test --drive-use-trash=false 2>&1 || echo "Purge returned non-zero (folder may not have existed)"
+RCLONE_CONFIG=/root/.config/rclone/rclone.conf rclone purge gdrive:bu/gui-ci-test --drive-use-trash=false 2>&1 || echo "Purge returned non-zero (folder may not have existed)"
 # Initialise fresh repo; if purge didn't fully clear it, init will fail — that's ok
 eval "$RESTIC_ENV restic init 2>&1" && echo "Fresh repo initialised" || echo "Init failed — repo may already exist, will forget all snapshots"
 # Safety net: forget any snapshots that survived the purge
-IDS=$(eval "$RESTIC_ENV restic snapshots --json --no-lock 2>/dev/null" | \
+IDS=$(eval "$RESTIC_ENV restic snapshots --json --no-lock 2>&1" | \
     python3 -c "import json,sys; snaps=json.load(sys.stdin); print('\n'.join(s['id'] for s in snaps))" 2>/dev/null || true)
 if [ -n "$IDS" ]; then
     echo "Leftover snapshots found — forgetting: $(echo "$IDS" | tr '\n' ' ')"
