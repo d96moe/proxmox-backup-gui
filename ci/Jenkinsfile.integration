@@ -472,14 +472,12 @@ WAITPBS2
                     # ct/399 is not in PVE → in_pve=False in the GUI.
                     echo "Creating ghost PBS snapshot for ct/399 (in_pve=False scenario)..."
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'GHOST_PBS'
-set -e
-
 # Remove any stale ct/399 from a previous run
 pct status 399 >/dev/null 2>&1 && {
     pct stop 399 --skiplock 1 2>/dev/null || true
     sleep 2
     pct destroy 399 --purge 1 2>/dev/null || true
-}
+} || true
 
 # Find an available CT template in local storage
 TEMPLATE=$(pvesm list local --content vztmpl 2>/dev/null | awk 'NR>1 {print $1; exit}')
@@ -493,42 +491,24 @@ if [ -z "${TEMPLATE}" ]; then
 fi
 echo "Using template: ${TEMPLATE}"
 
+# Find a local storage that accepts rootdir (prefer local-lvm, fall back to local/ci-local)
+ROOTFS_STORAGE=""
+for stor in local-lvm local ci-local; do
+    pvesm status 2>/dev/null | grep -q "^${stor} " && { ROOTFS_STORAGE=$stor; break; }
+done
+[ -z "${ROOTFS_STORAGE}" ] && { echo "ERROR: no suitable storage for ct/399 rootfs"; exit 1; }
+echo "Using storage: ${ROOTFS_STORAGE}"
+
 # Create minimal LXC 399 (stopped — vzdump works on stopped containers)
 pct create 399 "${TEMPLATE}" \
-    --storage local-lvm --rootfs local-lvm:0.1 \
-    --memory 64 --hostname ghost-399-ci \
-    --net0 name=eth0,bridge=vmbr0 2>&1 || \
-pct create 399 "${TEMPLATE}" \
-    --storage local --rootfs local:0.1 \
+    --storage "${ROOTFS_STORAGE}" --rootfs "${ROOTFS_STORAGE}:0.1" \
     --memory 64 --hostname ghost-399-ci \
     --net0 name=eth0,bridge=vmbr0 2>&1
 echo "Created ct/399"
 
-# Back up ct/399 to PBS storage
-NODE=$(hostname)
-UPID=$(pvesh create /nodes/${NODE}/vzdump \
-    --vmid 399 --storage pbs-local \
-    --mode stop --compress zstd --remove 0 \
-    --output-format json 2>/dev/null | \
-    python3 -c "import sys,json; print(json.load(sys.stdin).get('data',''))" 2>/dev/null || echo "")
-
-if [ -z "${UPID}" ]; then
-    echo "ERROR: vzdump did not return a UPID for ct/399"
-    pct destroy 399 --purge 1 2>/dev/null || true
-    exit 1
-fi
-echo "vzdump task: ${UPID}"
-
-# Wait for vzdump task to complete (up to 3 min)
-for i in $(seq 1 60); do
-    ENCODED=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote('${UPID}',safe=''))")
-    TSTATUS=$(pvesh get /nodes/${NODE}/tasks/${ENCODED}/status \
-        --output-format json 2>/dev/null | \
-        python3 -c "import sys,json; d=json.load(sys.stdin).get('data',{}); print(d.get('exitstatus','') if d.get('status')=='stopped' else 'running')" 2>/dev/null || echo "unknown")
-    [ "${TSTATUS}" = "OK" ] && { echo "  Ghost backup complete (step $i)"; break; }
-    [ "${TSTATUS}" = "running" ] && { sleep 3; continue; }
-    echo "  backup status: ${TSTATUS} (step $i/60)"; sleep 3
-done
+# Back up ct/399 to PBS via vzdump (called directly — more reliable than pvesh)
+vzdump 399 --storage pbs-local --mode stop --compress zstd --remove 0 2>&1
+sleep 5
 
 # Destroy ct/399 — PBS snapshot remains, LXC is gone → in_pve=False
 pct destroy 399 --purge 1 2>&1 || pct destroy 399 2>&1 || true
