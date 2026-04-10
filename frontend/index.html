@@ -870,13 +870,19 @@ function _scheduleHint() {
 // Render
 // ─────────────────────────────────────────────
 function renderData(data) {
-  const { vms, lxcs, storage } = data;
+  const { vms, lxcs, storage, restic_busy } = data;
 
   document.getElementById('page-subtitle').textContent =
     `${vms.length} VMs · ${lxcs.length} LXCs`;
 
-
   let html = '';
+
+  if (restic_busy) {
+    html += `<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;margin-bottom:12px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);border-radius:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent)">
+      <div class="running-badge-dot" style="flex-shrink:0"></div>
+      <span>Restic backup in progress — cloud coverage data is temporarily unavailable. Sync and delete cloud operations are disabled until it completes.</span>
+    </div>`;
+  }
 
   if (vms.length > 0) {
     html += `<div class="section-header">
@@ -1586,6 +1592,19 @@ async function loadCloudSnapshots(signal) {
       if (res.status === 404) {
         document.getElementById('cloud-content').innerHTML =
           '<div class="state-msg">Restic not configured for this host.</div>';
+        return;
+      }
+      if (res.status === 503) {
+        const body = await res.json().catch(() => ({}));
+        const msg = body.message || 'Restic is busy.';
+        document.getElementById('cloud-content').innerHTML =
+          `<div class="state-msg" style="color:var(--accent)">
+            <div style="font-size:18px;margin-bottom:8px">⟳ Restic backup in progress</div>
+            <div style="font-size:12px;color:var(--muted)">${msg}</div>
+            <div style="font-size:12px;color:var(--muted);margin-top:6px">Cloud snapshot data will be available when the backup completes.</div>
+          </div>`;
+        // Auto-retry every 30s while busy
+        setTimeout(() => { if (currentHost === host) loadCloudSnapshots(); }, 30000);
         return;
       }
       throw new Error(await res.text());
