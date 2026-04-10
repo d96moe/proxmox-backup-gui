@@ -35,6 +35,9 @@ class ResticClient:
             "RESTIC_PASSWORD": host.restic_password,
             # Emit progress even when stdout is not a TTY (SSH pipe)
             "RESTIC_PROGRESS_FPS": "0.5",
+            # Skip GDrive trash on delete — prune/forget frees space immediately
+            # instead of files accumulating in trash and counting against quota
+            "RCLONE_DRIVE_USE_TRASH": "false",
             **host.restic_env,
         }
         self._env_prefix = " ".join(
