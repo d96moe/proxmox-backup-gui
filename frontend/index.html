@@ -1610,8 +1610,10 @@ async function loadCloudSnapshots(signal) {
       throw new Error(await res.text());
     }
     if (currentHost !== host) return;
-    _cloudSnapshots = await res.json();
-    renderCloudSnapshots(_cloudSnapshots);
+    const body = await res.json();
+    const busy = body.restic_busy || false;
+    _cloudSnapshots = body.snaps ?? body;
+    renderCloudSnapshots(_cloudSnapshots, busy);
   } catch (err) {
     if (err.name === 'AbortError') return;
     document.getElementById('cloud-content').innerHTML =
@@ -1621,7 +1623,7 @@ async function loadCloudSnapshots(signal) {
   }
 }
 
-function renderCloudSnapshots(snaps) {
+function renderCloudSnapshots(snaps, busy = false) {
   if (!snaps || snaps.length === 0) {
     document.getElementById('cloud-content').innerHTML =
       '<div class="state-msg">No cloud snapshots found.</div>';
@@ -1640,8 +1642,10 @@ function renderCloudSnapshots(snaps) {
           return `<span class="cover-tag ${cls}" title="${title}">${dot} ${label}</span>`;
         }).join('');
 
+    const disabledAttr = busy ? ' disabled title="Restic is busy — try again when backup completes"' : '';
+    const rowStyle = busy ? ' style="opacity:0.6"' : '';
     return `
-      <div class="cloud-snap-row">
+      <div class="cloud-snap-row"${rowStyle}>
         <div>
           <div class="snap-date">${s.date}</div>
           <div class="snap-age">${s.age} · <span style="font-size:10px;color:var(--muted)">${s.short_id}</span></div>
@@ -1649,13 +1653,20 @@ function renderCloudSnapshots(snaps) {
         <div class="snap-size">${s.size}</div>
         <div class="cover-list">${coverHtml}</div>
         <div class="snap-row-bottom">
-          <button class="restore-btn" onclick="openRestoreDatastoreModal(${JSON.stringify(s).replace(/"/g,'&quot;')})">Restore →</button>
-          <button class="delete-btn"  onclick="openDeleteResticModal(${JSON.stringify(s).replace(/"/g,'&quot;')})">× Delete</button>
+          <button class="restore-btn"${disabledAttr} onclick="openRestoreDatastoreModal(${JSON.stringify(s).replace(/"/g,'&quot;')})">Restore →</button>
+          <button class="delete-btn"${disabledAttr}  onclick="openDeleteResticModal(${JSON.stringify(s).replace(/"/g,'&quot;')})">× Delete</button>
         </div>
       </div>`;
   }).join('');
 
+  const busyBanner = busy ? `
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 18px;background:color-mix(in srgb,var(--accent) 10%,transparent);border-bottom:1px solid color-mix(in srgb,var(--accent) 30%,transparent);font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent)">
+      <div class="running-badge-dot" style="flex-shrink:0"></div>
+      <span>Restic backup in progress — showing cached data. Restore and delete are disabled until the backup completes.</span>
+    </div>` : '';
+
   document.getElementById('cloud-content').innerHTML = `
+    ${busyBanner}
     <div style="display:flex;gap:16px;padding:8px 18px 10px;font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--muted);border-bottom:1px solid var(--border)">
       <span title="PBS snapshot exists locally in PBS"><span style="color:var(--green)">●</span> exists in PBS</span>
       <span title="PBS snapshot no longer in PBS (cloud-only)"><span style="color:var(--muted)">○</span> gone from PBS</span>

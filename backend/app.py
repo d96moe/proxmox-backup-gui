@@ -99,6 +99,10 @@ SELF_VMID: int | None = _detect_self_vmid()
 _cache: dict[str, tuple[float, object]] = {}
 CACHE_TTL = 60
 
+# Persistent restic snapshot cache — no TTL, updated on every successful fetch.
+# Returned as stale data when restic is busy so the UI can still show cloud info.
+_restic_snap_cache: dict[str, list] = {}  # host_id → last known flat snapshot list
+
 # Per-host restic lock — prevents concurrent restic backup/restore operations
 _restic_locks: dict[str, threading.Lock] = {}
 _restic_locks_guard = threading.Lock()
@@ -194,9 +198,12 @@ def get_items(host_id: str):
                 restic = ResticClient(host)
                 if restic.is_running():
                     restic_busy = True
-                    app.logger.info("restic is running — cloud coverage unavailable")
+                    app.logger.info("restic is running — using cached cloud coverage")
+                    restic_by_vm, untagged_snaps = _restic_snap_cache.get(
+                        f"by_vm:{host_id}", (dict(), list()))
                 else:
                     restic_by_vm, untagged_snaps = restic.get_snapshots_by_vm()
+                    _restic_snap_cache[f"by_vm:{host_id}"] = (restic_by_vm, untagged_snaps)
             except Exception as e:
                 app.logger.warning("restic unavailable: %s", e)
 
@@ -1027,14 +1034,20 @@ def restic_snapshot_list(host_id: str):
         abort(404)
 
     restic = ResticClient(host)
-    if restic.is_running():
-        return jsonify({"busy": True, "message": "Restic is currently running — cloud data temporarily unavailable."}), 503
-    try:
-        snaps = restic.get_snapshots_flat()
-    except Exception as e:
-        return jsonify({"busy": True, "message": f"Could not fetch restic snapshots: {e}"}), 503
+    restic_busy = restic.is_running()
+    snaps = None
+    if restic_busy:
+        snaps = _restic_snap_cache.get(f"flat:{host_id}")
+        if snaps is None:
+            return jsonify({"busy": True, "message": "Restic is currently running — no cached data available yet."}), 503
+    else:
+        try:
+            snaps = restic.get_snapshots_flat()
+            _restic_snap_cache[f"flat:{host_id}"] = [dict(s) for s in snaps]
+        except Exception as e:
+            return jsonify({"busy": True, "message": f"Could not fetch restic snapshots: {e}"}), 503
 
-    # Build set of (type, vmid, backup_time) for all current local PBS snapshots
+    # Annotate with PBS local coverage
     pbs = PBSClient(host)
     try:
         pbs_groups = pbs.get_snapshots()
@@ -1046,6 +1059,8 @@ def restic_snapshot_list(host_id: str):
         for s in g["snapshots"]
     }
 
+    import copy
+    snaps = copy.deepcopy(snaps)
     now_ts = time.time()
     for snap in snaps:
         snap["date"] = datetime.fromtimestamp(snap["ts"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
@@ -1057,10 +1072,10 @@ def restic_snapshot_list(host_id: str):
                 cov["pbs_date"] = datetime.fromtimestamp(
                     cov["pbs_time"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
             else:
-                cov["local"]    = None   # unknown — old-style tag without timestamp
+                cov["local"]    = None
                 cov["pbs_date"] = None
 
-    return jsonify(snaps)
+    return jsonify({"snaps": snaps, "restic_busy": restic_busy})
 
 
 @app.post("/api/host/<host_id>/delete/restic")
