@@ -33,6 +33,8 @@ class ResticClient:
         env_vars = {
             "RESTIC_REPOSITORY": host.restic_repo,
             "RESTIC_PASSWORD": host.restic_password,
+            # Emit progress even when stdout is not a TTY (SSH pipe)
+            "RESTIC_PROGRESS_FPS": "0.5",
             **host.restic_env,
         }
         self._env_prefix = " ".join(
@@ -105,6 +107,19 @@ class ResticClient:
                             added = d.get('data_added_packed', d.get('data_added', 0))
                             mb = round(added / 1024 ** 2)
                             log(f"Uploaded {mb} MB to cloud.")
+                            continue
+                        elif mtype == 'verbose_status':
+                            # emitted by forget --prune during repacking phase
+                            pct = int(d.get('percent_done', 0) * 100)
+                            done = d.get('packs_done', 0)
+                            total = d.get('total_packs', 0)
+                            elapsed = int(d.get('seconds_elapsed', 0))
+                            mb = round(d.get('bytes_done', 0) / 1024 ** 2)
+                            log(f"[Repacking: {pct}% — {done}/{total} packs, {mb} MB ({elapsed}s elapsed)]")
+                            continue
+                        elif mtype == 'remove_snapshot':
+                            sid = d.get('short_id', d.get('id', '?')[:8])
+                            log(f"Removed snapshot {sid}")
                             continue
                     except (json.JSONDecodeError, KeyError, TypeError):
                         pass
@@ -334,8 +349,9 @@ class ResticClient:
         ids_quoted = " ".join(shlex.quote(sid) for sid in snapshot_ids)
         log(f"Forgetting restic snapshot(s): {', '.join(s[:8] for s in snapshot_ids)}...")
         self._ssh_stream(
-            f"{self._env_prefix} restic forget {ids_quoted} --prune --verbose",
+            f"{self._env_prefix} restic forget {ids_quoted} --prune --verbose --json",
             log,
+            parse_json=True,
         )
         log("Restic forget + prune complete.")
         # Deleted packs end up in GDrive trash and count against quota until emptied.
