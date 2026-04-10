@@ -826,7 +826,10 @@ function renderSchedules() {
   let html = '';
 
   if (pbs_running)    html += `<div class="running-badge pbs"><div class="running-badge-dot"></div>PBS backup running</div>`;
-  if (restic_running) html += `<div class="running-badge cloud"><div class="running-badge-dot"></div>Restic backup running</div>`;
+  if (restic_running) {
+    const clickable = _lastJob ? ` onclick="_reopenLastJob()" style="cursor:pointer" title="Click to open job"` : '';
+    html += `<div class="running-badge cloud"${clickable}><div class="running-badge-dot"></div>Restic backup running</div>`;
+  }
 
   (pbs_jobs || []).forEach(j => {
     if (j.schedule) html += `<div class="schedule-item"><span>PBS vzdump</span><span>${j.schedule}</span></div>`;
