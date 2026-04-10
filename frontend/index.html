@@ -235,8 +235,8 @@
 
   /* Cloud snapshots table */
   .cloud-snap-table { background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
-  .cloud-snap-header-row { display:grid; grid-template-columns:170px 80px 1fr 230px; gap:16px; padding:7px 18px; background:var(--bg); border-bottom:1px solid var(--border); }
-  .cloud-snap-row { display:grid; grid-template-columns:170px 80px 1fr 230px; align-items:center; gap:16px; padding:12px 18px; border-bottom:1px solid var(--border); transition:background .1s; }
+  .cloud-snap-header-row { display:grid; grid-template-columns:170px 1fr 230px; gap:16px; padding:7px 18px; background:var(--bg); border-bottom:1px solid var(--border); }
+  .cloud-snap-row { display:grid; grid-template-columns:170px 1fr 230px; align-items:center; gap:16px; padding:12px 18px; border-bottom:1px solid var(--border); transition:background .1s; }
   .cloud-snap-row:last-child { border-bottom:none; }
   .cloud-snap-row:hover { background:color-mix(in srgb, var(--text) 4%, transparent); }
   .cover-list { display:flex; flex-wrap:wrap; gap:4px; }
@@ -1651,7 +1651,6 @@ function renderCloudSnapshots(snaps, busy = false) {
           <div class="snap-date">${s.date}</div>
           <div class="snap-age">${s.age} · <span style="font-size:10px;color:var(--muted)">${s.short_id}</span></div>
         </div>
-        <div class="snap-size">${s.size}</div>
         <div class="cover-list">${coverHtml}</div>
         <div class="snap-row-bottom">
           <button class="restore-btn"${disabledAttr} onclick="openRestoreDatastoreModal(${JSON.stringify(s).replace(/"/g,'&quot;')})">Restore →</button>
@@ -1677,7 +1676,6 @@ function renderCloudSnapshots(snaps, busy = false) {
     <div class="cloud-snap-table">
       <div class="cloud-snap-header-row">
         <span class="col-label">Date</span>
-        <span class="col-label" title="Incremental data added by this snapshot (deduplicated). Does not reflect how much space is freed on delete.">Size ⁺</span>
         <span class="col-label">Covers (PBS snapshots)</span>
         <span class="col-label"></span>
       </div>
