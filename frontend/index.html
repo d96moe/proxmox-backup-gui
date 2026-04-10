@@ -604,6 +604,18 @@
 // ─────────────────────────────────────────────
 const API_BASE = window.location.origin;  // same host when served by Flask
 
+function relAge(unixTs) {
+  if (!unixTs) return null;
+  const diffS = Math.floor(Date.now() / 1000) - unixTs;
+  if (diffS < 60)          return 'just now';
+  if (diffS < 3600)        return `${Math.floor(diffS / 60)}m ago`;
+  if (diffS < 86400)       return `${Math.floor(diffS / 3600)}h ago`;
+  if (diffS < 86400 * 2)   return '1d ago';
+  if (diffS < 86400 * 30)  return `${Math.floor(diffS / 86400)}d ago`;
+  if (diffS < 86400 * 365) return `${Math.floor(diffS / (86400 * 30))}mo ago`;
+  return `${Math.floor(diffS / (86400 * 365))}y ago`;
+}
+
 // ─────────────────────────────────────────────
 // State
 // ─────────────────────────────────────────────
@@ -1603,10 +1615,10 @@ function renderCloudSnapshots(snaps) {
       : s.covers.map(c => {
           const cls   = c.local === null ? 'unknown' : c.local ? 'local' : 'gone';
           const dot   = c.local === null ? '?' : c.local ? '●' : '○';
-          const label = c.pbs_date
-            ? `${c.type}/${c.vmid} · ${c.pbs_date.slice(11)}`
-            : `${c.type}/${c.vmid}`;
-          return `<span class="cover-tag ${cls}">${dot} ${label}</span>`;
+          const age   = relAge(c.pbs_time);
+          const label = age ? `${c.type}/${c.vmid} · ${age}` : `${c.type}/${c.vmid}`;
+          const title = c.pbs_date || '';
+          return `<span class="cover-tag ${cls}" title="${title}">${dot} ${label}</span>`;
         }).join('');
 
     return `
@@ -1625,6 +1637,12 @@ function renderCloudSnapshots(snaps) {
   }).join('');
 
   document.getElementById('cloud-content').innerHTML = `
+    <div style="display:flex;gap:16px;padding:8px 18px 10px;font-size:11px;font-family:'IBM Plex Mono',monospace;color:var(--muted);border-bottom:1px solid var(--border)">
+      <span title="PBS snapshot exists locally in PBS"><span style="color:var(--green)">●</span> exists in PBS</span>
+      <span title="PBS snapshot no longer in PBS (cloud-only)"><span style="color:var(--muted)">○</span> gone from PBS</span>
+      <span title="PBS coverage status unknown"><span style="color:var(--muted)">?</span> unknown</span>
+      <span style="margin-left:auto;color:var(--muted)">hover badge for exact date</span>
+    </div>
     <div class="cloud-snap-table">
       <div class="cloud-snap-header-row">
         <span class="col-label">Date</span>
@@ -1655,12 +1673,11 @@ function openDeleteResticModal(snap) {
   const coversHtml = snap.covers.length === 0
     ? '<div style="color:var(--muted);font-size:11px;padding:4px 0">No tagged PBS snapshots</div>'
     : snap.covers.map(c => {
-        const cls   = c.local === null ? 'unknown' : c.local ? 'local' : 'gone';
-        const label = c.pbs_date
-          ? `${c.type}/${c.vmid} · ${c.pbs_date}`
-          : `${c.type}/${c.vmid}`;
+        const cls    = c.local === null ? 'unknown' : c.local ? 'local' : 'gone';
+        const age    = relAge(c.pbs_time);
+        const label  = age ? `${c.type}/${c.vmid} · ${age}` : `${c.type}/${c.vmid}`;
         const status = c.local === null ? 'unknown' : c.local ? 'local' : 'gone';
-        return `<div class="cover-modal-row">
+        return `<div class="cover-modal-row" title="${c.pbs_date || ''}">
           <div class="cover-mdot ${cls}"></div>
           <div class="cover-mlabel">${label}</div>
           <div class="cover-mstatus ${cls}">${status}</div>
@@ -1716,12 +1733,11 @@ function openRestoreDatastoreModal(snap) {
   const coversHtml = snap.covers.length === 0
     ? '<div style="color:var(--muted);font-size:11px;padding:4px 0">No tagged PBS snapshots</div>'
     : snap.covers.map(c => {
-        const cls   = c.local === null ? 'unknown' : c.local ? 'local' : 'gone';
-        const label = c.pbs_date
-          ? `${c.type}/${c.vmid} · ${c.pbs_date}`
-          : `${c.type}/${c.vmid}`;
+        const cls    = c.local === null ? 'unknown' : c.local ? 'local' : 'gone';
+        const age    = relAge(c.pbs_time);
+        const label  = age ? `${c.type}/${c.vmid} · ${age}` : `${c.type}/${c.vmid}`;
         const status = c.local === null ? 'unknown' : c.local ? 'local' : 'gone';
-        return `<div class="cover-modal-row">
+        return `<div class="cover-modal-row" title="${c.pbs_date || ''}">
           <div class="cover-mdot ${cls}"></div>
           <div class="cover-mlabel">${label}</div>
           <div class="cover-mstatus ${cls}">${status}</div>
