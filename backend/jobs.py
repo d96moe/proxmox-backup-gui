@@ -31,6 +31,12 @@ def get_job(job_id: str) -> dict | None:
         return dict(job) if job else None
 
 
+def get_active_jobs() -> list[dict]:
+    """Return all jobs with status running or pending."""
+    with _lock:
+        return [dict(j) for j in _jobs.values() if j["status"] in ("running", "pending")]
+
+
 def run_job(job_id: str, fn: Callable[[Callable[[str], None]], None]) -> None:
     """Run fn in a background thread. fn receives a log(msg) callback."""
 

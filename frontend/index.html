@@ -634,26 +634,27 @@ async function init() {
     selectHost(hosts[0].id);
   }
 
-  // Restore running job indicator after page reload
+  // Restore running job indicator after page reload (works cross-browser via backend)
   try {
-    const saved = localStorage.getItem('lastJob');
-    if (saved) {
-      const j = JSON.parse(saved);
-      const res = await fetch(`${API_BASE}/api/job/${j.jobId}`);
-      if (res.ok) {
-        const job = await res.json();
-        if (job.status === 'running' || job.status === 'pending') {
-          _lastJob = j;
-          if (j.vmid != null) {
-            _activeJobs[j.vmid] = { jobId: j.jobId, title: j.title };
-          } else {
-            _activeJobs[`_noid_${j.jobId}`] = { jobId: j.jobId, title: j.title };
-          }
-          _updateGlobalJobIndicator();
-          _pollJob(j.jobId, j.vmid);
+    const res = await fetch(`${API_BASE}/api/jobs/active`);
+    if (res.ok) {
+      const active = await res.json();
+      if (active.length > 0) {
+        // Pick the most recently started job
+        const j = active.sort((a, b) => b.started - a.started)[0];
+        // Try to get vmid from localStorage if same job
+        const saved = (() => { try { return JSON.parse(localStorage.getItem('lastJob')); } catch(_) { return null; } })();
+        const vmid = (saved && saved.jobId === j.id) ? saved.vmid : null;
+        _lastJob = { jobId: j.id, vmid, title: j.label };
+        if (vmid != null) {
+          _activeJobs[vmid] = { jobId: j.id, title: j.label };
         } else {
-          localStorage.removeItem('lastJob');
+          _activeJobs[`_noid_${j.id}`] = { jobId: j.id, title: j.label };
         }
+        _updateGlobalJobIndicator();
+        _pollJob(j.id, vmid);
+      } else {
+        localStorage.removeItem('lastJob');
       }
     }
   } catch (_) {}

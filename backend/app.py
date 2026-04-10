@@ -21,7 +21,7 @@ from config import load_hosts, HostConfig
 from pbs_client import PBSClient
 from restic_client import ResticClient
 from pve_client import PVEClient
-from jobs import create_job, get_job, run_job
+from jobs import create_job, get_job, get_active_jobs, run_job
 
 
 app = Flask(__name__, static_folder=None)
@@ -1001,6 +1001,12 @@ def get_job_status(job_id: str):
     if not job:
         abort(404)
     return jsonify(job)
+
+
+@app.get("/api/jobs/active")
+def get_active_jobs_endpoint():
+    """Return all currently running or pending jobs."""
+    return jsonify(get_active_jobs())
 
 
 # ──────────────────────────────────────────────
