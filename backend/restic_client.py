@@ -59,7 +59,7 @@ class ResticClient:
         return result.stdout
 
     def _ssh_stream(self, remote_cmd: str, log, heartbeat_secs: int = 10,
-                    parse_json: bool = False) -> None:
+                    parse_json: bool = False, _check_interval: float = 1.0) -> None:
         """Run remote_cmd on PVE host, streaming output through log(). Raises on non-zero exit.
 
         heartbeat_secs: inject "[Xs elapsed]" when no output received for this long.
@@ -77,7 +77,7 @@ class ResticClient:
         stop_event = threading.Event()
 
         def _heartbeat():
-            while not stop_event.wait(1.0):
+            while not stop_event.wait(_check_interval):
                 if time.monotonic() - last_output[0] >= heartbeat_secs:
                     elapsed = int(time.monotonic() - start)
                     log(f"[{elapsed}s elapsed]")
@@ -334,7 +334,7 @@ class ResticClient:
         ids_quoted = " ".join(shlex.quote(sid) for sid in snapshot_ids)
         log(f"Forgetting restic snapshot(s): {', '.join(s[:8] for s in snapshot_ids)}...")
         self._ssh_stream(
-            f"{self._env_prefix} restic forget {ids_quoted} --prune",
+            f"{self._env_prefix} restic forget {ids_quoted} --prune --verbose",
             log,
         )
         log("Restic forget + prune complete.")

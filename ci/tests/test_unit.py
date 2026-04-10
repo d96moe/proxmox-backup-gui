@@ -108,6 +108,7 @@ def _mock_clients(mock_host, pbs_snaps, pve_meta, restic_by_vm, untagged=None):
         pbs_mock.get_storage_info.return_value = _storage()
         pbs_mock.get_snapshots.return_value = pbs_snaps
         pve_mock.get_vms_and_lxcs.return_value = pve_meta
+        res_mock.is_running.return_value = False
         res_mock.get_snapshots_by_vm.return_value = (restic_by_vm, untagged or [])
         yield pbs_mock, pve_mock, res_mock
 
@@ -818,6 +819,7 @@ class TestResticSnapshotCoverage:
 
     def _get_restic_snaps(self, flask_client, mock_host, flat_snaps, pbs_groups):
         mock_restic = MagicMock()
+        mock_restic.is_running.return_value = False
         mock_restic.get_snapshots_flat.return_value = flat_snaps
         mock_pbs = MagicMock()
         mock_pbs.get_snapshots.return_value = pbs_groups
@@ -829,7 +831,8 @@ class TestResticSnapshotCoverage:
             resp = flask_client.get(f"/api/host/{HOST_ID}/restic/snapshots")
 
         assert resp.status_code == 200
-        return json.loads(resp.data)
+        body = json.loads(resp.data)
+        return body.get("snaps", body) if isinstance(body, dict) else body
 
     def test_local_coverage_marked_true_when_in_pbs(self, flask_client, mock_host):
         """Cover entry for a snapshot that still exists in PBS → local=True."""
@@ -1110,3 +1113,288 @@ class TestApiFields:
         assert job["status"] == "done"
         call_args = mock_pbs.delete_snapshot.call_args
         assert call_args[0][0] == "ct", "type='lxc' must be normalised to 'ct'"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ACTIVE_JOBS — /api/jobs/active endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestActiveJobs:
+
+    def test_active_jobs_empty_when_no_jobs(self, flask_client):
+        """No jobs running → empty list."""
+        import jobs as _jobs
+        _jobs._jobs.clear()
+        resp = flask_client.get("/api/jobs/active")
+        assert resp.status_code == 200
+        assert json.loads(resp.data) == []
+
+    def test_active_jobs_returns_running_job(self, flask_client):
+        """A running job appears in /api/jobs/active."""
+        import jobs as _jobs
+        _jobs._jobs.clear()
+        job_id = _jobs.create_job("Test running job")
+        with _jobs._lock:
+            _jobs._jobs[job_id]["status"] = "running"
+        resp = flask_client.get("/api/jobs/active")
+        data = json.loads(resp.data)
+        assert any(j["id"] == job_id for j in data)
+        assert data[0]["status"] == "running"
+
+    def test_active_jobs_excludes_done(self, flask_client):
+        """Done jobs do not appear in /api/jobs/active."""
+        import jobs as _jobs
+        _jobs._jobs.clear()
+        job_id = _jobs.create_job("Done job")
+        with _jobs._lock:
+            _jobs._jobs[job_id]["status"] = "done"
+        resp = flask_client.get("/api/jobs/active")
+        data = json.loads(resp.data)
+        assert not any(j["id"] == job_id for j in data)
+
+    def test_active_jobs_excludes_error(self, flask_client):
+        """Error jobs do not appear in /api/jobs/active."""
+        import jobs as _jobs
+        _jobs._jobs.clear()
+        job_id = _jobs.create_job("Error job")
+        with _jobs._lock:
+            _jobs._jobs[job_id]["status"] = "error"
+        resp = flask_client.get("/api/jobs/active")
+        data = json.loads(resp.data)
+        assert not any(j["id"] == job_id for j in data)
+
+    def test_active_jobs_returns_pending(self, flask_client):
+        """Pending jobs (created but not yet started) appear in /api/jobs/active."""
+        import jobs as _jobs
+        _jobs._jobs.clear()
+        job_id = _jobs.create_job("Pending job")
+        resp = flask_client.get("/api/jobs/active")
+        data = json.loads(resp.data)
+        assert any(j["id"] == job_id for j in data)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESTIC_BUSY — items and restic/snapshots behaviour when restic is locked
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestResticBusy:
+
+    def test_items_restic_busy_flag_false_when_idle(self, flask_client, mock_host):
+        """restic_busy=False in items response when restic is not running."""
+        with _mock_clients(mock_host,
+                           pbs_snaps=[_pbs_group(301, "ct", [_pbs_snap(T2)])],
+                           pve_meta=_pve_meta(),
+                           restic_by_vm={}) as (_, _, res_mock):
+            res_mock.is_running.return_value = False
+            resp = flask_client.get(f"/api/host/{HOST_ID}/items")
+        data = json.loads(resp.data)
+        assert data.get("restic_busy") is False
+
+    def test_items_restic_busy_flag_true_when_locked(self, flask_client, mock_host):
+        """restic_busy=True in items response when restic is locked."""
+        _app._restic_snap_cache.clear()
+        with _mock_clients(mock_host,
+                           pbs_snaps=[_pbs_group(301, "ct", [_pbs_snap(T2)])],
+                           pve_meta=_pve_meta(),
+                           restic_by_vm={}) as (_, _, res_mock):
+            res_mock.is_running.return_value = True
+            resp = flask_client.get(f"/api/host/{HOST_ID}/items")
+        data = json.loads(resp.data)
+        assert data.get("restic_busy") is True
+
+    def test_items_uses_cached_by_vm_when_busy(self, flask_client, mock_host):
+        """When restic is busy, items endpoint uses cached by_vm coverage."""
+        cached_by_vm = {301: [{"ts": TS_R2, "id": "R2id", "short_id": "R2", "pbs_time": T2}]}
+        _app._restic_snap_cache[f"by_vm:{HOST_ID}"] = (cached_by_vm, [])
+
+        with _mock_clients(mock_host,
+                           pbs_snaps=[_pbs_group(301, "ct", [_pbs_snap(T2)])],
+                           pve_meta=_pve_meta(),
+                           restic_by_vm={}) as (_, _, res_mock):
+            res_mock.is_running.return_value = True
+            resp = flask_client.get(f"/api/host/{HOST_ID}/items")
+        data = json.loads(resp.data)
+        ct = next(x for x in data["lxcs"] if x["id"] == 301)
+        snap = ct["snapshots"][0]
+        # Cloud coverage should come from cache, not empty restic_by_vm
+        assert snap.get("cloud") is True
+
+    def test_restic_snapshots_503_when_busy_no_cache(self, flask_client, mock_host):
+        """503 when restic is busy and no cache exists yet."""
+        _app._restic_snap_cache.clear()
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}, clear=True), \
+             patch("app.ResticClient") as restic_cls:
+            restic_cls.return_value.is_running.return_value = True
+            resp = flask_client.get(f"/api/host/{HOST_ID}/restic/snapshots")
+        assert resp.status_code == 503
+        data = json.loads(resp.data)
+        assert data.get("busy") is True
+
+    def test_restic_snapshots_returns_cache_when_busy(self, flask_client, mock_host):
+        """Returns cached snaps + restic_busy=True when restic is locked."""
+        cached = [{"id": "abc123", "short_id": "abc123", "ts": TS_R2,
+                   "size_bytes": 1024, "covers": []}]
+        _app._restic_snap_cache[f"flat:{HOST_ID}"] = cached
+
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}, clear=True), \
+             patch("app.ResticClient") as restic_cls, \
+             patch("app.PBSClient") as pbs_cls:
+            restic_cls.return_value.is_running.return_value = True
+            pbs_cls.return_value.get_snapshots.return_value = []
+            resp = flask_client.get(f"/api/host/{HOST_ID}/restic/snapshots")
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        assert data["restic_busy"] is True
+        assert len(data["snaps"]) == 1
+        assert data["snaps"][0]["short_id"] == "abc123"
+
+    def test_restic_snapshots_updates_cache_on_success(self, flask_client, mock_host):
+        """Successful fetch updates _restic_snap_cache."""
+        _app._restic_snap_cache.clear()
+        fresh = [{"id": "fresh1", "short_id": "fresh1", "ts": TS_R2,
+                  "size_bytes": 512, "covers": []}]
+
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}, clear=True), \
+             patch("app.ResticClient") as restic_cls, \
+             patch("app.PBSClient") as pbs_cls:
+            restic_cls.return_value.is_running.return_value = False
+            restic_cls.return_value.get_snapshots_flat.return_value = fresh
+            pbs_cls.return_value.get_snapshots.return_value = []
+            resp = flask_client.get(f"/api/host/{HOST_ID}/restic/snapshots")
+        assert resp.status_code == 200
+        assert f"flat:{HOST_ID}" in _app._restic_snap_cache
+        assert _app._restic_snap_cache[f"flat:{HOST_ID}"][0]["short_id"] == "fresh1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROGRESS — _ssh_stream heartbeat and restic JSON parsing
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestProgress:
+
+    def _make_stream(self, lines: list[str]):
+        """Return a ResticClient with _ssh_stream mocked to emit lines."""
+        from restic_client import ResticClient
+        from config import HostConfig
+        host = HostConfig(
+            id="x", label="x",
+            pve_url="https://1.2.3.4:8006", pve_user="u", pve_password="p",
+            pbs_url="https://1.2.3.4:8007", pbs_user="u", pbs_password="p",
+            pbs_datastore="d", pbs_storage_id="s", pbs_datastore_path="/mnt/d",
+            restic_repo="rclone:gdrive:test", restic_password="pw",
+        )
+        client = ResticClient.__new__(ResticClient)
+        client._repo = "rclone:gdrive:test"
+        client._gdrive_remote = "gdrive"
+        client._ssh_host = "1.2.3.4"
+        client._env_prefix = "RESTIC_REPOSITORY=rclone:gdrive:test RESTIC_PASSWORD=pw"
+        return client
+
+    def test_heartbeat_emitted_when_silent(self):
+        """Heartbeat '[Xs elapsed]' injected when no output for heartbeat_secs."""
+        from restic_client import ResticClient
+
+        client = self._make_stream([])
+        logged = []
+
+        # stdout blocks for 0.15s then yields nothing — heartbeat should fire
+        def _slow_iter():
+            time.sleep(0.15)
+            return
+            yield  # make it a generator
+
+        class FakeProc:
+            returncode = 0
+            stdout = _slow_iter()
+            def wait(self): pass
+
+        with patch("restic_client.subprocess.Popen", return_value=FakeProc()):
+            # heartbeat_secs=0.05, _check_interval=0.01 → fires at least once in 0.15s
+            client._ssh_stream("cmd", logged.append, heartbeat_secs=0.05, _check_interval=0.01)
+
+        assert any("[" in l and "elapsed]" in l for l in logged), \
+            f"Expected heartbeat line in logs, got: {logged}"
+
+    def test_parse_json_status_line_emits_progress(self):
+        """restic --json status lines become '[X% — ...]' progress messages."""
+        from restic_client import ResticClient
+
+        client = self._make_stream([])
+        logged = []
+
+        status_line = json.dumps({
+            "message_type": "status",
+            "percent_done": 0.45,
+            "seconds_elapsed": 23,
+            "files_done": 180,
+            "total_files": 400,
+            "bytes_done": 245366784,
+        })
+
+        class FakeProc:
+            returncode = 0
+            stdout = iter([status_line + "\n"])
+            def wait(self): pass
+
+        with patch("restic_client.subprocess.Popen", return_value=FakeProc()):
+            client._ssh_stream("cmd", logged.append, parse_json=True)
+
+        assert len(logged) == 1
+        assert logged[0].startswith("[45%")
+        assert "180/400" in logged[0]
+
+    def test_parse_json_summary_line_emits_uploaded(self):
+        """restic --json summary line becomes 'Uploaded X MB' message."""
+        from restic_client import ResticClient
+
+        client = self._make_stream([])
+        logged = []
+
+        summary_line = json.dumps({
+            "message_type": "summary",
+            "data_added_packed": 10 * 1024 * 1024,  # 10 MB
+        })
+
+        class FakeProc:
+            returncode = 0
+            stdout = iter([summary_line + "\n"])
+            def wait(self): pass
+
+        with patch("restic_client.subprocess.Popen", return_value=FakeProc()):
+            client._ssh_stream("cmd", logged.append, parse_json=True)
+
+        assert len(logged) == 1
+        assert "10 MB" in logged[0]
+
+    def test_non_json_lines_passed_through(self):
+        """Non-JSON lines are forwarded unchanged when parse_json=True."""
+        from restic_client import ResticClient
+
+        client = self._make_stream([])
+        logged = []
+
+        class FakeProc:
+            returncode = 0
+            stdout = iter(["repacking packs\n", "some other line\n"])
+            def wait(self): pass
+
+        with patch("restic_client.subprocess.Popen", return_value=FakeProc()):
+            client._ssh_stream("cmd", logged.append, parse_json=True)
+
+        assert "repacking packs" in logged
+        assert "some other line" in logged
+
+    def test_nonzero_exit_raises(self):
+        """Non-zero exit code raises RuntimeError."""
+        from restic_client import ResticClient
+
+        client = self._make_stream([])
+
+        class FakeProc:
+            returncode = 1
+            stdout = iter([])
+            def wait(self): pass
+
+        with patch("restic_client.subprocess.Popen", return_value=FakeProc()):
+            with pytest.raises(RuntimeError):
+                client._ssh_stream("cmd", lambda _: None)

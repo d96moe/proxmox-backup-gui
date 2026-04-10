@@ -1586,6 +1586,7 @@ async function loadCloudSnapshots(signal) {
   const host = currentHost;
   const wrap = document.getElementById('tab-content-cloud');
   wrap.classList.add('loading');
+  document.getElementById('cloud-content').innerHTML = '<div class="state-msg">Loading…</div>';
   try {
     const res = await fetch(`${API_BASE}/api/host/${host}/restic/snapshots`, { signal });
     if (!res.ok) {
