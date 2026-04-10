@@ -103,6 +103,9 @@ CACHE_TTL = 60
 # Returned as stale data when restic is busy so the UI can still show cloud info.
 _restic_snap_cache: dict[str, list] = {}  # host_id → last known flat snapshot list
 
+# Persistent PBS items cache — returned as stale data when PBS is offline (e.g. during restic backup)
+_pbs_items_cache: dict[str, dict] = {}  # host_id → last known items response
+
 # Per-host restic lock — prevents concurrent restic backup/restore operations
 _restic_locks: dict[str, threading.Lock] = {}
 _restic_locks_guard = threading.Lock()
@@ -179,6 +182,11 @@ def get_items(host_id: str):
         try:
             pbs = PBSClient(host)
         except Exception as e:
+            cached = _pbs_items_cache.get(host_id)
+            if cached:
+                app.logger.warning("PBS unavailable (%s) — returning cached items", e)
+                cached["pbs_stale"] = True
+                return cached
             abort(503, f"PBS unavailable — restic backup may be running ({e})")
         try:
             pve = PVEClient(host)
@@ -359,12 +367,15 @@ def get_items(host_id: str):
             else:
                 vms.append(item)
 
-        return {
+        result = {
             "storage": {**storage, "cloud_used": 0},
             "vms": vms,
             "lxcs": lxcs,
             "restic_busy": restic_busy,
+            "pbs_stale": False,
         }
+        _pbs_items_cache[host_id] = dict(result)
+        return result
 
     return jsonify(_cached(f"items:{host_id}", fetch))
 
@@ -1048,8 +1059,8 @@ def restic_snapshot_list(host_id: str):
             return jsonify({"busy": True, "message": f"Could not fetch restic snapshots: {e}"}), 503
 
     # Annotate with PBS local coverage
-    pbs = PBSClient(host)
     try:
+        pbs = PBSClient(host)
         pbs_groups = pbs.get_snapshots()
     except Exception:
         pbs_groups = []

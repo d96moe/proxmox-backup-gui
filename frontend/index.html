@@ -870,12 +870,18 @@ function _scheduleHint() {
 // Render
 // ─────────────────────────────────────────────
 function renderData(data) {
-  const { vms, lxcs, storage, restic_busy } = data;
+  const { vms, lxcs, storage, restic_busy, pbs_stale } = data;
 
   document.getElementById('page-subtitle').textContent =
     `${vms.length} VMs · ${lxcs.length} LXCs`;
 
   let html = '';
+
+  if (pbs_stale) {
+    html += `<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;margin-bottom:12px;background:color-mix(in srgb,var(--yellow) 10%,transparent);border:1px solid color-mix(in srgb,var(--yellow) 30%,transparent);border-radius:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--yellow)">
+      <span>⚠ PBS is offline — showing cached data from last successful refresh.</span>
+    </div>`;
+  }
 
   if (restic_busy) {
     html += `<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;margin-bottom:12px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);border-radius:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent)">
