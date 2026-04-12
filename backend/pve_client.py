@@ -186,15 +186,17 @@ def _format_starttime(t) -> str | None:
     return f"daily {h:02d}:{m:02d}"
 
 
-def _schedule_left(schedule: str) -> str | None:
+def _schedule_left(schedule: str, now=None) -> str | None:
     """Return 'in Xh' / 'in Xd' until next run from a systemd calendar expression.
 
     Handles: 'HH:MM', 'daily HH:MM', 'sat HH:MM', 'mon,wed HH:MM', 'weekly', 'monthly'.
+    now: override current time (for testing); defaults to datetime.now() (local time).
     """
     import re
     from datetime import datetime, timedelta
 
-    now = datetime.now()  # local time — PVE schedules are in server local time
+    if now is None:
+        now = datetime.now()  # local time — PVE schedules are in server local time
     s = schedule.strip().lower()
     s = re.sub(r"^daily\s+", "", s)  # strip "daily " prefix from legacy format
 

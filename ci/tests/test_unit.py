@@ -10,6 +10,7 @@ Tests cover every change and corner case found during manual testing:
   ENDPOINT     — 400 / 404 / 409 for new and existing endpoints
   COVERAGE     — /restic/snapshots local-coverage annotation
   DELETE_CLOUD — step 4 forgets ALL restic IDs that carry the deleted pbs_time
+  SCHEDULES    — _schedule_left, get_retention, get_pbs_prune_jobs, /schedules endpoint
 """
 from __future__ import annotations
 
@@ -1398,3 +1399,278 @@ class TestProgress:
         with patch("restic_client.subprocess.Popen", return_value=FakeProc()):
             with pytest.raises(RuntimeError):
                 client._ssh_stream("cmd", lambda _: None)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEDULES — _schedule_left, get_retention, get_pbs_prune_jobs, /schedules
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestScheduleLeft:
+    """_schedule_left(schedule, now=): systemd calendar expression → 'in Xm/h/d'."""
+
+    def _left(self, schedule, h, mn, weekday=0):
+        """weekday: 0=Mon … 6=Sun. 2026-04-13 is a Monday."""
+        from datetime import datetime, timedelta
+        from pve_client import _schedule_left
+        base = datetime(2026, 4, 13, h, mn, 0)
+        now  = base + timedelta(days=weekday)
+        return _schedule_left(schedule, now=now)
+
+    # ── basic daily cases ──────────────────────────────────────────────────
+
+    def test_minutes_away(self):
+        """02:00 with now=01:45 → in 15m."""
+        assert self._left("02:00", 1, 45) == "in 15m"
+
+    def test_hours_away(self):
+        """14:00 with now=10:00 → in 4h."""
+        assert self._left("14:00", 10, 0) == "in 4h"
+
+    def test_already_passed_today_rolls_to_tomorrow(self):
+        """02:00 with now=03:00 → already passed → in 23h."""
+        assert self._left("02:00", 3, 0) == "in 23h"
+
+    def test_exactly_at_schedule_time_rolls_to_tomorrow(self):
+        """now == schedule time exactly → rolls to next day → 24h = 'in 1d'."""
+        assert self._left("02:00", 2, 0) == "in 1d"
+
+    def test_one_minute_before_midnight(self):
+        """23:59 with now=23:58 → in 1m."""
+        assert self._left("23:59", 23, 58) == "in 1m"
+
+    def test_just_after_midnight_schedule(self):
+        """00:01 with now=00:00 → in 1m."""
+        assert self._left("00:01", 0, 0) == "in 1m"
+
+    def test_midnight_schedule_approaching(self):
+        """00:00 with now=23:30 → in 30m."""
+        assert self._left("00:00", 23, 30) == "in 30m"
+
+    # ── legacy 'daily HH:MM' prefix ───────────────────────────────────────
+
+    def test_daily_prefix_stripped(self):
+        """'daily 02:00' (legacy _format_starttime format) handled correctly."""
+        assert self._left("daily 02:00", 1, 30) == "in 30m"
+
+    # ── day-of-week schedules ──────────────────────────────────────────────
+
+    def test_weekly_sat_from_monday(self):
+        """'sat 02:00' with now=Mon 10:00 → Sat 02:00 is 4.67 days away → in 4d."""
+        assert self._left("sat 02:00", 10, 0, weekday=0) == "in 4d"  # Mon
+
+    def test_weekly_same_day_not_yet(self):
+        """'mon 14:00' with now=Mon 10:00 → in 4h (same day, later)."""
+        assert self._left("mon 14:00", 10, 0, weekday=0) == "in 4h"
+
+    def test_weekly_same_day_already_passed(self):
+        """'mon 02:00' with now=Mon 10:00 → already passed → next Mon → in 6d."""
+        assert self._left("mon 02:00", 10, 0, weekday=0) == "in 6d"
+
+    def test_multi_day_picks_nearest(self):
+        """'mon,wed 03:00' with now=Mon 10:00 → Mon passed → Wed → in 1d."""
+        assert self._left("mon,wed 03:00", 10, 0, weekday=0) == "in 1d"
+
+    def test_weekly_sun_from_friday(self):
+        """'sun 02:00' with now=Fri 12:00 → 2 days away → in 1d (Sat midnight → Sun)."""
+        assert self._left("sun 02:00", 12, 0, weekday=4) == "in 1d"  # Fri
+
+    # ── unrecognised formats ───────────────────────────────────────────────
+
+    def test_unknown_keyword_returns_none(self):
+        from pve_client import _schedule_left
+        assert _schedule_left("@weekly") is None
+
+    def test_empty_string_returns_none(self):
+        from pve_client import _schedule_left
+        assert _schedule_left("") is None
+
+    def test_plain_word_returns_none(self):
+        from pve_client import _schedule_left
+        assert _schedule_left("monthly") is None
+
+
+class TestGetRetention:
+    """ResticClient.get_retention() parses RESTIC_RETENTION_KEEP_* from config.env."""
+
+    def _make_client(self):
+        from restic_client import ResticClient
+        from config import HostConfig
+        return ResticClient(HostConfig(
+            id="x", label="x",
+            pve_url="https://1.2.3.4:8006", pve_user="root@pam", pve_password="x",
+            pbs_url="https://1.2.3.4:8007", pbs_user="b@pbs", pbs_password="x",
+            pbs_datastore="ds",
+            restic_repo="rclone:gdrive:test",
+            restic_password="secret",
+            pve_ssh_host="1.2.3.4",
+        ))
+
+    def test_parses_all_keys(self):
+        env = "\n".join([
+            "RESTIC_RETENTION_KEEP_LAST=1",
+            "RESTIC_RETENTION_KEEP_DAILY=3",
+            "RESTIC_RETENTION_KEEP_WEEKLY=2",
+            "RESTIC_RETENTION_KEEP_MONTHLY=3",
+        ])
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", return_value=env):
+            result = client.get_retention()
+        assert result == {
+            "keep-last": "1", "keep-daily": "3",
+            "keep-weekly": "2", "keep-monthly": "3",
+        }
+
+    def test_ignores_comments_and_blanks(self):
+        env = "# comment\n\nRESTIC_RETENTION_KEEP_LAST=5\nOTHER=ignored\n"
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", return_value=env):
+            result = client.get_retention()
+        assert result == {"keep-last": "5"}
+
+    def test_strips_double_quotes(self):
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", return_value='RESTIC_RETENTION_KEEP_LAST="7"'):
+            assert client.get_retention()["keep-last"] == "7"
+
+    def test_strips_single_quotes(self):
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", return_value="RESTIC_RETENTION_KEEP_LAST='9'"):
+            assert client.get_retention()["keep-last"] == "9"
+
+    def test_ssh_failure_returns_empty(self):
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", side_effect=RuntimeError("ssh down")):
+            assert client.get_retention() == {}
+
+    def test_empty_file_returns_empty(self):
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", return_value=""):
+            assert client.get_retention() == {}
+
+    def test_yearly_key_parsed(self):
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", return_value="RESTIC_RETENTION_KEEP_YEARLY=1"):
+            assert client.get_retention() == {"keep-yearly": "1"}
+
+
+class TestGetPbsPruneJobs:
+    """ResticClient.get_pbs_prune_jobs() parses proxmox-backup-manager JSON output."""
+
+    def _make_client(self):
+        from restic_client import ResticClient
+        from config import HostConfig
+        return ResticClient(HostConfig(
+            id="x", label="x",
+            pve_url="https://1.2.3.4:8006", pve_user="root@pam", pve_password="x",
+            pbs_url="https://1.2.3.4:8007", pbs_user="b@pbs", pbs_password="x",
+            pbs_datastore="ds",
+            restic_repo="rclone:gdrive:test",
+            restic_password="secret",
+            pve_ssh_host="1.2.3.4",
+        ))
+
+    def test_returns_all_jobs(self):
+        data = [
+            {"id": "nightly-prune", "keep-last": 3, "schedule": "03:00", "store": "local-store"},
+            {"id": "other",         "keep-last": 1, "schedule": "04:00", "store": "other-store"},
+        ]
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", return_value=json.dumps(data)):
+            result = client.get_pbs_prune_jobs()
+        assert len(result) == 2
+        assert result[0]["id"] == "nightly-prune"
+        assert result[0]["keep-last"] == 3
+
+    def test_empty_list(self):
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", return_value="[]"):
+            assert client.get_pbs_prune_jobs() == []
+
+    def test_ssh_failure_returns_empty(self):
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", side_effect=RuntimeError("fail")):
+            assert client.get_pbs_prune_jobs() == []
+
+    def test_invalid_json_returns_empty(self):
+        client = self._make_client()
+        with patch.object(client, "_ssh_run", return_value="not json at all"):
+            assert client.get_pbs_prune_jobs() == []
+
+
+class TestSchedulesEndpoint:
+    """/api/host/<id>/schedules returns correct structure with retention."""
+
+    def _get(self, flask_client, mock_host,
+             pbs_jobs=None, restic_next=None, restic_running=False,
+             restic_retention=None, pbs_prune_jobs=None):
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}, clear=True), \
+             patch("app.PVEClient") as pve_cls, \
+             patch("app.ResticClient") as res_cls:
+            pve_m = pve_cls.return_value
+            res_m = res_cls.return_value
+            pve_m.get_backup_schedules.return_value = pbs_jobs or []
+            pve_m.is_backup_running.return_value = False
+            res_m.get_next_run.return_value = restic_next
+            res_m.is_running.return_value = restic_running
+            res_m.get_retention.return_value = restic_retention or {}
+            res_m.get_pbs_prune_jobs.return_value = pbs_prune_jobs or []
+            resp = flask_client.get(f"/api/host/{HOST_ID}/schedules")
+        return json.loads(resp.data)
+
+    def test_all_keys_present(self, flask_client, mock_host):
+        data = self._get(flask_client, mock_host)
+        for key in ("pbs_jobs", "pbs_running", "restic_next",
+                    "restic_running", "pbs_retention", "restic_retention"):
+            assert key in data, f"missing key: {key}"
+
+    def test_restic_retention_passed_through(self, flask_client, mock_host):
+        ret = {"keep-last": "1", "keep-daily": "3", "keep-weekly": "2", "keep-monthly": "3"}
+        data = self._get(flask_client, mock_host, restic_retention=ret)
+        assert data["restic_retention"] == ret
+
+    def test_pbs_retention_filtered_by_datastore(self, flask_client, mock_host):
+        """pbs_retention only includes jobs whose store matches host.pbs_datastore."""
+        jobs = [
+            {"id": "match",    "keep-last": 3, "store": "test-store"},   # mock_host datastore
+            {"id": "nomatch",  "keep-last": 5, "store": "other-store"},
+        ]
+        data = self._get(flask_client, mock_host, pbs_prune_jobs=jobs)
+        ids = [j["id"] for j in data["pbs_retention"]]
+        assert "match" in ids
+        assert "nomatch" not in ids
+
+    def test_restic_running_flag_true(self, flask_client, mock_host):
+        data = self._get(flask_client, mock_host, restic_running=True)
+        assert data["restic_running"] is True
+
+    def test_restic_running_flag_false(self, flask_client, mock_host):
+        data = self._get(flask_client, mock_host, restic_running=False)
+        assert data["restic_running"] is False
+
+    def test_unknown_host_404(self, flask_client, mock_host):
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}, clear=True):
+            resp = flask_client.get("/api/host/does-not-exist/schedules")
+        assert resp.status_code == 404
+
+    def test_pve_down_still_returns_200(self, flask_client, mock_host):
+        """PVEClient raising should not crash the endpoint."""
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}, clear=True), \
+             patch("app.PVEClient", side_effect=Exception("pve down")), \
+             patch("app.ResticClient") as res_cls:
+            res_cls.return_value.get_next_run.return_value = None
+            res_cls.return_value.is_running.return_value = False
+            res_cls.return_value.get_retention.return_value = {}
+            res_cls.return_value.get_pbs_prune_jobs.return_value = []
+            resp = flask_client.get(f"/api/host/{HOST_ID}/schedules")
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["pbs_jobs"] == []
+
+    def test_restic_down_still_returns_200(self, flask_client, mock_host):
+        """ResticClient raising should not crash the endpoint."""
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}, clear=True), \
+             patch("app.PVEClient") as pve_cls, \
+             patch("app.ResticClient", side_effect=Exception("restic down")):
+            pve_cls.return_value.get_backup_schedules.return_value = []
+            pve_cls.return_value.is_backup_running.return_value = False
+            resp = flask_client.get(f"/api/host/{HOST_ID}/schedules")
+        assert resp.status_code == 200
