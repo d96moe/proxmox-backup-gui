@@ -66,18 +66,21 @@ class PVEClient:
         return result
 
     def get_backup_schedules(self) -> list[dict]:
-        """Returns enabled vzdump backup jobs with their schedule strings."""
+        """Returns enabled vzdump backup jobs with their schedule strings and next-run left."""
         try:
             jobs = self._get("/cluster/backup")
-            return [
-                {
-                    "id": j.get("id", ""),
-                    "schedule": j.get("schedule") or _format_starttime(j.get("starttime")),
-                    "storage": j.get("storage", ""),
-                }
-                for j in (jobs if isinstance(jobs, list) else [])
-                if j.get("enabled", 1)
-            ]
+            result = []
+            for j in (jobs if isinstance(jobs, list) else []):
+                if not j.get("enabled", 1):
+                    continue
+                schedule = j.get("schedule") or _format_starttime(j.get("starttime"))
+                result.append({
+                    "id":       j.get("id", ""),
+                    "schedule": schedule,
+                    "left":     _schedule_left(schedule) if schedule else None,
+                    "storage":  j.get("storage", ""),
+                })
+            return result
         except Exception:
             return []
 
@@ -181,6 +184,45 @@ def _format_starttime(t) -> str | None:
         return None
     h, m = divmod(int(t) // 60, 60)
     return f"daily {h:02d}:{m:02d}"
+
+
+def _schedule_left(schedule: str) -> str | None:
+    """Return 'in Xh' / 'in Xd' until next run from a systemd calendar expression.
+
+    Handles: 'HH:MM', 'daily HH:MM', 'sat HH:MM', 'mon,wed HH:MM', 'weekly', 'monthly'.
+    """
+    import re
+    from datetime import datetime, timedelta
+
+    now = datetime.now()  # local time — PVE schedules are in server local time
+    s = schedule.strip().lower()
+    s = re.sub(r"^daily\s+", "", s)  # strip "daily " prefix from legacy format
+
+    day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+    m = re.match(r"^(?:([a-z,]+)\s+)?(\d{1,2}):(\d{2})$", s)
+    if m:
+        days_str, h, mn = m.group(1), int(m.group(2)), int(m.group(3))
+        if days_str:
+            target_days = {day_map[d.strip()] for d in days_str.split(",") if d.strip() in day_map}
+            if not target_days:
+                return None
+        else:
+            target_days = set(range(7))
+
+        for delta in range(8):
+            candidate = (now + timedelta(days=delta)).replace(
+                hour=h, minute=mn, second=0, microsecond=0
+            )
+            if candidate > now and candidate.weekday() in target_days:
+                secs = (candidate - now).total_seconds()
+                if secs < 3600:
+                    return f"in {int(secs // 60)}m"
+                if secs < 86400:
+                    return f"in {int(secs // 3600)}h"
+                return f"in {int(secs // 86400)}d"
+
+    return None
 
 
 def _guess_os(name: str) -> str:

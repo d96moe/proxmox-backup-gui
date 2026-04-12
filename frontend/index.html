@@ -65,6 +65,7 @@
   .nav-item.host-item { font-family:'IBM Plex Mono',monospace; font-size:12px; }
   .nav-icon { font-size:15px; width:18px; text-align:center; }
   .storage-meter { margin-bottom:8px; padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:8px; }
+  .sidebar-card  { padding:12px; background:var(--bg); border:1px solid var(--border); border-radius:8px; }
   .meter-label { display:flex; justify-content:space-between; font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); margin-bottom:8px; }
   .meter-label span:last-child { color:var(--text); }
   .meter-bar { height:4px; background:var(--border2); border-radius:2px; overflow:hidden; }
@@ -144,8 +145,14 @@
   .snap-row-bottom { display: flex; align-items: center; gap: 6px; justify-content: flex-end; }
 
   /* Schedules sidebar section */
-  .schedule-item { display:flex; justify-content:space-between; font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); padding:3px 0; }
-  .schedule-item .sch-label { color:var(--text); }
+  .sched-table { display:grid; grid-template-columns:auto 1fr 1fr; gap:3px 10px; font-family:'IBM Plex Mono',monospace; font-size:10px; align-items:baseline; }
+  .sched-table .sh { color:var(--text); font-size:9px; }
+  .sched-table .sr { color:var(--muted); font-size:9px; }
+  .sched-table .sv { color:var(--text); }
+  .sched-table .sp { color:var(--muted); font-size:9px; }
+  .ret-cell { display:grid; grid-template-columns:auto auto; gap:1px 6px; justify-content:start; }
+  .ret-cell .ret-k { color:var(--muted); white-space:nowrap; }
+  .ret-cell .ret-v { text-align:right; white-space:nowrap; }
   .running-badge { display:flex; align-items:center; gap:6px; padding:5px 8px; border-radius:6px; font-family:'IBM Plex Mono',monospace; font-size:10px; margin-bottom:4px; }
   .running-badge.pbs   { background:color-mix(in srgb, var(--green) 10%, transparent); border:1px solid color-mix(in srgb, var(--green) 25%, transparent); color:var(--green); }
   .running-badge.cloud { background:color-mix(in srgb, var(--accent) 10%, transparent); border:1px solid color-mix(in srgb, var(--accent) 25%, transparent); color:var(--accent); }
@@ -345,7 +352,7 @@
     </div>
     <div class="sidebar-section" id="schedules-section" style="display:none">
       <div class="sidebar-label">Schedules</div>
-      <div id="schedule-info"></div>
+      <div class="sidebar-card" id="schedule-info"></div>
     </div>
     <div class="sidebar-section" id="global-job-section" style="display:none">
       <div class="sidebar-label">Running</div>
@@ -835,21 +842,70 @@ function renderSchedules() {
   const container = document.getElementById('schedule-info');
   if (!_schedules) { section.style.display = 'none'; return; }
 
-  const { pbs_jobs, pbs_running, restic_next, restic_running } = _schedules;
-  let html = '';
+  const { pbs_jobs, pbs_running, restic_next, restic_running, pbs_retention, restic_retention } = _schedules;
 
-  if (pbs_running)    html += `<div class="running-badge pbs"><div class="running-badge-dot"></div>PBS backup running</div>`;
+  const retDims = [
+    { key: 'keep-last',    label: 'last'    },
+    { key: 'keep-daily',   label: 'daily'   },
+    { key: 'keep-weekly',  label: 'weekly'  },
+    { key: 'keep-monthly', label: 'monthly' },
+    { key: 'keep-yearly',  label: 'yearly'  },
+  ];
+
+  const _schedNext = sched => {
+    if (!sched) return null;
+    const m = sched.match(/(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const next = new Date();
+    next.setHours(+m[1], +m[2], 0, 0);
+    if (next <= new Date()) next.setDate(next.getDate() + 1);
+    return next;
+  };
+  const _fmtLeft = ms => {
+    const min = Math.round(ms / 60000);
+    if (min < 60)   return `in ${min}m`;
+    if (min < 1440) return `in ${Math.floor(min/60)}h`;
+    return `in ${Math.floor(min/1440)}d`;
+  };
+  const _fmtDate = d => {
+    const pad = n => String(n).padStart(2,'0');
+    const wd = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
+    return `${wd} ${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+
+  const pbsJob   = (pbs_jobs || [])[0];
+  const pbsNext  = _schedNext(pbsJob?.schedule);
+  const pbsSched = pbsNext ? _fmtLeft(pbsNext - new Date()) : (pbsJob?.schedule || '—');
+  const pbsTitle = pbsNext ? _fmtDate(pbsNext) : '';
+  const pbsRet   = (pbs_retention || [])[0] || {};
+  const resSched = restic_next ? `in ${restic_next.left.replace('min','m')}` : '—';
+  const resTitle = restic_next ? restic_next.next.replace(/:\d{2}\s+\S+$/, '') : '';
+  const resRet   = restic_retention || {};
+
+  const hasAny = pbs_jobs?.length || restic_next || pbs_running || restic_running;
+  if (!hasAny) { section.style.display = 'none'; return; }
+
+  let html = '';
+  if (pbs_running) html += `<div class="running-badge pbs" style="margin-bottom:8px"><div class="running-badge-dot"></div>PBS backup running</div>`;
   if (restic_running) {
     const clickable = _lastJob ? ` onclick="_reopenLastJob()" style="cursor:pointer" title="Click to open job"` : '';
-    html += `<div class="running-badge cloud"${clickable}><div class="running-badge-dot"></div>Restic backup running</div>`;
+    html += `<div class="running-badge cloud"${clickable} style="margin-bottom:8px"><div class="running-badge-dot"></div>Restic backup running</div>`;
   }
 
-  (pbs_jobs || []).forEach(j => {
-    if (j.schedule) html += `<div class="schedule-item"><span>PBS vzdump</span><span>${j.schedule}</span></div>`;
-  });
-  if (restic_next) html += `<div class="schedule-item"><span title="${restic_next.next}">Restic next</span><span>in ${restic_next.left}</span></div>`;
+  const fmtRetCell = ret => retDims
+    .filter(d => ret[d.key])
+    .map(d => `<span class="ret-k">${d.label}</span><span class="ret-v">${ret[d.key]}</span>`)
+    .join('');
 
-  if (!html) { section.style.display = 'none'; return; }
+  const pbsPruneCell  = fmtRetCell(pbsRet) || '—';
+  const resPruneCell  = fmtRetCell(resRet) || '—';
+
+  html += `<div class="sched-table">
+    <span></span><span class="sh">PBS</span><span class="sh">Restic</span>
+    <span class="sr">schedule</span><span class="sv" title="${pbsTitle}">${pbsSched}</span><span class="sv" title="${resTitle}">${resSched}</span>
+    <span class="sr">prune</span><div class="sp ret-cell">${pbsPruneCell}</div><div class="sp ret-cell">${resPruneCell}</div>
+  </div>`;
+
   section.style.display = '';
   container.innerHTML = html;
 }

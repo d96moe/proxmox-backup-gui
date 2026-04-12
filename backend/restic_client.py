@@ -396,6 +396,46 @@ class ResticClient:
             pass
         return None
 
+    def get_retention(self) -> dict:
+        """Read RESTIC_RETENTION_KEEP_* settings from config.env on PVE host."""
+        try:
+            stdout = self._ssh_run(
+                "cat /etc/proxmox-backup-restore/config.env 2>/dev/null || true",
+                timeout=10,
+            )
+            mapping = {
+                "RESTIC_RETENTION_KEEP_LAST":    "keep-last",
+                "RESTIC_RETENTION_KEEP_DAILY":   "keep-daily",
+                "RESTIC_RETENTION_KEEP_WEEKLY":  "keep-weekly",
+                "RESTIC_RETENTION_KEEP_MONTHLY": "keep-monthly",
+                "RESTIC_RETENTION_KEEP_YEARLY":  "keep-yearly",
+            }
+            result = {}
+            for line in stdout.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k in mapping and v:
+                    result[mapping[k]] = v
+            return result
+        except Exception:
+            return {}
+
+    def get_pbs_prune_jobs(self) -> list[dict]:
+        """Read PBS prune job settings via proxmox-backup-manager SSH on PVE host."""
+        try:
+            stdout = self._ssh_run(
+                "proxmox-backup-manager prune-job list --output-format json 2>/dev/null || echo '[]'",
+                timeout=10,
+            )
+            jobs = json.loads(stdout.strip() or "[]")
+            return jobs if isinstance(jobs, list) else []
+        except Exception:
+            return []
+
     def get_version(self) -> str:
         try:
             stdout = self._ssh_run("restic version", timeout=10)

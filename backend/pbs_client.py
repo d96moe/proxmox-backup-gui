@@ -136,6 +136,26 @@ class PBSClient:
         log(f"Deleted {len(sorted_snaps)} PBS snapshot(s).")
         return len(sorted_snaps)
 
+    def get_prune_jobs(self) -> list[dict]:
+        """Return prune job retention settings for this datastore."""
+        try:
+            jobs = self._get("/config/prune-jobs")
+            if not isinstance(jobs, list):
+                return []
+            keep_keys = ("keep-last", "keep-daily", "keep-weekly", "keep-monthly", "keep-yearly")
+            result = []
+            for j in jobs:
+                if j.get("store") != self._datastore:
+                    continue
+                entry = {"id": j.get("id", "")}
+                for k in keep_keys:
+                    if k in j:
+                        entry[k] = j[k]
+                result.append(entry)
+            return result
+        except Exception:
+            return []
+
     def get_versions(self) -> dict:
         """Returns PBS version string."""
         try:

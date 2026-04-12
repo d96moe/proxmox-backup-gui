@@ -544,6 +544,8 @@ def get_schedules(host_id: str):
         "pbs_running": False,
         "restic_next": None,
         "restic_running": False,
+        "pbs_retention": [],
+        "restic_retention": {},
     }
 
     try:
@@ -558,6 +560,11 @@ def get_schedules(host_id: str):
             restic = ResticClient(host)
             result["restic_next"] = restic.get_next_run()
             result["restic_running"] = restic.is_running()
+            result["restic_retention"] = restic.get_retention()
+            prune_jobs = restic.get_pbs_prune_jobs()
+            result["pbs_retention"] = [
+                j for j in prune_jobs if j.get("store") == host.pbs_datastore
+            ]
         except Exception:
             pass
 
