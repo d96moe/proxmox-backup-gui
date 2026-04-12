@@ -352,7 +352,7 @@ class ResticClient:
         ids_quoted = " ".join(shlex.quote(sid) for sid in snapshot_ids)
         log(f"Forgetting restic snapshot(s): {', '.join(s[:8] for s in snapshot_ids)}...")
         self._ssh_stream(
-            f"{self._env_prefix} restic forget {ids_quoted} --prune --verbose --json --no-lock",
+            f"{self._env_prefix} restic forget {ids_quoted} --prune --verbose --json",
             log,
             parse_json=True,
         )
