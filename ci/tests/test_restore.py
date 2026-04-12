@@ -647,7 +647,8 @@ def _find_snap(items: dict, *, local: bool, cloud: bool):
 def _restic_covers_for(host_id: str, vmid: int, pbs_time: int) -> list:
     """Return list of restic snapshot IDs that cover vmid at pbs_time."""
     try:
-        snaps = _get(f"/api/host/{host_id}/restic/snapshots")
+        body = _get(f"/api/host/{host_id}/restic/snapshots")
+        snaps = body.get("snaps", body) if isinstance(body, dict) else body
     except Exception:
         return []
     result = []
@@ -755,7 +756,8 @@ def test_seeded_local_only_has_no_restic_coverage(host_id, items):
 def test_seeded_restic_snapshot_count(host_id):
     """Seed must produce exactly 2 restic snapshots (R1 and R2)."""
     try:
-        snaps = _get(f"/api/host/{host_id}/restic/snapshots")
+        body = _get(f"/api/host/{host_id}/restic/snapshots")
+        snaps = body.get("snaps", body) if isinstance(body, dict) else body
     except Exception as e:
         pytest.skip(f"restic/snapshots endpoint error: {e}")
     assert len(snaps) == 2, (
