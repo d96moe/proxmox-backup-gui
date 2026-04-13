@@ -765,8 +765,13 @@ def _load_config(path: str = "/etc/pve-agent/config.json") -> AgentConfig:
 
 
 if __name__ == "__main__":
+    import os
     import sys
     cfg_path = sys.argv[1] if len(sys.argv) > 1 else "/etc/pve-agent/config.json"
     _cfg = _load_config(cfg_path)
-    # Bind to internal bridge only — not reachable from outside the PVE host
-    app.run(host="10.10.0.1", port=8099, threaded=True)
+    # Bind address: AGENT_BIND env overrides the default 10.10.0.1.
+    # On a nested CI VM, vmbr0 is 10.10.0.1. On a real PVE host, use the
+    # actual bridge IP (e.g. 192.168.0.200) or 0.0.0.0 for all interfaces.
+    bind_host = os.environ.get("AGENT_BIND", "10.10.0.1")
+    bind_port = int(os.environ.get("AGENT_PORT", "8099"))
+    app.run(host=bind_host, port=bind_port, threaded=True)
