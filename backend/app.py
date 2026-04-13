@@ -537,15 +537,19 @@ def get_info(host_id: str):
 
 
 def _get_items_via_agent(host: HostConfig, host_id: str):
-    """Fetch items (VMs + snapshots) from the PVE agent instead of direct API calls."""
+    """Fetch items (VMs + snapshots) from the PVE agent instead of direct API calls.
+
+    Returns the same shape as the normal /items endpoint: {vms, lxcs, storage, pbs_stale}.
+    Cloud annotation is already applied by the agent's /snapshots endpoint.
+    """
     try:
         agent = AgentClient(host.agent_url, token=host.agent_token)
-        vms = agent.get_vms()
+        pve_vms = agent.get_vms()
     except Exception as e:
         abort(500, f"Agent unavailable ({e})")
 
-    groups = []
-    for vm in vms:
+    vms, lxcs = [], []
+    for vm in pve_vms:
         vmid    = vm["vmid"]
         vm_type = "ct" if vm.get("type") == "lxc" else "vm"
         try:
@@ -553,34 +557,29 @@ def _get_items_via_agent(host: HostConfig, host_id: str):
         except Exception:
             snaps = {"pbs": [], "restic": []}
 
-        pbs_snaps = snaps.get("pbs", [])
-        res_snaps = snaps.get("restic", [])
+        # Agent's /snapshots already annotates cloud: true/false on PBS snaps
+        pbs_snaps  = snaps.get("pbs", [])
+        res_snaps  = snaps.get("restic", [])
 
-        # Annotate PBS snapshots with cloud coverage from restic tags
-        restic_pbs_times = set()
-        for s in res_snaps:
-            for tag in s.get("tags", []):
-                parts = str(tag).rsplit("-", 1)
-                if len(parts) == 2 and parts[1].isdigit():
-                    restic_pbs_times.add(int(parts[1]))
-
-        for snap in pbs_snaps:
-            snap["cloud"] = snap.get("backup_time") in restic_pbs_times
-
-        groups.append({
-            "pve_id":      vmid,
-            "name":        vm.get("name", f"{vm_type}-{vmid}"),
-            "type":        vm.get("type", "vm"),
-            "os":          vm.get("os", "linux"),
-            "status":      vm.get("status", "unknown"),
-            "template":    vm.get("template", False),
-            "backup_type": vm_type,
-            "snapshots":   pbs_snaps,
+        item = {
+            "id":        vmid,
+            "name":      vm.get("name", f"{vm_type}-{vmid}"),
+            "type":      vm.get("type", "vm"),
+            "os":        vm.get("os", "linux"),
+            "status":    vm.get("status", "unknown"),
+            "template":  vm.get("template", False),
+            "in_pve":    True,
+            "snapshots": pbs_snaps,
             "restic_snaps": res_snaps,
-        })
+        }
+        if vm.get("type") == "lxc":
+            lxcs.append(item)
+        else:
+            vms.append(item)
 
     return jsonify({
-        "groups":   groups,
+        "vms":      vms,
+        "lxcs":     lxcs,
         "storage":  {},
         "pbs_stale": False,
     })

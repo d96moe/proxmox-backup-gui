@@ -2607,7 +2607,7 @@ class TestAppAgentIntegration:
             ac.get_vms.return_value = vms
             ac.get_snapshots.return_value = {"pbs": [pbs_snap], "restic": []}
             data = json.loads(flask_client.get(f"/api/host/{HOST_ID}/items").data)
-        assert data["groups"][0]["snapshots"][0]["backup_time"] == 1700000000
+        assert data["vms"][0]["snapshots"][0]["backup_time"] == 1700000000
 
     def test_schedules_uses_agent_get_schedules(self, flask_client, agent_host):
         """GET /api/host/<id>/schedules uses agent when agent_url set."""
