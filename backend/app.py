@@ -540,49 +540,16 @@ def _get_items_via_agent(host: HostConfig, host_id: str):
     """Fetch items (VMs + snapshots) from the PVE agent instead of direct API calls.
 
     Returns the same shape as the normal /items endpoint: {vms, lxcs, storage, pbs_stale}.
-    Cloud annotation is already applied by the agent's /snapshots endpoint.
+    Uses the agent's /items endpoint: one PBS + one restic call total, including
+    cloud-only entries (restic snapshots where the PBS copy has been pruned).
     """
     try:
         agent = AgentClient(host.agent_url, token=host.agent_token)
-        pve_vms = agent.get_vms()
+        data = agent.get_items()
     except Exception as e:
         abort(500, f"Agent unavailable ({e})")
 
-    vms, lxcs = [], []
-    for vm in pve_vms:
-        vmid    = vm["vmid"]
-        vm_type = "ct" if vm.get("type") == "lxc" else "vm"
-        try:
-            snaps = agent.get_snapshots(vm_type, vmid)
-        except Exception:
-            snaps = {"pbs": [], "restic": []}
-
-        # Agent's /snapshots already annotates cloud: true/false on PBS snaps
-        pbs_snaps  = snaps.get("pbs", [])
-        res_snaps  = snaps.get("restic", [])
-
-        item = {
-            "id":        vmid,
-            "name":      vm.get("name", f"{vm_type}-{vmid}"),
-            "type":      vm.get("type", "vm"),
-            "os":        vm.get("os", "linux"),
-            "status":    vm.get("status", "unknown"),
-            "template":  vm.get("template", False),
-            "in_pve":    True,
-            "snapshots": pbs_snaps,
-            "restic_snaps": res_snaps,
-        }
-        if vm.get("type") == "lxc":
-            lxcs.append(item)
-        else:
-            vms.append(item)
-
-    return jsonify({
-        "vms":      vms,
-        "lxcs":     lxcs,
-        "storage":  {},
-        "pbs_stale": False,
-    })
+    return jsonify(data)
 
 
 @app.get("/api/host/<host_id>/schedules")

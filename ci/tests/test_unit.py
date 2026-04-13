@@ -16,6 +16,7 @@ Tests cover every change and corner case found during manual testing:
 """
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import time
@@ -1953,6 +1954,153 @@ class TestAgentSnapshots:
             resp = agent_client.get("/snapshots/invalid/101")
         assert resp.status_code == 400
 
+    def test_cloud_annotation_sets_restic_id(self, agent_client, agent_cfg):
+        """PBS snapshot covered by restic must have restic_id set."""
+        pbs_groups = [{"pve_id": 101, "backup_type": "vm", "snapshots": [
+            {"backup_time": 1700000000},
+        ]}]
+        restic_snaps = [
+            {"id": "abc123", "short_id": "abc123", "ts": 1700050000, "size_bytes": 1,
+             "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]},
+        ]
+        _, data = self._get(agent_client, agent_cfg, pbs_groups=pbs_groups,
+                            restic_snaps=restic_snaps)
+        snap = data["pbs"][0]
+        assert snap["cloud"] is True
+        assert snap["restic_id"] == "abc123"
+
+    def test_no_cloud_coverage_no_restic_id(self, agent_client, agent_cfg):
+        """PBS snapshot not covered by restic must have cloud=False and no restic_id."""
+        pbs_groups = [{"pve_id": 101, "backup_type": "vm", "snapshots": [
+            {"backup_time": 1700000000},
+        ]}]
+        _, data = self._get(agent_client, agent_cfg, pbs_groups=pbs_groups, restic_snaps=[])
+        snap = data["pbs"][0]
+        assert snap["cloud"] is False
+        assert "restic_id" not in snap
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentItems — /items endpoint (single PBS + restic call, cloud-only included)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentItems:
+
+    _PVE_VMS = {101: {"name": "vm-101", "type": "vm", "os": "linux",
+                      "status": "running", "template": False}}
+    _PBS_GROUPS = [{"pve_id": 101, "backup_type": "vm", "snapshots": [
+        {"backup_time": 1700000000, "size": "1 GiB", "incremental": False},
+    ]}]
+    _RESTIC_SNAPS = [
+        {"id": "abc123", "short_id": "abc12", "ts": 1700050000, "size_bytes": 1,
+         "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]},
+    ]
+
+    def _get(self, agent_client, agent_cfg,
+             pve_meta=None, pbs_groups=None, restic_snaps=None):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent.LocalResticClient") as res_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = copy.deepcopy(
+                pve_meta if pve_meta is not None else self._PVE_VMS
+            )
+            pbs_cls.return_value.get_snapshots.return_value = copy.deepcopy(
+                pbs_groups if pbs_groups is not None else self._PBS_GROUPS
+            )
+            res_cls.return_value.get_snapshots_flat.return_value = copy.deepcopy(
+                restic_snaps if restic_snaps is not None else self._RESTIC_SNAPS
+            )
+            resp = agent_client.get("/items")
+        return resp, json.loads(resp.data)
+
+    def test_returns_200(self, agent_client, agent_cfg):
+        resp, _ = self._get(agent_client, agent_cfg)
+        assert resp.status_code == 200
+
+    def test_response_has_expected_keys(self, agent_client, agent_cfg):
+        _, data = self._get(agent_client, agent_cfg)
+        for key in ("vms", "lxcs", "storage", "pbs_stale"):
+            assert key in data, f"missing key: {key}"
+
+    def test_vm_appears_in_vms_list(self, agent_client, agent_cfg):
+        _, data = self._get(agent_client, agent_cfg)
+        assert any(v["id"] == 101 for v in data["vms"])
+
+    def test_pbs_snapshot_has_cloud_and_restic_id(self, agent_client, agent_cfg):
+        """PBS snapshot covered by restic must have cloud=True and restic_id."""
+        _, data = self._get(agent_client, agent_cfg)
+        snap = data["vms"][0]["snapshots"][0]
+        assert snap["cloud"] is True
+        assert snap["restic_id"] == "abc123"
+
+    def test_cloud_only_snapshot_included(self, agent_client, agent_cfg):
+        """Restic snapshot covering a deleted PBS backup_time appears as cloud-only entry."""
+        # PBS only has T2; restic covers T1 (deleted) and T2
+        pbs_groups = [{"pve_id": 101, "backup_type": "vm", "snapshots": [
+            {"backup_time": 1700100000},  # T2 — still in PBS
+        ]}]
+        restic_snaps = [
+            {"id": "res1", "short_id": "res1", "ts": 1700200000, "size_bytes": 1,
+             "covers": [
+                 {"type": "vm", "vmid": 101, "pbs_time": 1700000000},  # T1 — gone
+                 {"type": "vm", "vmid": 101, "pbs_time": 1700100000},  # T2 — local
+             ]},
+        ]
+        _, data = self._get(agent_client, agent_cfg,
+                            pbs_groups=pbs_groups, restic_snaps=restic_snaps)
+        snaps = data["vms"][0]["snapshots"]
+        cloud_only = [s for s in snaps if not s.get("local") and s.get("cloud")]
+        assert len(cloud_only) == 1, f"Expected 1 cloud-only snap, got: {cloud_only}"
+        assert cloud_only[0]["backup_time"] == 1700000000
+        assert cloud_only[0]["restic_id"] == "res1"
+
+    def test_lxc_appears_in_lxcs_list(self, agent_client, agent_cfg):
+        pve_meta = {300: {"name": "lxc-300", "type": "lxc", "os": "debian",
+                          "status": "running", "template": False}}
+        pbs_groups = [{"pve_id": 300, "backup_type": "ct", "snapshots": []}]
+        _, data = self._get(agent_client, agent_cfg, pve_meta=pve_meta,
+                            pbs_groups=pbs_groups, restic_snaps=[])
+        assert any(v["id"] == 300 for v in data["lxcs"])
+
+    def test_orphan_pbs_entry_not_in_pve_has_in_pve_false(self, agent_client, agent_cfg):
+        """VM in PBS but not in PVE (ghost) should have in_pve=False."""
+        pbs_groups = [{"pve_id": 399, "backup_type": "ct", "snapshots": [
+            {"backup_time": 1700000000},
+        ]}]
+        _, data = self._get(agent_client, agent_cfg, pve_meta={},
+                            pbs_groups=pbs_groups, restic_snaps=[])
+        all_items = data["vms"] + data["lxcs"]
+        ghost = next((v for v in all_items if v["id"] == 399), None)
+        assert ghost is not None
+        assert ghost["in_pve"] is False
+
+    def test_pbs_down_returns_200_with_empty_snapshots(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.PBSClient", side_effect=Exception("pbs down")), \
+             patch("pve_agent.LocalResticClient") as res_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = self._PVE_VMS
+            res_cls.return_value.get_snapshots_flat.return_value = []
+            resp = agent_client.get("/items")
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        assert data["vms"][0]["snapshots"] == []
+
+    def test_restic_down_returns_200_local_snaps_intact(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent.LocalResticClient", side_effect=Exception("restic down")), \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = self._PVE_VMS
+            pbs_cls.return_value.get_snapshots.return_value = self._PBS_GROUPS
+            resp = agent_client.get("/items")
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        snap = data["vms"][0]["snapshots"][0]
+        assert snap["local"] is True
+        assert snap["cloud"] is False
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # TestAgentOperations — lifecycle and shape
@@ -2582,32 +2730,41 @@ class TestAppAgentIntegration:
             agent_url="http://10.10.0.1:8099",
         )
 
-    def test_items_uses_agent_get_vms(self, flask_client, agent_host):
-        """GET /api/host/<id>/items calls agent.get_vms() when agent_url is set."""
-        vms = [{"vmid": 101, "name": "vm-101", "type": "vm",
-                "status": "running", "os": "linux", "template": False}]
+    def test_items_uses_agent_get_items(self, flask_client, agent_host):
+        """GET /api/host/<id>/items calls agent.get_items() when agent_url is set."""
+        agent_items = {
+            "vms": [{"id": 101, "name": "vm-101", "type": "vm",
+                     "status": "running", "os": "linux", "template": False,
+                     "in_pve": True, "snapshots": [], "restic_snaps": []}],
+            "lxcs": [], "storage": {}, "pbs_stale": False,
+        }
         with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
              patch("app.AgentClient") as ac_cls:
             ac = ac_cls.return_value
-            ac.get_vms.return_value = vms
-            ac.get_snapshots.return_value = {"pbs": [], "restic": []}
+            ac.get_items.return_value = agent_items
             resp = flask_client.get(f"/api/host/{HOST_ID}/items")
         assert resp.status_code == 200
-        ac.get_vms.assert_called_once()
+        ac.get_items.assert_called_once()
 
-    def test_items_uses_agent_get_snapshots(self, flask_client, agent_host):
-        """items endpoint calls agent.get_snapshots() per VM."""
-        vms = [{"vmid": 101, "name": "vm-101", "type": "vm",
-                "status": "running", "os": "linux", "template": False}]
+    def test_items_agent_returns_snapshots_with_restic_id(self, flask_client, agent_host):
+        """items endpoint passes through restic_id from agent's /items response."""
         pbs_snap = {"backup_id": "101", "backup_time": 1700000000,
-                    "size": "1 GiB", "incremental": False}
+                    "size": "1 GiB", "incremental": False, "local": True,
+                    "cloud": True, "restic_id": "abc123"}
+        agent_items = {
+            "vms": [{"id": 101, "name": "vm-101", "type": "vm",
+                     "status": "running", "os": "linux", "template": False,
+                     "in_pve": True, "snapshots": [pbs_snap], "restic_snaps": []}],
+            "lxcs": [], "storage": {}, "pbs_stale": False,
+        }
         with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
              patch("app.AgentClient") as ac_cls:
             ac = ac_cls.return_value
-            ac.get_vms.return_value = vms
-            ac.get_snapshots.return_value = {"pbs": [pbs_snap], "restic": []}
+            ac.get_items.return_value = agent_items
             data = json.loads(flask_client.get(f"/api/host/{HOST_ID}/items").data)
-        assert data["vms"][0]["snapshots"][0]["backup_time"] == 1700000000
+        snap = data["vms"][0]["snapshots"][0]
+        assert snap["backup_time"] == 1700000000
+        assert snap["restic_id"] == "abc123"
 
     def test_schedules_uses_agent_get_schedules(self, flask_client, agent_host):
         """GET /api/host/<id>/schedules uses agent when agent_url set."""
@@ -2628,7 +2785,7 @@ class TestAppAgentIntegration:
         """If agent is unreachable, /items should return 500 (not hang)."""
         with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
              patch("app.AgentClient") as ac_cls:
-            ac_cls.return_value.get_vms.side_effect = Exception("connection refused")
+            ac_cls.return_value.get_items.side_effect = Exception("connection refused")
             resp = flask_client.get(f"/api/host/{HOST_ID}/items")
         assert resp.status_code == 500
 

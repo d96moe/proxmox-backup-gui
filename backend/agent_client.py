@@ -54,6 +54,14 @@ class AgentClient:
     def get_vms(self) -> list[dict]:
         return self._get("/vms")
 
+    def get_items(self) -> dict:
+        """Fetch all items (VMs + LXCs with annotated snapshots) in one call.
+
+        Returns {vms, lxcs, storage, pbs_stale} — same shape as /api/host/<id>/items.
+        Uses the agent's /items endpoint which does a single PBS + single restic call.
+        """
+        return self._get("/items")
+
     # ── Snapshots ────────────────────────────────────────────────────────────
 
     def get_snapshots(self, vm_type: str, vmid: int) -> dict:

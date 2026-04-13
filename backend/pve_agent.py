@@ -334,6 +334,170 @@ def vms():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Routes — items (full combined view: VMs + annotated snapshots + cloud-only)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/items")
+def items():
+    """Return all VMs/LXCs with PBS snapshots annotated for cloud coverage.
+
+    Single call replaces N calls to /snapshots/<type>/<vmid> — one PBS query
+    and one restic query total, then builds the full items structure including
+    cloud-only entries (restic snapshots where the PBS copy has been pruned).
+
+    Returns: {vms: [...], lxcs: [...], storage: {}, pbs_stale: false}
+    """
+    try:
+        pve = PVEClient(_host())
+        pve_meta = pve.get_vms_and_lxcs()
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    # ── PBS: all snapshot groups ──────────────────────────────────────────────
+    pbs_groups: list[dict] = []
+    try:
+        pbs = PBSClient(_host())
+        pbs_groups = pbs.get_snapshots()
+    except Exception:
+        pass  # PBS down — restic data may still work
+
+    # Build snap_map: vmid → [snap_dict]
+    snap_map: dict[int, list] = {}
+    pbs_type_map: dict[int, str] = {}  # vmid → "ct"/"vm"
+    for group in pbs_groups:
+        vid = int(group["pve_id"]) if str(group["pve_id"]).isdigit() else group["pve_id"]
+        btype = group.get("backup_type", "vm")
+        pbs_type_map[vid] = btype
+        for snap in group.get("snapshots", []):
+            snap["local"] = True
+            snap.setdefault("cloud", False)
+        snap_map.setdefault(vid, []).extend(group.get("snapshots", []))
+
+    # ── Restic: all snapshots in one call ─────────────────────────────────────
+    restic_flat: list[dict] = []
+    if _cfg and _cfg.restic_repo:
+        try:
+            res = LocalResticClient(_cfg)
+            restic_flat = res.get_snapshots_flat()  # newest first
+        except Exception:
+            pass
+
+    # Index: vmid → pbs_time → newest restic snap
+    res_by_vmid_pbstime: dict[int, dict[int, dict]] = {}
+    # Index: vmid → [restic snaps covering this vmid]
+    res_by_vmid: dict[int, list[dict]] = {}
+    for s in restic_flat:
+        for cov in s.get("covers", []):
+            vid = cov.get("vmid")
+            pt = cov.get("pbs_time")
+            if vid is None:
+                continue
+            res_by_vmid.setdefault(vid, []).append(s)
+            if pt is not None:
+                # setdefault: first wins (newest-first list → newest wins)
+                res_by_vmid_pbstime.setdefault(vid, {}).setdefault(pt, s)
+
+    # ── Annotate PBS snapshots with cloud coverage ────────────────────────────
+    pbs_times_per_vm: dict[int, set[int]] = {}
+    for vid, snaps in snap_map.items():
+        local_times: set[int] = set()
+        for snap in snaps:
+            bt = snap.get("backup_time")
+            local_times.add(bt)
+            rs = res_by_vmid_pbstime.get(vid, {}).get(bt)
+            if rs:
+                snap["cloud"] = True
+                snap["restic_id"] = rs["id"]
+                snap["restic_short_id"] = rs.get("short_id", rs["id"][:8])
+        pbs_times_per_vm[vid] = local_times
+
+    # ── Cloud-only entries: restic covers a pbs_time no longer in PBS ─────────
+    added_cloud: set[tuple] = set()  # (vid, pbs_time)
+    now_ts = time.time()
+    for vid, r_snaps in res_by_vmid.items():
+        local_times = pbs_times_per_vm.get(vid, set())
+        for s in r_snaps:  # newest first
+            for cov in s.get("covers", []):
+                if cov.get("vmid") != vid:
+                    continue
+                pt = cov.get("pbs_time")
+                if pt is None or pt in local_times:
+                    continue
+                key = (vid, pt)
+                if key in added_cloud:
+                    continue
+                added_cloud.add(key)
+                dt = datetime.fromtimestamp(pt, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                snap_map.setdefault(vid, []).append({
+                    "backup_time": pt,
+                    "date": dt,
+                    "local": False,
+                    "cloud": True,
+                    "incremental": True,
+                    "size": "—",
+                    "restic_id": s["id"],
+                    "restic_short_id": s.get("short_id", s["id"][:8]),
+                })
+
+    # ── Sort snapshots newest-first, attach age ───────────────────────────────
+    for snaps in snap_map.values():
+        snaps.sort(key=lambda s: s["backup_time"], reverse=True)
+        for snap in snaps:
+            age_secs = now_ts - snap["backup_time"]
+            snap["age"] = _human_age(age_secs)
+
+    # ── Build final item lists ────────────────────────────────────────────────
+    vms_list: list[dict] = []
+    lxcs_list: list[dict] = []
+    all_vmids = set(pve_meta.keys()) | set(snap_map.keys())
+
+    for vid in sorted(all_vmids):
+        _pbs_btype = pbs_type_map.get(vid, "vm")
+        _orphan_type = "lxc" if _pbs_btype == "ct" else "vm"
+        meta = pve_meta.get(vid, {
+            "name": f"id-{vid}", "type": _orphan_type,
+            "os": "linux", "status": "unknown",
+        })
+        item = {
+            "id":        vid,
+            "name":      meta.get("name", f"id-{vid}"),
+            "type":      meta.get("type", _orphan_type),
+            "os":        meta.get("os", "linux"),
+            "status":    meta.get("status", "unknown"),
+            "template":  meta.get("template", False),
+            "in_pve":    vid in pve_meta,
+            "snapshots": snap_map.get(vid, []),
+            "restic_snaps": res_by_vmid.get(vid, []),
+        }
+        vm_type = meta.get("type", _orphan_type)
+        if vm_type == "lxc":
+            lxcs_list.append(item)
+        else:
+            vms_list.append(item)
+
+    return jsonify({
+        "vms":      vms_list,
+        "lxcs":     lxcs_list,
+        "storage":  {},
+        "pbs_stale": False,
+    })
+
+
+def _human_age(secs: float) -> str:
+    """Human-readable age string (e.g. '2h 15m', '3d')."""
+    if secs < 0:
+        return "0m"
+    m = int(secs // 60)
+    h = m // 60
+    d = h // 24
+    if d:
+        return f"{d}d {h % 24}h" if h % 24 else f"{d}d"
+    if h:
+        return f"{h}h {m % 60}m" if m % 60 else f"{h}h"
+    return f"{m}m"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Routes — snapshots
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -377,9 +541,22 @@ def snapshots(vm_type: str, vmid: int):
     except Exception:
         pass
 
-    # Annotate PBS snapshots with cloud coverage
+    # Annotate PBS snapshots with cloud coverage + restic_id
+    # Build pbs_time → newest restic snap (flat is already newest-first)
+    restic_by_pbs_time: dict[int, dict] = {}
+    for s in restic_result:
+        for c in s.get("covers", []):
+            pt = c.get("pbs_time")
+            if pt is not None and str(c.get("vmid")) == vmid_str:
+                restic_by_pbs_time.setdefault(pt, s)  # first wins (newest)
+
     for snap in pbs_result:
-        snap["cloud"] = snap.get("backup_time") in restic_pbs_times
+        bt = snap.get("backup_time")
+        rs = restic_by_pbs_time.get(bt)
+        snap["cloud"] = rs is not None
+        if rs:
+            snap["restic_id"] = rs["id"]
+            snap["restic_short_id"] = rs.get("short_id", rs["id"][:8])
 
     return jsonify({"pbs": pbs_result, "restic": restic_result})
 
