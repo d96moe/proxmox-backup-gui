@@ -21,6 +21,7 @@ from config import load_hosts, HostConfig
 from pbs_client import PBSClient
 from restic_client import ResticClient
 from pve_client import PVEClient
+from agent_client import AgentClient
 from jobs import create_job, get_job, get_active_jobs, run_job
 
 
@@ -177,6 +178,9 @@ def get_items(host_id: str):
     host = HOSTS.get(host_id)
     if not host:
         abort(404, f"Host '{host_id}' not configured")
+
+    if host.agent_url:
+        return _get_items_via_agent(host, host_id)
 
     def fetch():
         try:
@@ -532,12 +536,73 @@ def get_info(host_id: str):
     return jsonify(_cached(f"info:{host_id}", fetch))
 
 
+def _get_items_via_agent(host: HostConfig, host_id: str):
+    """Fetch items (VMs + snapshots) from the PVE agent instead of direct API calls."""
+    try:
+        agent = AgentClient(host.agent_url)
+        vms = agent.get_vms()
+    except Exception as e:
+        abort(500, f"Agent unavailable ({e})")
+
+    groups = []
+    for vm in vms:
+        vmid    = vm["vmid"]
+        vm_type = "ct" if vm.get("type") == "lxc" else "vm"
+        try:
+            snaps = agent.get_snapshots(vm_type, vmid)
+        except Exception:
+            snaps = {"pbs": [], "restic": []}
+
+        pbs_snaps = snaps.get("pbs", [])
+        res_snaps = snaps.get("restic", [])
+
+        # Annotate PBS snapshots with cloud coverage from restic tags
+        restic_pbs_times = set()
+        for s in res_snaps:
+            for tag in s.get("tags", []):
+                parts = str(tag).rsplit("-", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    restic_pbs_times.add(int(parts[1]))
+
+        for snap in pbs_snaps:
+            snap["cloud"] = snap.get("backup_time") in restic_pbs_times
+
+        groups.append({
+            "pve_id":      vmid,
+            "name":        vm.get("name", f"{vm_type}-{vmid}"),
+            "type":        vm.get("type", "vm"),
+            "os":          vm.get("os", "linux"),
+            "status":      vm.get("status", "unknown"),
+            "template":    vm.get("template", False),
+            "backup_type": vm_type,
+            "snapshots":   pbs_snaps,
+            "restic_snaps": res_snaps,
+        })
+
+    return jsonify({
+        "groups":   groups,
+        "storage":  {},
+        "pbs_stale": False,
+    })
+
+
 @app.get("/api/host/<host_id>/schedules")
 def get_schedules(host_id: str):
     """Return next scheduled PBS (vzdump) and restic backup times for the host."""
     host = HOSTS.get(host_id)
     if not host:
         abort(404)
+
+    if host.agent_url:
+        try:
+            return jsonify(AgentClient(host.agent_url).get_schedules())
+        except Exception:
+            pass
+        return jsonify({
+            "pbs_jobs": [], "pbs_running": False,
+            "restic_next": None, "restic_running": False,
+            "pbs_retention": [], "restic_retention": {},
+        })
 
     result: dict = {
         "pbs_jobs": [],
