@@ -1818,7 +1818,7 @@ class TestAgentSnapshots:
     def _get(self, agent_client, agent_cfg, vm_type="vm", vmid=101,
              pbs_groups=None, restic_snaps=None):
         with patch("pve_agent.PBSClient") as pbs_cls, \
-             patch("pve_agent.ResticClient") as res_cls, \
+             patch("pve_agent.LocalResticClient") as res_cls, \
              patch("pve_agent._cfg", agent_cfg):
             pbs_cls.return_value.get_snapshots.return_value = (
                 pbs_groups if pbs_groups is not None else self._PBS_GROUPS
@@ -1872,7 +1872,7 @@ class TestAgentSnapshots:
         restic = [{"id": "aaa", "ts": 1700000000, "size_bytes": 1,
                    "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]}]
         with patch("pve_agent.PBSClient", side_effect=Exception("pbs down")), \
-             patch("pve_agent.ResticClient") as res_cls, \
+             patch("pve_agent.LocalResticClient") as res_cls, \
              patch("pve_agent._cfg", agent_cfg):
             res_cls.return_value.get_snapshots_flat.return_value = restic
             resp = agent_client.get("/snapshots/vm/101")
@@ -2101,7 +2101,7 @@ class TestAgentSchedules:
              restic_next=None, restic_running=False,
              restic_retention=None, pbs_prune_jobs=None):
         with patch("pve_agent.PVEClient") as pve_cls, \
-             patch("pve_agent.ResticClient") as res_cls, \
+             patch("pve_agent.LocalResticClient") as res_cls, \
              patch("pve_agent._cfg", agent_cfg):
             pve_m = pve_cls.return_value
             res_m = res_cls.return_value
@@ -2149,7 +2149,7 @@ class TestAgentSchedules:
 
     def test_pve_down_returns_200_with_empty_pbs(self, agent_client, agent_cfg):
         with patch("pve_agent.PVEClient", side_effect=Exception("pve down")), \
-             patch("pve_agent.ResticClient") as res_cls, \
+             patch("pve_agent.LocalResticClient") as res_cls, \
              patch("pve_agent._cfg", agent_cfg):
             res_cls.return_value.get_next_run.return_value = None
             res_cls.return_value.is_running.return_value = False
@@ -2161,7 +2161,7 @@ class TestAgentSchedules:
 
     def test_restic_down_returns_200(self, agent_client, agent_cfg):
         with patch("pve_agent.PVEClient") as pve_cls, \
-             patch("pve_agent.ResticClient", side_effect=Exception("restic down")), \
+             patch("pve_agent.LocalResticClient", side_effect=Exception("restic down")), \
              patch("pve_agent._cfg", agent_cfg):
             pve_cls.return_value.get_backup_schedules.return_value = []
             pve_cls.return_value.is_backup_running.return_value = False

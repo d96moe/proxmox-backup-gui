@@ -13,11 +13,13 @@ Bind to 10.10.0.1:8099 so only LXC containers on vmbr0 can reach it.
 from __future__ import annotations
 
 import json
+import re
+import subprocess
 import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -25,7 +27,6 @@ from flask import Flask, Response, jsonify, request, stream_with_context
 # Re-use existing client code — agent runs on PVE host alongside them.
 from pbs_client import PBSClient
 from pve_client import PVEClient
-from restic_client import ResticClient
 
 VERSION = "0.1.0"
 _start_time = time.monotonic()
@@ -85,6 +86,141 @@ def _host():
     if _cfg is None:
         raise RuntimeError("Agent not configured — set pve_agent._cfg")
     return _cfg.to_host_config()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LocalResticClient — subprocess-based, no SSH (agent runs on PVE host)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LocalResticClient:
+    """Run restic and related commands directly via subprocess — no SSH."""
+
+    def __init__(self, cfg: AgentConfig) -> None:
+        self._repo = cfg.restic_repo
+        self._env = {
+            "RESTIC_REPOSITORY": cfg.restic_repo,
+            "RESTIC_PASSWORD": cfg.restic_password,
+            "RESTIC_PROGRESS_FPS": "0.5",
+            "RCLONE_DRIVE_USE_TRASH": "false",
+            **cfg.restic_env,
+        }
+        # Merge with minimal OS environment for PATH resolution
+        import os
+        self._full_env = {**os.environ, **self._env}
+
+    def _run(self, cmd: list[str], timeout: int = 120) -> str:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True,
+            timeout=timeout, env=self._full_env,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"{cmd[0]} failed: {result.stderr.strip()}")
+        return result.stdout
+
+    def get_snapshots_flat(self) -> list[dict]:
+        """Returns all restic snapshots as a flat list, newest first.
+
+        Each entry: { id, short_id, ts, size_bytes, covers: [{type, vmid, pbs_time}] }
+        """
+        raw = json.loads(self._run(["restic", "snapshots", "--json", "--no-lock"]))
+        result = []
+        for snap in raw:
+            tags = snap.get("tags") or []
+            dt = datetime.fromisoformat(snap["time"].replace("Z", "+00:00"))
+            ts = int(dt.timestamp())
+            snap_id = snap.get("id", "")
+            short_id = snap.get("short_id", snap_id[:8] if snap_id else "")
+            summary = snap.get("summary", {})
+            size_bytes = summary.get("data_added_packed", summary.get("data_added", 0))
+
+            covers: list[dict] = []
+            seen: set[tuple] = set()
+            for t in tags:
+                m = re.match(r'^(vm|ct)-(\d+)-(\d+)$', t)
+                if m:
+                    key = (m.group(1), int(m.group(2)), int(m.group(3)))
+                    if key not in seen:
+                        seen.add(key)
+                        covers.append({"type": key[0], "vmid": key[1], "pbs_time": key[2]})
+                    continue
+                for prefix in ("vm-", "ct-"):
+                    if t.startswith(prefix) and t[len(prefix):].isdigit():
+                        key = (prefix[:-1], int(t[len(prefix):]), None)
+                        if key not in seen:
+                            seen.add(key)
+                            covers.append({"type": key[0], "vmid": key[1], "pbs_time": None})
+
+            result.append({
+                "id": snap_id, "short_id": short_id,
+                "ts": ts, "size_bytes": size_bytes, "covers": covers,
+            })
+        return sorted(result, key=lambda x: x["ts"], reverse=True)
+
+    def get_next_run(self) -> dict | None:
+        """Return next scheduled run of the restic systemd timer."""
+        try:
+            stdout = self._run(
+                ["systemctl", "list-timers", "--no-pager"], timeout=10
+            )
+            for line in stdout.splitlines():
+                if "restic" in line.lower():
+                    tokens = line.split()
+                    if len(tokens) >= 5:
+                        next_at = " ".join(tokens[:4])
+                        left = tokens[4]
+                        return {"next": next_at, "left": left}
+        except Exception:
+            pass
+        return None
+
+    def is_running(self) -> bool:
+        """Return True if a restic process is currently running."""
+        try:
+            result = subprocess.run(
+                ["pgrep", "-x", "restic"],
+                capture_output=True, timeout=5,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    def get_retention(self) -> dict:
+        """Read RESTIC_RETENTION_KEEP_* settings from config.env."""
+        try:
+            with open("/etc/proxmox-backup-restore/config.env") as f:
+                content = f.read()
+        except OSError:
+            return {}
+        mapping = {
+            "RESTIC_RETENTION_KEEP_LAST":    "keep-last",
+            "RESTIC_RETENTION_KEEP_DAILY":   "keep-daily",
+            "RESTIC_RETENTION_KEEP_WEEKLY":  "keep-weekly",
+            "RESTIC_RETENTION_KEEP_MONTHLY": "keep-monthly",
+            "RESTIC_RETENTION_KEEP_YEARLY":  "keep-yearly",
+        }
+        result = {}
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip().strip('"').strip("'")
+            if k in mapping and v:
+                result[mapping[k]] = v
+        return result
+
+    def get_pbs_prune_jobs(self) -> list[dict]:
+        """Read PBS prune job settings via proxmox-backup-manager."""
+        try:
+            stdout = self._run(
+                ["proxmox-backup-manager", "prune-job", "list", "--output-format", "json"],
+                timeout=10,
+            )
+            jobs = json.loads(stdout.strip() or "[]")
+            return jobs if isinstance(jobs, list) else []
+        except Exception:
+            return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -216,7 +352,7 @@ def snapshots(vm_type: str, vmid: int):
     restic_result = []
     restic_pbs_times: set[int] = set()
     try:
-        res = ResticClient(_host())
+        res = LocalResticClient(_cfg)
         flat = res.get_snapshots_flat()
         for s in flat:
             covers = s.get("covers", [])
@@ -407,7 +543,7 @@ def schedules():
 
     try:
         cfg = _cfg
-        res = ResticClient(_host())
+        res = LocalResticClient(_cfg)
         result["restic_next"]      = res.get_next_run()
         result["restic_running"]   = res.is_running()
         result["restic_retention"] = res.get_retention()
