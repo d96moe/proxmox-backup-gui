@@ -16,10 +16,12 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 class AgentClient:
-    def __init__(self, base_url: str, timeout: int = 30) -> None:
+    def __init__(self, base_url: str, token: str = "", timeout: int = 30) -> None:
         self._base = base_url.rstrip("/")
         self._timeout = timeout
         self._session = requests.Session()
+        if token:
+            self._session.headers["Authorization"] = f"Bearer {token}"
 
     def _url(self, path: str) -> str:
         return f"{self._base}/{path.lstrip('/')}"

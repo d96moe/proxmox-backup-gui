@@ -539,7 +539,7 @@ def get_info(host_id: str):
 def _get_items_via_agent(host: HostConfig, host_id: str):
     """Fetch items (VMs + snapshots) from the PVE agent instead of direct API calls."""
     try:
-        agent = AgentClient(host.agent_url)
+        agent = AgentClient(host.agent_url, token=host.agent_token)
         vms = agent.get_vms()
     except Exception as e:
         abort(500, f"Agent unavailable ({e})")
@@ -595,7 +595,7 @@ def get_schedules(host_id: str):
 
     if host.agent_url:
         try:
-            return jsonify(AgentClient(host.agent_url).get_schedules())
+            return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_schedules())
         except Exception:
             pass
         return jsonify({
@@ -656,7 +656,7 @@ def backup_pbs(host_id: str):
     # Agent path — delegate backup to pve_agent running on PVE host.
     # run_restic_after is not supported via agent (agent does not run restic).
     if host.agent_url and not run_restic_after:
-        agent = AgentClient(host.agent_url)
+        agent = AgentClient(host.agent_url, token=host.agent_token)
         label = f"PBS backup {vm_type}/{vmid}"
         job_id = create_job(label)
 
@@ -746,7 +746,7 @@ def restore(host_id: str):
     if host.agent_url and source == "local":
         if not backup_time:
             abort(400, "backup_time required for local restore")
-        agent = AgentClient(host.agent_url)
+        agent = AgentClient(host.agent_url, token=host.agent_token)
         job_id = create_job(f"Restore {vm_type}/{vmid} from local")
         backup_time_iso = datetime.fromtimestamp(int(backup_time), tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"

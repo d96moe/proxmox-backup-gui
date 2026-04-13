@@ -33,6 +33,17 @@ _start_time = time.monotonic()
 
 app = Flask(__name__)
 
+
+@app.before_request
+def _check_auth():
+    """Require Bearer token when agent_token is configured."""
+    if not _cfg or not _cfg.agent_token:
+        return  # open — no token configured
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {_cfg.agent_token}":
+        return jsonify({"error": "Unauthorized"}), 401
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
@@ -53,6 +64,7 @@ class AgentConfig:
     restic_password: str
     verify_ssl: bool = False
     restic_env: dict = field(default_factory=dict)
+    agent_token: str = ""        # if set, all requests must present "Authorization: Bearer <token>"
 
     def to_host_config(self):
         """Return a HostConfig-compatible object for existing clients."""

@@ -288,6 +288,7 @@ cfg = {
     'restic_repo':        '',
     'restic_password':    '',
     'verify_ssl':         False,
+    'agent_token':        c['pbs_password'],
 }
 open('/etc/pve-agent/config.json', 'w').write(json.dumps(cfg, indent=2))
 BUILDCFG
@@ -343,14 +344,16 @@ DEPLOY_AGENT
                         pct push 300 /tmp/gui-update/index.html \
                             /opt/proxmox-backup-gui/frontend/index.html
 
-                        # Wire up agent_url in hosts.json so the Flask backend delegates
-                        # backup/restore to the agent running on the PVE host.
+                        # Wire up agent_url + agent_token in hosts.json so the Flask
+                        # backend can authenticate to the agent. The token matches
+                        # the pbs_password already in hosts.json (reused as shared secret).
                         pct exec 300 -- python3 -c "
 import json
 with open('/opt/proxmox-backup-gui/backend/hosts.json') as f: h=json.load(f)
-h[0]['agent_url'] = 'http://10.10.0.1:8099'
+h[0]['agent_url']   = 'http://10.10.0.1:8099'
+h[0]['agent_token'] = h[0].get('pbs_password', '')
 open('/opt/proxmox-backup-gui/backend/hosts.json','w').write(json.dumps(h))
-print('hosts.json: agent_url set to http://10.10.0.1:8099')
+print('hosts.json: agent_url and agent_token configured')
 "
                         pct exec 300 -- systemctl restart proxmox-backup-gui
                         sleep 3

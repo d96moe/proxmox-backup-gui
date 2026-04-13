@@ -1741,6 +1741,69 @@ class TestAgentHealth:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TestAgentAuth — bearer token protection
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentAuth:
+
+    @pytest.fixture
+    def cfg_with_token(self):
+        from pve_agent import AgentConfig
+        return AgentConfig(
+            pve_url="https://10.10.0.1:8006", pve_user="root@pam", pve_password="x",
+            pbs_url="https://10.10.0.1:8007", pbs_user="backup@pbs", pbs_password="x",
+            pbs_datastore="ci-pbs", pbs_storage_id="pbs-local",
+            pbs_datastore_path="/mnt/ci-pbs", pve_ssh_host="",
+            restic_repo="", restic_password="",
+            agent_token="supersecret",
+        )
+
+    def test_no_token_configured_allows_all(self, agent_client, agent_cfg):
+        """When agent_token is empty, no auth required."""
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.get("/health")
+        assert resp.status_code == 200
+
+    def test_token_configured_missing_header_returns_401(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/health")
+        assert resp.status_code == 401
+
+    def test_token_configured_wrong_token_returns_401(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/health",
+                                    headers={"Authorization": "Bearer wrongtoken"})
+        assert resp.status_code == 401
+
+    def test_token_configured_correct_token_returns_200(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/health",
+                                    headers={"Authorization": "Bearer supersecret"})
+        assert resp.status_code == 200
+
+    def test_token_required_on_vms(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token), \
+             patch("pve_agent.PVEClient"):
+            resp = agent_client.get("/vms")
+        assert resp.status_code == 401
+
+    def test_token_required_on_snapshots(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/snapshots/vm/101")
+        assert resp.status_code == 401
+
+    def test_token_required_on_operations(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/operations")
+        assert resp.status_code == 401
+
+    def test_token_required_on_schedules(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/schedules")
+        assert resp.status_code == 401
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # TestAgentVMs
 # ─────────────────────────────────────────────────────────────────────────────
 
