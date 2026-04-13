@@ -1802,24 +1802,26 @@ class TestAgentVMs:
 
 class TestAgentSnapshots:
 
-    _PBS_SNAPS = [
-        {"backup_type": "vm", "backup_id": "101", "backup_time": 1700000000,
-         "size": "1.2 GiB", "incremental": False},
-        {"backup_type": "vm", "backup_id": "101", "backup_time": 1700100000,
-         "size": "200 MiB", "incremental": True},
+    # get_snapshots() returns grouped: [{pve_id, backup_type, snapshots:[...]}]
+    _PBS_GROUPS = [
+        {"pve_id": 101, "backup_type": "vm", "snapshots": [
+            {"backup_time": 1700000000, "size": "1.2 GiB", "incremental": False},
+            {"backup_time": 1700100000, "size": "200 MiB", "incremental": True},
+        ]},
     ]
+    # get_snapshots_flat() returns {id, ts, size_bytes, covers:[{type,vmid,pbs_time}]}
     _RESTIC_SNAPS = [
-        {"id": "abc123", "time": "2023-11-14T12:00:00Z",
-         "tags": ["vm-101-1700000000"], "size_bytes": 900_000_000},
+        {"id": "abc123", "ts": 1700050000, "size_bytes": 900_000_000,
+         "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]},
     ]
 
     def _get(self, agent_client, agent_cfg, vm_type="vm", vmid=101,
-             pbs_snaps=None, restic_snaps=None):
+             pbs_groups=None, restic_snaps=None):
         with patch("pve_agent.PBSClient") as pbs_cls, \
              patch("pve_agent.ResticClient") as res_cls, \
              patch("pve_agent._cfg", agent_cfg):
             pbs_cls.return_value.get_snapshots.return_value = (
-                pbs_snaps if pbs_snaps is not None else self._PBS_SNAPS
+                pbs_groups if pbs_groups is not None else self._PBS_GROUPS
             )
             res_snaps = restic_snaps if restic_snaps is not None else self._RESTIC_SNAPS
             res_cls.return_value.get_snapshots_flat.return_value = res_snaps
@@ -1835,32 +1837,44 @@ class TestAgentSnapshots:
         assert "pbs" in data and "restic" in data
 
     def test_pbs_filtered_to_vmid(self, agent_client, agent_cfg):
-        pbs_all = [
-            {"backup_type": "vm", "backup_id": "101", "backup_time": 1700000000},
-            {"backup_type": "vm", "backup_id": "202", "backup_time": 1700000001},
+        # grouped structure: only group with pve_id=101 should be returned
+        pbs_groups = [
+            {"pve_id": 101, "backup_type": "vm", "snapshots": [
+                {"backup_time": 1700000000},
+            ]},
+            {"pve_id": 202, "backup_type": "vm", "snapshots": [
+                {"backup_time": 1700000001},
+            ]},
         ]
-        _, data = self._get(agent_client, agent_cfg, vmid=101, pbs_snaps=pbs_all)
-        assert all(s["backup_id"] == "101" for s in data["pbs"])
+        _, data = self._get(agent_client, agent_cfg, vmid=101, pbs_groups=pbs_groups)
         assert len(data["pbs"]) == 1
+        assert data["pbs"][0]["backup_time"] == 1700000000
 
     def test_restic_filtered_to_vmid(self, agent_client, agent_cfg):
         restic_all = [
-            {"id": "aaa", "tags": ["vm-101-1700000000"], "time": "2023-11-14T00:00:00Z"},
-            {"id": "bbb", "tags": ["vm-202-1700000001"], "time": "2023-11-14T00:01:00Z"},
+            {"id": "aaa", "ts": 1700000000, "size_bytes": 1,
+             "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]},
+            {"id": "bbb", "ts": 1700000001, "size_bytes": 1,
+             "covers": [{"type": "vm", "vmid": 202, "pbs_time": 1700000001}]},
         ]
         _, data = self._get(agent_client, agent_cfg, vmid=101, restic_snaps=restic_all)
-        assert all("101" in str(s.get("tags", [])) for s in data["restic"])
+        assert all(
+            any(c.get("vmid") == 101 for c in s.get("covers", []))
+            for s in data["restic"]
+        )
         assert len(data["restic"]) == 1
 
     def test_no_snapshots_returns_empty_lists(self, agent_client, agent_cfg):
-        _, data = self._get(agent_client, agent_cfg, pbs_snaps=[], restic_snaps=[])
+        _, data = self._get(agent_client, agent_cfg, pbs_groups=[], restic_snaps=[])
         assert data["pbs"] == [] and data["restic"] == []
 
     def test_pbs_down_restic_still_returned(self, agent_client, agent_cfg):
+        restic = [{"id": "aaa", "ts": 1700000000, "size_bytes": 1,
+                   "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]}]
         with patch("pve_agent.PBSClient", side_effect=Exception("pbs down")), \
              patch("pve_agent.ResticClient") as res_cls, \
              patch("pve_agent._cfg", agent_cfg):
-            res_cls.return_value.get_snapshots_flat.return_value = self._RESTIC_SNAPS
+            res_cls.return_value.get_snapshots_flat.return_value = restic
             resp = agent_client.get("/snapshots/vm/101")
         assert resp.status_code == 200
         data = json.loads(resp.data)
@@ -1868,7 +1882,7 @@ class TestAgentSnapshots:
 
     def test_lxc_type_accepted(self, agent_client, agent_cfg):
         resp, _ = self._get(agent_client, agent_cfg, vm_type="ct", vmid=300,
-                            pbs_snaps=[], restic_snaps=[])
+                            pbs_groups=[], restic_snaps=[])
         assert resp.status_code == 200
 
     def test_invalid_type_returns_400(self, agent_client, agent_cfg):

@@ -198,27 +198,40 @@ def snapshots(vm_type: str, vmid: int):
         return jsonify({"error": f"Invalid vm_type '{vm_type}' — use vm or ct"}), 400
 
     vmid_str = str(vmid)
-    # PBS — filter by backup_id matching vmid
+    # PBS — get_snapshots() returns [{pve_id, backup_type, snapshots:[...]}]
+    # Find the group for this vmid, return its snapshots list.
     pbs_result = []
     try:
         pbs = PBSClient(_host())
-        all_snaps = pbs.get_snapshots()
-        pbs_result = [s for s in all_snaps if str(s.get("backup_id")) == vmid_str]
+        groups = pbs.get_snapshots()
+        for group in groups:
+            if str(group.get("pve_id")) == vmid_str:
+                pbs_result = group.get("snapshots", [])
+                break
     except Exception:
         pass  # PBS down — return empty, restic may still work
 
-    # Restic — filter by tag containing vmid
+    # Restic — get_snapshots_flat() returns {id, ts, size_bytes, covers:[{type,vmid,pbs_time}]}
+    # Filter snapshots that cover this vmid; also collect which pbs_times are covered.
     restic_result = []
+    restic_pbs_times: set[int] = set()
     try:
-        host = _host()
-        res = ResticClient(host)
+        res = ResticClient(_host())
         flat = res.get_snapshots_flat()
-        restic_result = [
-            s for s in flat
-            if any(vmid_str in str(tag) for tag in s.get("tags", []))
-        ]
+        for s in flat:
+            covers = s.get("covers", [])
+            vm_covers = [c for c in covers if str(c.get("vmid")) == vmid_str]
+            if vm_covers:
+                restic_result.append(s)
+                for c in vm_covers:
+                    if c.get("pbs_time") is not None:
+                        restic_pbs_times.add(c["pbs_time"])
     except Exception:
         pass
+
+    # Annotate PBS snapshots with cloud coverage
+    for snap in pbs_result:
+        snap["cloud"] = snap.get("backup_time") in restic_pbs_times
 
     return jsonify({"pbs": pbs_result, "restic": restic_result})
 
