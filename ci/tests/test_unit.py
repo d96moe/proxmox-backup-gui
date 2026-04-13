@@ -22,7 +22,7 @@ import time
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch, call
+from unittest.mock import ANY, MagicMock, Mock, patch, call
 
 import pytest
 import requests
@@ -2574,3 +2574,65 @@ class TestAppAgentIntegration:
         with _mock_clients(mock_host, pbs_snaps=[], pve_meta={}, restic_by_vm={}) as (_, pve_m, _):
             flask_client.get(f"/api/host/{HOST_ID}/items")
         pve_m.get_vms_and_lxcs.assert_called_once()
+
+    def _backup_via_agent(self, flask_client, agent_host, vmid=101, vm_type="vm"):
+        with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
+             patch("app.AgentClient") as ac_cls, \
+             patch("app.PVEClient") as pve_cls:
+            pve_cls.return_value.get_nodes.return_value = ["pve"]
+            ac = ac_cls.return_value
+            ac.backup.return_value = "op-abc"
+            ac.wait_for_op.return_value = True
+            resp = flask_client.post(f"/api/host/{HOST_ID}/backup/pbs",
+                                     json={"vmid": vmid, "type": vm_type})
+        return resp, ac
+
+    def test_backup_pbs_uses_agent_when_agent_url_set(self, flask_client, agent_host):
+        resp, ac = self._backup_via_agent(flask_client, agent_host)
+        assert resp.status_code == 200
+        assert "job_id" in json.loads(resp.data)
+
+    def test_backup_pbs_calls_agent_backup(self, flask_client, agent_host):
+        _, ac = self._backup_via_agent(flask_client, agent_host, vmid=101, vm_type="vm")
+        # Give the background job time to run
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not ac.backup.called:
+            time.sleep(0.05)
+        ac.backup.assert_called_once_with(101, "vm", "pve", agent_host.pbs_storage_id)
+
+    def test_backup_pbs_agent_wait_called(self, flask_client, agent_host):
+        _, ac = self._backup_via_agent(flask_client, agent_host)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not ac.wait_for_op.called:
+            time.sleep(0.05)
+        ac.wait_for_op.assert_called_once_with("op-abc", ANY)
+
+    def _restore_via_agent(self, flask_client, agent_host, vmid=101, vm_type="ct",
+                           backup_time=1700000000):
+        with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
+             patch("app.AgentClient") as ac_cls, \
+             patch("app.PVEClient") as pve_cls:
+            pve_cls.return_value.get_nodes.return_value = ["pve"]
+            ac = ac_cls.return_value
+            ac.restore.return_value = "op-xyz"
+            ac.wait_for_op.return_value = True
+            resp = flask_client.post(f"/api/host/{HOST_ID}/restore",
+                                     json={"vmid": vmid, "type": vm_type,
+                                           "backup_time": backup_time, "source": "local"})
+        return resp, ac
+
+    def test_restore_local_uses_agent_when_agent_url_set(self, flask_client, agent_host):
+        resp, _ = self._restore_via_agent(flask_client, agent_host)
+        assert resp.status_code == 200
+        assert "job_id" in json.loads(resp.data)
+
+    def test_restore_local_calls_agent_restore(self, flask_client, agent_host):
+        _, ac = self._restore_via_agent(flask_client, agent_host, vmid=301,
+                                        backup_time=1700000000)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not ac.restore.called:
+            time.sleep(0.05)
+        assert ac.restore.called
+        args = ac.restore.call_args[0]
+        assert args[0] == 301           # vmid
+        assert args[2] == "pve"         # node

@@ -653,6 +653,27 @@ def backup_pbs(host_id: str):
     if not vmid:
         abort(400, "vmid required")
 
+    # Agent path — delegate backup to pve_agent running on PVE host.
+    # run_restic_after is not supported via agent (agent does not run restic).
+    if host.agent_url and not run_restic_after:
+        agent = AgentClient(host.agent_url)
+        label = f"PBS backup {vm_type}/{vmid}"
+        job_id = create_job(label)
+
+        def _agent_backup_work(log, _vmid=vmid, _vm_type=vm_type):
+            pve = PVEClient(host)
+            node = pve.get_nodes()[0]
+            log(f"Step 1/2 — Triggering PBS backup: {_vm_type}/{_vmid} on node {node}")
+            op_id = agent.backup(_vmid, _vm_type, node, host.pbs_storage_id)
+            log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
+            ok = agent.wait_for_op(op_id, log)
+            if not ok:
+                raise RuntimeError("Agent backup failed")
+            _cache.pop(f"items:{host_id}", None)
+
+        run_job(job_id, _agent_backup_work)
+        return jsonify({"job_id": job_id})
+
     if run_restic_after and host.restic_repo:
         restic_lock = _get_restic_lock(host_id)
         if not restic_lock.acquire(blocking=False):
@@ -720,6 +741,32 @@ def restore(host_id: str):
 
     if not vmid:
         abort(400, "vmid required")
+
+    # Agent path — delegate local PBS restore to pve_agent running on PVE host.
+    if host.agent_url and source == "local":
+        if not backup_time:
+            abort(400, "backup_time required for local restore")
+        agent = AgentClient(host.agent_url)
+        job_id = create_job(f"Restore {vm_type}/{vmid} from local")
+        backup_time_iso = datetime.fromtimestamp(int(backup_time), tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+        def _agent_restore_work(log, _vmid=vmid, _vm_type=vm_type,
+                                _btime=backup_time_iso):
+            pve = PVEClient(host)
+            node = pve.get_nodes()[0]
+            log(f"Step 1/2 — Triggering restore: {_vm_type}/{_vmid} ts={_btime} on {node}")
+            op_id = agent.restore(_vmid, _vm_type, node, host.pbs_storage_id,
+                                  _btime, host.pbs_datastore)
+            log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
+            ok = agent.wait_for_op(op_id, log)
+            if not ok:
+                raise RuntimeError("Agent restore failed")
+            _cache.pop(f"items:{host_id}", None)
+
+        run_job(job_id, _agent_restore_work)
+        return jsonify({"job_id": job_id})
 
     if source == "cloud":
         restic_lock = _get_restic_lock(host_id)
