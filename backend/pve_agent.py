@@ -696,6 +696,8 @@ def op_restore():
     def _do(op: Operation):
         pve = PVEClient(_host())
         op.append_log(f"Starting restore: vmid={vmid} node={node} ts={backup_time_iso}")
+        # Stop VM/LXC before restore — PVE rejects overwriting a running container.
+        pve.stop_vm(int(vmid), vm_type, node)
         upid = pve.restore_vm(int(vmid), vm_type, backup_time_iso,
                               storage_id, node, pbs_datastore)
         op.append_log(f"Task started: {upid}")
