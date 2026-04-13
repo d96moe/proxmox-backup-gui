@@ -705,6 +705,11 @@ def op_restore():
         if not ok:
             raise RuntimeError("PVE restore task did not complete successfully")
         op.append_log("Restore complete")
+        # Start VM/LXC after restore — PVE does not auto-start after restore.
+        # For self-restore (ct/300): agent runs on PVE host and can start ct/300
+        # even after Flask (inside ct/300) has died.
+        pve.start_vm(int(vmid), vm_type, node)
+        op.append_log(f"Started {vm_type}/{vmid}")
 
     _run_in_background(op, _do)
     return jsonify({"op_id": op.op_id}), 202
