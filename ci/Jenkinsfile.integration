@@ -317,13 +317,14 @@ SVCEOF
 systemctl daemon-reload
 systemctl restart pve-agent || systemctl start pve-agent
 
-# Wait for agent to be ready
+# Wait for agent to be ready (include token since auth is now required)
+AGENT_TOKEN=$(python3 -c "import json; print(json.load(open('/etc/pve-agent/config.json'))['agent_token'])")
 for i in $(seq 1 20); do
-    curl -sf http://10.10.0.1:8099/health > /dev/null 2>&1 && { echo "Agent ready"; break; }
+    curl -sf -H "Authorization: Bearer ${AGENT_TOKEN}" http://10.10.0.1:8099/health > /dev/null 2>&1 && { echo "Agent ready"; break; }
     echo "  waiting for agent... ($i/20)"
     sleep 3
 done
-curl -sf http://10.10.0.1:8099/health || { echo "ERROR: Agent not reachable"; exit 1; }
+curl -sf -H "Authorization: Bearer ${AGENT_TOKEN}" http://10.10.0.1:8099/health || { echo "ERROR: Agent not reachable"; exit 1; }
 echo "Agent deployed and healthy"
 DEPLOY_AGENT
 
