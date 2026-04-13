@@ -25,7 +25,7 @@ pipeline {
     }
 
     triggers {
-        cron('H 5 * * *')   // nightly at ~05:00 — prod backup jobs run 02:00, clear by 05:00
+        cron('H 23 * * *')  // nightly at ~23:00 — before PBS BU at 02:00 (1h+ margin)
     }
 
     environment {
