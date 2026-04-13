@@ -259,13 +259,16 @@ import json
 with open('/opt/proxmox-backup-gui/backend/hosts.json') as f:
     h = json.load(f)[0]
 print(json.dumps({
-    'pve_url':       h.get('pve_url', 'https://10.10.0.1:8006'),
-    'pve_user':      h.get('pve_user', 'root@pam'),
-    'pve_password':  h.get('pve_password', ''),
-    'pbs_url':       h.get('pbs_url', 'https://10.10.0.1:8007'),
-    'pbs_user':      h.get('pbs_user', 'gui-test@pbs'),
-    'pbs_password':  h.get('pbs_password', ''),
-    'pbs_datastore': h.get('pbs_datastore', 'ci-pbs'),
+    'pve_url':          h.get('pve_url', 'https://10.10.0.1:8006'),
+    'pve_user':         h.get('pve_user', 'root@pam'),
+    'pve_password':     h.get('pve_password', ''),
+    'pbs_url':          h.get('pbs_url', 'https://10.10.0.1:8007'),
+    'pbs_user':         h.get('pbs_user', 'gui-test@pbs'),
+    'pbs_password':     h.get('pbs_password', ''),
+    'pbs_datastore':    h.get('pbs_datastore', 'ci-pbs'),
+    'restic_repo':      h.get('restic_repo', ''),
+    'restic_password':  h.get('restic_password', ''),
+    'restic_env':       h.get('restic_env', {}),
 }))
 " > /tmp/agent-creds.json
 
@@ -274,6 +277,11 @@ python3 - /tmp/agent-creds.json << 'BUILDCFG'
 import json, sys
 with open(sys.argv[1]) as f:
     c = json.load(f)
+# rclone.conf lives on the PVE host at /root/.config/rclone/rclone.conf —
+# override the LXC path (/root/.config/...) to the host path.
+restic_env = c.get('restic_env', {})
+if 'RCLONE_CONFIG' in restic_env:
+    restic_env['RCLONE_CONFIG'] = '/root/.config/rclone/rclone.conf'
 cfg = {
     'pve_url':            c['pve_url'],
     'pve_user':           c['pve_user'],
@@ -285,8 +293,9 @@ cfg = {
     'pbs_storage_id':     'pbs-local',
     'pbs_datastore_path': '/mnt/ci-pbs',
     'pve_ssh_host':       '',
-    'restic_repo':        '',
-    'restic_password':    '',
+    'restic_repo':        c['restic_repo'],
+    'restic_password':    c['restic_password'],
+    'restic_env':         restic_env,
     'verify_ssl':         False,
     'agent_token':        c['pbs_password'],
 }
