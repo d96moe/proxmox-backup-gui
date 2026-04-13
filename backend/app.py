@@ -21,6 +21,7 @@ from config import load_hosts, HostConfig
 from pbs_client import PBSClient
 from restic_client import ResticClient
 from pve_client import PVEClient
+from agent_client import AgentClient
 from jobs import create_job, get_job, get_active_jobs, run_job
 
 
@@ -177,6 +178,9 @@ def get_items(host_id: str):
     host = HOSTS.get(host_id)
     if not host:
         abort(404, f"Host '{host_id}' not configured")
+
+    if host.agent_url:
+        return _get_items_via_agent(host, host_id)
 
     def fetch():
         try:
@@ -532,12 +536,39 @@ def get_info(host_id: str):
     return jsonify(_cached(f"info:{host_id}", fetch))
 
 
+def _get_items_via_agent(host: HostConfig, host_id: str):
+    """Fetch items (VMs + snapshots) from the PVE agent instead of direct API calls.
+
+    Returns the same shape as the normal /items endpoint: {vms, lxcs, storage, pbs_stale}.
+    Uses the agent's /items endpoint: one PBS + one restic call total, including
+    cloud-only entries (restic snapshots where the PBS copy has been pruned).
+    """
+    try:
+        agent = AgentClient(host.agent_url, token=host.agent_token)
+        data = agent.get_items()
+    except Exception as e:
+        abort(500, f"Agent unavailable ({e})")
+
+    return jsonify(data)
+
+
 @app.get("/api/host/<host_id>/schedules")
 def get_schedules(host_id: str):
     """Return next scheduled PBS (vzdump) and restic backup times for the host."""
     host = HOSTS.get(host_id)
     if not host:
         abort(404)
+
+    if host.agent_url:
+        try:
+            return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_schedules())
+        except Exception:
+            pass
+        return jsonify({
+            "pbs_jobs": [], "pbs_running": False,
+            "restic_next": None, "restic_running": False,
+            "pbs_retention": [], "restic_retention": {},
+        })
 
     result: dict = {
         "pbs_jobs": [],
@@ -587,6 +618,27 @@ def backup_pbs(host_id: str):
     run_restic_after = body.get("run_restic_after", False)
     if not vmid:
         abort(400, "vmid required")
+
+    # Agent path — delegate backup to pve_agent running on PVE host.
+    # run_restic_after is not supported via agent (agent does not run restic).
+    if host.agent_url and not run_restic_after:
+        agent = AgentClient(host.agent_url, token=host.agent_token)
+        label = f"PBS backup {vm_type}/{vmid}"
+        job_id = create_job(label)
+
+        def _agent_backup_work(log, _vmid=vmid, _vm_type=vm_type):
+            pve = PVEClient(host)
+            node = pve.get_nodes()[0]
+            log(f"Step 1/2 — Triggering PBS backup: {_vm_type}/{_vmid} on node {node}")
+            op_id = agent.backup(_vmid, _vm_type, node, host.pbs_storage_id)
+            log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
+            ok = agent.wait_for_op(op_id, log)
+            if not ok:
+                raise RuntimeError("Agent backup failed")
+            _cache.pop(f"items:{host_id}", None)
+
+        run_job(job_id, _agent_backup_work)
+        return jsonify({"job_id": job_id})
 
     if run_restic_after and host.restic_repo:
         restic_lock = _get_restic_lock(host_id)
@@ -655,6 +707,32 @@ def restore(host_id: str):
 
     if not vmid:
         abort(400, "vmid required")
+
+    # Agent path — delegate local PBS restore to pve_agent running on PVE host.
+    if host.agent_url and source == "local":
+        if not backup_time:
+            abort(400, "backup_time required for local restore")
+        agent = AgentClient(host.agent_url, token=host.agent_token)
+        job_id = create_job(f"Restore {vm_type}/{vmid} from local")
+        backup_time_iso = datetime.fromtimestamp(int(backup_time), tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+        def _agent_restore_work(log, _vmid=vmid, _vm_type=vm_type,
+                                _btime=backup_time_iso):
+            pve = PVEClient(host)
+            node = pve.get_nodes()[0]
+            log(f"Step 1/2 — Triggering restore: {_vm_type}/{_vmid} ts={_btime} on {node}")
+            op_id = agent.restore(_vmid, _vm_type, node, host.pbs_storage_id,
+                                  _btime, host.pbs_datastore)
+            log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
+            ok = agent.wait_for_op(op_id, log)
+            if not ok:
+                raise RuntimeError("Agent restore failed")
+            _cache.pop(f"items:{host_id}", None)
+
+        run_job(job_id, _agent_restore_work)
+        return jsonify({"job_id": job_id})
 
     if source == "cloud":
         restic_lock = _get_restic_lock(host_id)

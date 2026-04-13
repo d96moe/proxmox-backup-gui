@@ -23,6 +23,8 @@ class HostConfig:
     restic_password: str = ""
     restic_env: dict = field(default_factory=dict)
     verify_ssl: bool = False
+    agent_url: str = ""        # e.g. http://10.10.0.1:8099 — if set, use AgentClient
+    agent_token: str = ""      # Bearer token for agent auth (use pbs_password value)
 
 
 def load_hosts() -> list[HostConfig]:

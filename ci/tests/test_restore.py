@@ -173,7 +173,7 @@ def real_page(browser):
     pg.goto("/")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText !== 'Loading…'",
-        timeout=15000,
+        timeout=45000,  # agent /items includes one restic GDrive call — allow extra time
     )
     yield pg
     ctx.close()

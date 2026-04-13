@@ -217,7 +217,9 @@ STEP_B
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
                         backend/app.py backend/config.py \
                         backend/pbs_client.py backend/pve_client.py \
-                        backend/restic_client.py backend/jobs.py requirements.txt \
+                        backend/restic_client.py backend/jobs.py \
+                        backend/agent_client.py backend/pve_agent.py \
+                        requirements.txt \
                         root@${VM_IP}:/tmp/gui-update/
 
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
@@ -230,7 +232,112 @@ STEP_B
                         ci/tests/test_self_restore.py ci/tests/conftest.py \
                         root@${VM_IP}:/tmp/gui-update/tests/
 
-                    # Push into LXC 300 and restart service
+                    # ── Deploy agent to PVE host (runs directly on VM, not in LXC) ──
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'DEPLOY_AGENT'
+set -e
+AGENT_DIR=/opt/pve-agent
+
+# Install agent files alongside their dependencies
+mkdir -p ${AGENT_DIR}
+cp /tmp/gui-update/pve_agent.py   ${AGENT_DIR}/pve_agent.py
+cp /tmp/gui-update/pbs_client.py  ${AGENT_DIR}/pbs_client.py
+cp /tmp/gui-update/pve_client.py  ${AGENT_DIR}/pve_client.py
+cp /tmp/gui-update/config.py      ${AGENT_DIR}/config.py
+
+# Bootstrap Flask venv on PVE host if needed (Flask is not in Debian PVE base)
+if [ ! -x ${AGENT_DIR}/venv/bin/python ]; then
+    python3 -m venv ${AGENT_DIR}/venv
+fi
+${AGENT_DIR}/venv/bin/pip install --quiet flask requests
+
+# Read PVE and PBS credentials from the template-configured hosts.json in LXC 300.
+# The template bakes in the real PVE root password and PBS token — reuse them
+# for the agent rather than duplicating credentials.
+# Write to a temp file to avoid shell quoting issues with special chars in passwords.
+pct exec 300 -- python3 -c "
+import json
+with open('/opt/proxmox-backup-gui/backend/hosts.json') as f:
+    h = json.load(f)[0]
+print(json.dumps({
+    'pve_url':          h.get('pve_url', 'https://10.10.0.1:8006'),
+    'pve_user':         h.get('pve_user', 'root@pam'),
+    'pve_password':     h.get('pve_password', ''),
+    'pbs_url':          h.get('pbs_url', 'https://10.10.0.1:8007'),
+    'pbs_user':         h.get('pbs_user', 'gui-test@pbs'),
+    'pbs_password':     h.get('pbs_password', ''),
+    'pbs_datastore':    h.get('pbs_datastore', 'ci-pbs'),
+    'restic_repo':      h.get('restic_repo', ''),
+    'restic_password':  h.get('restic_password', ''),
+    'restic_env':       h.get('restic_env', {}),
+}))
+" > /tmp/agent-creds.json
+
+mkdir -p /etc/pve-agent
+python3 - /tmp/agent-creds.json << 'BUILDCFG'
+import json, sys
+with open(sys.argv[1]) as f:
+    c = json.load(f)
+# rclone.conf lives on the PVE host at /root/.config/rclone/rclone.conf —
+# override the LXC path (/root/.config/...) to the host path.
+restic_env = c.get('restic_env', {})
+if 'RCLONE_CONFIG' in restic_env:
+    restic_env['RCLONE_CONFIG'] = '/root/.config/rclone/rclone.conf'
+cfg = {
+    'pve_url':            c['pve_url'],
+    'pve_user':           c['pve_user'],
+    'pve_password':       c['pve_password'],
+    'pbs_url':            c['pbs_url'],
+    'pbs_user':           c['pbs_user'],
+    'pbs_password':       c['pbs_password'],
+    'pbs_datastore':      c['pbs_datastore'],
+    'pbs_storage_id':     'pbs-local',
+    'pbs_datastore_path': '/mnt/ci-pbs',
+    'pve_ssh_host':       '',
+    'restic_repo':        c['restic_repo'],
+    'restic_password':    c['restic_password'],
+    'restic_env':         restic_env,
+    'verify_ssl':         False,
+    'agent_token':        c['pbs_password'],
+}
+open('/etc/pve-agent/config.json', 'w').write(json.dumps(cfg, indent=2))
+BUILDCFG
+rm -f /tmp/agent-creds.json
+chmod 600 /etc/pve-agent/config.json
+
+# Install systemd service
+cat > /etc/systemd/system/pve-agent.service << 'SVCEOF'
+[Unit]
+Description=PVE Agent HTTP API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/pve-agent
+Environment=HOME=/root
+Environment=PYTHONPATH=/opt/pve-agent
+ExecStart=/opt/pve-agent/venv/bin/python /opt/pve-agent/pve_agent.py /etc/pve-agent/config.json
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+
+systemctl daemon-reload
+systemctl restart pve-agent || systemctl start pve-agent
+
+# Wait for agent to be ready (include token since auth is now required)
+AGENT_TOKEN=$(python3 -c "import json; print(json.load(open('/etc/pve-agent/config.json'))['agent_token'])")
+for i in $(seq 1 20); do
+    curl -sf -H "Authorization: Bearer ${AGENT_TOKEN}" http://10.10.0.1:8099/health > /dev/null 2>&1 && { echo "Agent ready"; break; }
+    echo "  waiting for agent... ($i/20)"
+    sleep 3
+done
+curl -sf -H "Authorization: Bearer ${AGENT_TOKEN}" http://10.10.0.1:8099/health || { echo "ERROR: Agent not reachable"; exit 1; }
+echo "Agent deployed and healthy"
+DEPLOY_AGENT
+
+                    # ── Deploy backend + frontend to LXC 300 ──
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'EOF'
                         set -e
 
@@ -239,13 +346,25 @@ STEP_B
                         pct start 300 || true
                         echo "LXC 300 status: $(pct status 300)"
 
-                        for f in app.py config.py pbs_client.py pve_client.py restic_client.py jobs.py; do
+                        for f in app.py config.py pbs_client.py pve_client.py restic_client.py jobs.py agent_client.py; do
                             pct push 300 /tmp/gui-update/${f} /opt/proxmox-backup-gui/backend/${f}
                         done
                         pct push 300 /tmp/gui-update/requirements.txt \
                             /opt/proxmox-backup-gui/requirements.txt
                         pct push 300 /tmp/gui-update/index.html \
                             /opt/proxmox-backup-gui/frontend/index.html
+
+                        # Wire up agent_url + agent_token in hosts.json so the Flask
+                        # backend can authenticate to the agent. The token matches
+                        # the pbs_password already in hosts.json (reused as shared secret).
+                        pct exec 300 -- python3 -c "
+import json
+with open('/opt/proxmox-backup-gui/backend/hosts.json') as f: h=json.load(f)
+h[0]['agent_url']   = 'http://10.10.0.1:8099'
+h[0]['agent_token'] = h[0].get('pbs_password', '')
+open('/opt/proxmox-backup-gui/backend/hosts.json','w').write(json.dumps(h))
+print('hosts.json: agent_url and agent_token configured')
+"
                         pct exec 300 -- systemctl restart proxmox-backup-gui
                         sleep 3
                         pct exec 300 -- systemctl is-active proxmox-backup-gui

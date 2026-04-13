@@ -2,25 +2,28 @@
 
 Tests cover every change and corner case found during manual testing:
 
-  DETECT_SELF  — _detect_self_vmid() cgroupv1 / cgroupv2 / bare-metal
-  FMT          — _fmt_bytes helper
-  PBS_IDEM     — delete_snapshot 400/404 treated as success, 500 re-raised
-  CLOUD_ONLY   — cloud-only detection (dedup, multi-restic, correct timestamp)
-  STEP_FORMAT  — every job type emits "Step N/M —" log lines
-  ENDPOINT     — 400 / 404 / 409 for new and existing endpoints
-  COVERAGE     — /restic/snapshots local-coverage annotation
-  DELETE_CLOUD — step 4 forgets ALL restic IDs that carry the deleted pbs_time
-  SCHEDULES    — _schedule_left, get_retention, get_pbs_prune_jobs, /schedules endpoint
+  DETECT_SELF   — _detect_self_vmid() cgroupv1 / cgroupv2 / bare-metal
+  FMT           — _fmt_bytes helper
+  PBS_IDEM      — delete_snapshot 400/404 treated as success, 500 re-raised
+  CLOUD_ONLY    — cloud-only detection (dedup, multi-restic, correct timestamp)
+  STEP_FORMAT   — every job type emits "Step N/M —" log lines
+  ENDPOINT      — 400 / 404 / 409 for new and existing endpoints
+  COVERAGE      — /restic/snapshots local-coverage annotation
+  DELETE_CLOUD  — step 4 forgets ALL restic IDs that carry the deleted pbs_time
+  SCHEDULES     — _schedule_left, get_retention, get_pbs_prune_jobs, /schedules endpoint
+  AGENT         — pve_agent HTTP API: health, vms, snapshots, operations, schedules, delete
+  AGENT_CLIENT  — AgentClient: all methods, error handling, app.py integration
 """
 from __future__ import annotations
 
+import copy
 import json
 import sys
 import time
 import threading
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch, call
+from unittest.mock import ANY, MagicMock, Mock, patch, call
 
 import pytest
 import requests
@@ -1674,3 +1677,1182 @@ class TestSchedulesEndpoint:
             pve_cls.return_value.is_backup_running.return_value = False
             resp = flask_client.get(f"/api/host/{HOST_ID}/schedules")
         assert resp.status_code == 200
+
+
+# =============================================================================
+# AGENT — pve_agent HTTP API
+# =============================================================================
+
+import pve_agent as _agent
+
+
+@pytest.fixture
+def agent_client():
+    """Fresh Flask test client for the PVE agent, operations cleared."""
+    _agent._operations.clear()
+    with _agent.app.test_client() as c:
+        yield c
+    _agent._operations.clear()
+
+
+@pytest.fixture
+def agent_cfg():
+    """Minimal AgentConfig usable across all agent tests."""
+    from pve_agent import AgentConfig
+    return AgentConfig(
+        pve_url="https://10.10.0.1:8006",
+        pve_user="root@pam",
+        pve_password="testpw",
+        pbs_url="https://10.10.0.1:8007",
+        pbs_user="backup@pbs",
+        pbs_password="pbspw",
+        pbs_datastore="ci-pbs",
+        pbs_storage_id="pbs-local",
+        pbs_datastore_path="/mnt/ci-pbs",
+        pve_ssh_host="10.10.0.1",
+        restic_repo="rclone:gdrive:test",
+        restic_password="respw",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentHealth
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentHealth:
+
+    def test_returns_200(self, agent_client):
+        resp = agent_client.get("/health")
+        assert resp.status_code == 200
+
+    def test_has_version_field(self, agent_client):
+        data = json.loads(agent_client.get("/health").data)
+        assert "version" in data
+        assert isinstance(data["version"], str) and data["version"] != ""
+
+    def test_has_uptime_field(self, agent_client):
+        data = json.loads(agent_client.get("/health").data)
+        assert "uptime" in data
+        assert isinstance(data["uptime"], (int, float))
+        assert data["uptime"] >= 0
+
+    def test_has_status_ok(self, agent_client):
+        data = json.loads(agent_client.get("/health").data)
+        assert data.get("status") == "ok"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentAuth — bearer token protection
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentAuth:
+
+    @pytest.fixture
+    def cfg_with_token(self):
+        from pve_agent import AgentConfig
+        return AgentConfig(
+            pve_url="https://10.10.0.1:8006", pve_user="root@pam", pve_password="x",
+            pbs_url="https://10.10.0.1:8007", pbs_user="backup@pbs", pbs_password="x",
+            pbs_datastore="ci-pbs", pbs_storage_id="pbs-local",
+            pbs_datastore_path="/mnt/ci-pbs", pve_ssh_host="",
+            restic_repo="", restic_password="",
+            agent_token="supersecret",
+        )
+
+    def test_no_token_configured_allows_all(self, agent_client, agent_cfg):
+        """When agent_token is empty, no auth required."""
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.get("/health")
+        assert resp.status_code == 200
+
+    def test_token_configured_missing_header_returns_401(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/health")
+        assert resp.status_code == 401
+
+    def test_token_configured_wrong_token_returns_401(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/health",
+                                    headers={"Authorization": "Bearer wrongtoken"})
+        assert resp.status_code == 401
+
+    def test_token_configured_correct_token_returns_200(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/health",
+                                    headers={"Authorization": "Bearer supersecret"})
+        assert resp.status_code == 200
+
+    def test_token_required_on_vms(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token), \
+             patch("pve_agent.PVEClient"):
+            resp = agent_client.get("/vms")
+        assert resp.status_code == 401
+
+    def test_token_required_on_snapshots(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/snapshots/vm/101")
+        assert resp.status_code == 401
+
+    def test_token_required_on_operations(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/operations")
+        assert resp.status_code == 401
+
+    def test_token_required_on_schedules(self, agent_client, cfg_with_token):
+        with patch("pve_agent._cfg", cfg_with_token):
+            resp = agent_client.get("/schedules")
+        assert resp.status_code == 401
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentVMs
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentVMs:
+
+    def _get(self, agent_client, agent_cfg, pve_return):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = pve_return
+            return json.loads(agent_client.get("/vms").data)
+
+    def test_returns_list(self, agent_client, agent_cfg):
+        data = self._get(agent_client, agent_cfg, {})
+        assert isinstance(data, list)
+
+    def test_vm_fields_present(self, agent_client, agent_cfg):
+        pve_vms = {101: {"name": "vm-101", "type": "vm",
+                         "status": "running", "os": "linux", "template": False}}
+        data = self._get(agent_client, agent_cfg, pve_vms)
+        assert len(data) == 1
+        vm = data[0]
+        for field in ("vmid", "name", "type", "status", "os", "template"):
+            assert field in vm, f"missing field: {field}"
+
+    def test_vmid_is_int(self, agent_client, agent_cfg):
+        pve_vms = {202: {"name": "ct-202", "type": "lxc",
+                         "status": "stopped", "os": "linux", "template": False}}
+        data = self._get(agent_client, agent_cfg, pve_vms)
+        assert data[0]["vmid"] == 202
+
+    def test_templates_included(self, agent_client, agent_cfg):
+        pve_vms = {
+            9000: {"name": "tpl", "type": "vm", "status": "stopped",
+                   "os": "linux", "template": True},
+            101:  {"name": "vm-101", "type": "vm", "status": "running",
+                   "os": "linux", "template": False},
+        }
+        data = self._get(agent_client, agent_cfg, pve_vms)
+        vmids = {v["vmid"] for v in data}
+        assert 9000 in vmids and 101 in vmids
+
+    def test_pve_down_returns_500(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient", side_effect=Exception("pve down")), \
+             patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.get("/vms")
+        assert resp.status_code == 500
+
+    def test_pve_get_raises_returns_500(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.get_vms_and_lxcs.side_effect = Exception("timeout")
+            resp = agent_client.get("/vms")
+        assert resp.status_code == 500
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentSnapshots
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentSnapshots:
+
+    # get_snapshots() returns grouped: [{pve_id, backup_type, snapshots:[...]}]
+    _PBS_GROUPS = [
+        {"pve_id": 101, "backup_type": "vm", "snapshots": [
+            {"backup_time": 1700000000, "size": "1.2 GiB", "incremental": False},
+            {"backup_time": 1700100000, "size": "200 MiB", "incremental": True},
+        ]},
+    ]
+    # get_snapshots_flat() returns {id, ts, size_bytes, covers:[{type,vmid,pbs_time}]}
+    _RESTIC_SNAPS = [
+        {"id": "abc123", "ts": 1700050000, "size_bytes": 900_000_000,
+         "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]},
+    ]
+
+    def _get(self, agent_client, agent_cfg, vm_type="vm", vmid=101,
+             pbs_groups=None, restic_snaps=None):
+        with patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent.LocalResticClient") as res_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pbs_cls.return_value.get_snapshots.return_value = (
+                pbs_groups if pbs_groups is not None else self._PBS_GROUPS
+            )
+            res_snaps = restic_snaps if restic_snaps is not None else self._RESTIC_SNAPS
+            res_cls.return_value.get_snapshots_flat.return_value = res_snaps
+            resp = agent_client.get(f"/snapshots/{vm_type}/{vmid}")
+        return resp, json.loads(resp.data)
+
+    def test_returns_200(self, agent_client, agent_cfg):
+        resp, _ = self._get(agent_client, agent_cfg)
+        assert resp.status_code == 200
+
+    def test_has_pbs_and_restic_keys(self, agent_client, agent_cfg):
+        _, data = self._get(agent_client, agent_cfg)
+        assert "pbs" in data and "restic" in data
+
+    def test_pbs_filtered_to_vmid(self, agent_client, agent_cfg):
+        # grouped structure: only group with pve_id=101 should be returned
+        pbs_groups = [
+            {"pve_id": 101, "backup_type": "vm", "snapshots": [
+                {"backup_time": 1700000000},
+            ]},
+            {"pve_id": 202, "backup_type": "vm", "snapshots": [
+                {"backup_time": 1700000001},
+            ]},
+        ]
+        _, data = self._get(agent_client, agent_cfg, vmid=101, pbs_groups=pbs_groups)
+        assert len(data["pbs"]) == 1
+        assert data["pbs"][0]["backup_time"] == 1700000000
+
+    def test_restic_filtered_to_vmid(self, agent_client, agent_cfg):
+        restic_all = [
+            {"id": "aaa", "ts": 1700000000, "size_bytes": 1,
+             "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]},
+            {"id": "bbb", "ts": 1700000001, "size_bytes": 1,
+             "covers": [{"type": "vm", "vmid": 202, "pbs_time": 1700000001}]},
+        ]
+        _, data = self._get(agent_client, agent_cfg, vmid=101, restic_snaps=restic_all)
+        assert all(
+            any(c.get("vmid") == 101 for c in s.get("covers", []))
+            for s in data["restic"]
+        )
+        assert len(data["restic"]) == 1
+
+    def test_no_snapshots_returns_empty_lists(self, agent_client, agent_cfg):
+        _, data = self._get(agent_client, agent_cfg, pbs_groups=[], restic_snaps=[])
+        assert data["pbs"] == [] and data["restic"] == []
+
+    def test_pbs_down_restic_still_returned(self, agent_client, agent_cfg):
+        restic = [{"id": "aaa", "ts": 1700000000, "size_bytes": 1,
+                   "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]}]
+        with patch("pve_agent.PBSClient", side_effect=Exception("pbs down")), \
+             patch("pve_agent.LocalResticClient") as res_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            res_cls.return_value.get_snapshots_flat.return_value = restic
+            resp = agent_client.get("/snapshots/vm/101")
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        assert data["pbs"] == [] and len(data["restic"]) > 0
+
+    def test_lxc_type_accepted(self, agent_client, agent_cfg):
+        resp, _ = self._get(agent_client, agent_cfg, vm_type="ct", vmid=300,
+                            pbs_groups=[], restic_snaps=[])
+        assert resp.status_code == 200
+
+    def test_invalid_type_returns_400(self, agent_client, agent_cfg):
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.get("/snapshots/invalid/101")
+        assert resp.status_code == 400
+
+    def test_cloud_annotation_sets_restic_id(self, agent_client, agent_cfg):
+        """PBS snapshot covered by restic must have restic_id set."""
+        pbs_groups = [{"pve_id": 101, "backup_type": "vm", "snapshots": [
+            {"backup_time": 1700000000},
+        ]}]
+        restic_snaps = [
+            {"id": "abc123", "short_id": "abc123", "ts": 1700050000, "size_bytes": 1,
+             "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]},
+        ]
+        _, data = self._get(agent_client, agent_cfg, pbs_groups=pbs_groups,
+                            restic_snaps=restic_snaps)
+        snap = data["pbs"][0]
+        assert snap["cloud"] is True
+        assert snap["restic_id"] == "abc123"
+
+    def test_no_cloud_coverage_no_restic_id(self, agent_client, agent_cfg):
+        """PBS snapshot not covered by restic must have cloud=False and no restic_id."""
+        pbs_groups = [{"pve_id": 101, "backup_type": "vm", "snapshots": [
+            {"backup_time": 1700000000},
+        ]}]
+        _, data = self._get(agent_client, agent_cfg, pbs_groups=pbs_groups, restic_snaps=[])
+        snap = data["pbs"][0]
+        assert snap["cloud"] is False
+        assert "restic_id" not in snap
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentItems — /items endpoint (single PBS + restic call, cloud-only included)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentItems:
+
+    _PVE_VMS = {101: {"name": "vm-101", "type": "vm", "os": "linux",
+                      "status": "running", "template": False}}
+    _PBS_GROUPS = [{"pve_id": 101, "backup_type": "vm", "snapshots": [
+        {"backup_time": 1700000000, "size": "1 GiB", "incremental": False},
+    ]}]
+    _RESTIC_SNAPS = [
+        {"id": "abc123", "short_id": "abc12", "ts": 1700050000, "size_bytes": 1,
+         "covers": [{"type": "vm", "vmid": 101, "pbs_time": 1700000000}]},
+    ]
+
+    def _get(self, agent_client, agent_cfg,
+             pve_meta=None, pbs_groups=None, restic_snaps=None):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent.LocalResticClient") as res_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = copy.deepcopy(
+                pve_meta if pve_meta is not None else self._PVE_VMS
+            )
+            pbs_cls.return_value.get_snapshots.return_value = copy.deepcopy(
+                pbs_groups if pbs_groups is not None else self._PBS_GROUPS
+            )
+            res_cls.return_value.get_snapshots_flat.return_value = copy.deepcopy(
+                restic_snaps if restic_snaps is not None else self._RESTIC_SNAPS
+            )
+            resp = agent_client.get("/items")
+        return resp, json.loads(resp.data)
+
+    def test_returns_200(self, agent_client, agent_cfg):
+        resp, _ = self._get(agent_client, agent_cfg)
+        assert resp.status_code == 200
+
+    def test_response_has_expected_keys(self, agent_client, agent_cfg):
+        _, data = self._get(agent_client, agent_cfg)
+        for key in ("vms", "lxcs", "storage", "pbs_stale"):
+            assert key in data, f"missing key: {key}"
+
+    def test_vm_appears_in_vms_list(self, agent_client, agent_cfg):
+        _, data = self._get(agent_client, agent_cfg)
+        assert any(v["id"] == 101 for v in data["vms"])
+
+    def test_pbs_snapshot_has_cloud_and_restic_id(self, agent_client, agent_cfg):
+        """PBS snapshot covered by restic must have cloud=True and restic_id."""
+        _, data = self._get(agent_client, agent_cfg)
+        snap = data["vms"][0]["snapshots"][0]
+        assert snap["cloud"] is True
+        assert snap["restic_id"] == "abc123"
+
+    def test_cloud_only_snapshot_included(self, agent_client, agent_cfg):
+        """Restic snapshot covering a deleted PBS backup_time appears as cloud-only entry."""
+        # PBS only has T2; restic covers T1 (deleted) and T2
+        pbs_groups = [{"pve_id": 101, "backup_type": "vm", "snapshots": [
+            {"backup_time": 1700100000},  # T2 — still in PBS
+        ]}]
+        restic_snaps = [
+            {"id": "res1", "short_id": "res1", "ts": 1700200000, "size_bytes": 1,
+             "covers": [
+                 {"type": "vm", "vmid": 101, "pbs_time": 1700000000},  # T1 — gone
+                 {"type": "vm", "vmid": 101, "pbs_time": 1700100000},  # T2 — local
+             ]},
+        ]
+        _, data = self._get(agent_client, agent_cfg,
+                            pbs_groups=pbs_groups, restic_snaps=restic_snaps)
+        snaps = data["vms"][0]["snapshots"]
+        cloud_only = [s for s in snaps if not s.get("local") and s.get("cloud")]
+        assert len(cloud_only) == 1, f"Expected 1 cloud-only snap, got: {cloud_only}"
+        assert cloud_only[0]["backup_time"] == 1700000000
+        assert cloud_only[0]["restic_id"] == "res1"
+
+    def test_lxc_appears_in_lxcs_list(self, agent_client, agent_cfg):
+        pve_meta = {300: {"name": "lxc-300", "type": "lxc", "os": "debian",
+                          "status": "running", "template": False}}
+        pbs_groups = [{"pve_id": 300, "backup_type": "ct", "snapshots": []}]
+        _, data = self._get(agent_client, agent_cfg, pve_meta=pve_meta,
+                            pbs_groups=pbs_groups, restic_snaps=[])
+        assert any(v["id"] == 300 for v in data["lxcs"])
+
+    def test_orphan_pbs_entry_not_in_pve_has_in_pve_false(self, agent_client, agent_cfg):
+        """VM in PBS but not in PVE (ghost) should have in_pve=False."""
+        pbs_groups = [{"pve_id": 399, "backup_type": "ct", "snapshots": [
+            {"backup_time": 1700000000},
+        ]}]
+        _, data = self._get(agent_client, agent_cfg, pve_meta={},
+                            pbs_groups=pbs_groups, restic_snaps=[])
+        all_items = data["vms"] + data["lxcs"]
+        ghost = next((v for v in all_items if v["id"] == 399), None)
+        assert ghost is not None
+        assert ghost["in_pve"] is False
+
+    def test_pbs_down_returns_200_with_empty_snapshots(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.PBSClient", side_effect=Exception("pbs down")), \
+             patch("pve_agent.LocalResticClient") as res_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = self._PVE_VMS
+            res_cls.return_value.get_snapshots_flat.return_value = []
+            resp = agent_client.get("/items")
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        assert data["vms"][0]["snapshots"] == []
+
+    def test_restic_down_returns_200_local_snaps_intact(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent.LocalResticClient", side_effect=Exception("restic down")), \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = self._PVE_VMS
+            pbs_cls.return_value.get_snapshots.return_value = self._PBS_GROUPS
+            resp = agent_client.get("/items")
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        snap = data["vms"][0]["snapshots"][0]
+        assert snap["local"] is True
+        assert snap["cloud"] is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentOperations — lifecycle and shape
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentOperations:
+
+    def _post_backup(self, agent_client, agent_cfg,
+                     vmid=101, vm_type="vm", node="pve", storage="pbs-local"):
+        with patch("pve_agent._cfg", agent_cfg):
+            return agent_client.post("/operations/backup", json={
+                "vmid": vmid, "vm_type": vm_type,
+                "node": node, "storage": storage,
+            })
+
+    def test_backup_returns_op_id(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient"):
+            resp = self._post_backup(agent_client, agent_cfg)
+        assert resp.status_code == 202
+        data = json.loads(resp.data)
+        assert "op_id" in data and data["op_id"] != ""
+
+    def test_op_get_shape(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient"):
+            op_id = json.loads(self._post_backup(agent_client, agent_cfg).data)["op_id"]
+        with patch("pve_agent._cfg", agent_cfg):
+            data = json.loads(agent_client.get(f"/operations/{op_id}").data)
+        for field in ("op_id", "type", "status", "log", "created_at"):
+            assert field in data, f"missing field: {field}"
+
+    def test_op_type_is_backup(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient"):
+            op_id = json.loads(self._post_backup(agent_client, agent_cfg).data)["op_id"]
+        with patch("pve_agent._cfg", agent_cfg):
+            data = json.loads(agent_client.get(f"/operations/{op_id}").data)
+        assert data["type"] == "backup"
+
+    def test_op_status_not_unknown_immediately(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient"):
+            op_id = json.loads(self._post_backup(agent_client, agent_cfg).data)["op_id"]
+        with patch("pve_agent._cfg", agent_cfg):
+            data = json.loads(agent_client.get(f"/operations/{op_id}").data)
+        assert data["status"] in ("pending", "running", "ok", "failed")
+
+    def test_op_log_is_list(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient"):
+            op_id = json.loads(self._post_backup(agent_client, agent_cfg).data)["op_id"]
+        with patch("pve_agent._cfg", agent_cfg):
+            data = json.loads(agent_client.get(f"/operations/{op_id}").data)
+        assert isinstance(data["log"], list)
+
+    def test_unknown_op_returns_404(self, agent_client, agent_cfg):
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.get("/operations/does-not-exist-xyz")
+        assert resp.status_code == 404
+
+    def test_backup_missing_vmid_returns_400(self, agent_client, agent_cfg):
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.post("/operations/backup",
+                                     json={"vm_type": "vm", "node": "pve", "storage": "s"})
+        assert resp.status_code == 400
+
+    def test_backup_missing_node_returns_400(self, agent_client, agent_cfg):
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.post("/operations/backup",
+                                     json={"vmid": 101, "vm_type": "vm", "storage": "s"})
+        assert resp.status_code == 400
+
+    def _wait_for_op(self, agent_client, agent_cfg, op_id, timeout=5.0):
+        deadline = time.monotonic() + timeout
+        d = {}
+        while time.monotonic() < deadline:
+            with patch("pve_agent._cfg", agent_cfg):
+                d = json.loads(agent_client.get(f"/operations/{op_id}").data)
+            if d.get("status") in ("ok", "failed"):
+                break
+            time.sleep(0.05)
+        return d
+
+    def test_op_completes_ok_on_success(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.backup_vm.return_value = "UPID:pve:1234::vzdump::"
+            pve_cls.return_value.wait_for_task.return_value = True
+            op_id = json.loads(self._post_backup(agent_client, agent_cfg).data)["op_id"]
+        d = self._wait_for_op(agent_client, agent_cfg, op_id)
+        assert d["status"] == "ok"
+
+    def test_op_completes_failed_on_pve_error(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.backup_vm.side_effect = Exception("vzdump failed")
+            op_id = json.loads(self._post_backup(agent_client, agent_cfg).data)["op_id"]
+        d = self._wait_for_op(agent_client, agent_cfg, op_id)
+        assert d["status"] == "failed"
+
+    def test_failed_op_logs_exception_message(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.backup_vm.side_effect = Exception("disk full")
+            op_id = json.loads(self._post_backup(agent_client, agent_cfg).data)["op_id"]
+        d = self._wait_for_op(agent_client, agent_cfg, op_id)
+        assert any("disk full" in line for line in d["log"])
+
+    def test_ops_list_contains_created_op(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient"), patch("pve_agent._cfg", agent_cfg):
+            op_id = json.loads(self._post_backup(agent_client, agent_cfg).data)["op_id"]
+        with patch("pve_agent._cfg", agent_cfg):
+            data = json.loads(agent_client.get("/operations").data)
+        assert op_id in [o["op_id"] for o in data]
+
+    def test_ops_list_item_shape(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient"), patch("pve_agent._cfg", agent_cfg):
+            self._post_backup(agent_client, agent_cfg)
+        with patch("pve_agent._cfg", agent_cfg):
+            item = json.loads(agent_client.get("/operations").data)[0]
+        for field in ("op_id", "type", "status", "created_at"):
+            assert field in item, f"missing field: {field}"
+
+    def test_restore_op_created(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient"), patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.post("/operations/restore", json={
+                "vmid": 101, "vm_type": "vm", "node": "pve",
+                "storage_id": "pbs-local", "backup_time_iso": "2023-11-14T12:00:00",
+                "pbs_datastore": "ci-pbs",
+            })
+        assert resp.status_code == 202 and "op_id" in json.loads(resp.data)
+
+    def test_restore_op_type(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient"), patch("pve_agent._cfg", agent_cfg):
+            op_id = json.loads(agent_client.post("/operations/restore", json={
+                "vmid": 101, "vm_type": "vm", "node": "pve",
+                "storage_id": "pbs-local", "backup_time_iso": "2023-11-14T12:00:00",
+                "pbs_datastore": "ci-pbs",
+            }).data)["op_id"]
+        with patch("pve_agent._cfg", agent_cfg):
+            d = json.loads(agent_client.get(f"/operations/{op_id}").data)
+        assert d["type"] == "restore"
+
+    def test_restore_missing_fields_returns_400(self, agent_client, agent_cfg):
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.post("/operations/restore", json={"vmid": 101})
+        assert resp.status_code == 400
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentOpStream — SSE streaming
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentOpStream:
+
+    def _run_op_and_wait(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.backup_vm.return_value = "UPID:pve:1::vzdump::"
+            pve_cls.return_value.wait_for_task.return_value = True
+            op_id = json.loads(agent_client.post("/operations/backup", json={
+                "vmid": 101, "vm_type": "vm", "node": "pve", "storage": "pbs-local",
+            }).data)["op_id"]
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            with patch("pve_agent._cfg", agent_cfg):
+                d = json.loads(agent_client.get(f"/operations/{op_id}").data)
+            if d["status"] in ("ok", "failed"):
+                break
+            time.sleep(0.05)
+        return op_id
+
+    def test_stream_returns_200(self, agent_client, agent_cfg):
+        op_id = self._run_op_and_wait(agent_client, agent_cfg)
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.get(f"/operations/{op_id}/stream")
+        assert resp.status_code == 200
+
+    def test_stream_content_type_sse(self, agent_client, agent_cfg):
+        op_id = self._run_op_and_wait(agent_client, agent_cfg)
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.get(f"/operations/{op_id}/stream")
+        assert "text/event-stream" in resp.content_type
+
+    def test_stream_contains_done_sentinel(self, agent_client, agent_cfg):
+        op_id = self._run_op_and_wait(agent_client, agent_cfg)
+        with patch("pve_agent._cfg", agent_cfg):
+            body = agent_client.get(f"/operations/{op_id}/stream").data.decode()
+        assert "__done__" in body
+
+    def test_stream_lines_are_sse_format(self, agent_client, agent_cfg):
+        op_id = self._run_op_and_wait(agent_client, agent_cfg)
+        with patch("pve_agent._cfg", agent_cfg):
+            body = agent_client.get(f"/operations/{op_id}/stream").data.decode()
+        non_blank = [ln for ln in body.splitlines() if ln.strip()]
+        bad = [ln for ln in non_blank if not ln.startswith("data:")]
+        assert not bad, f"non-SSE lines: {bad}"
+
+    def test_stream_unknown_op_returns_404(self, agent_client, agent_cfg):
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.get("/operations/no-such-id/stream")
+        assert resp.status_code == 404
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentSchedules
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentSchedules:
+
+    def _get(self, agent_client, agent_cfg,
+             pbs_jobs=None, pbs_running=False,
+             restic_next=None, restic_running=False,
+             restic_retention=None, pbs_prune_jobs=None):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.LocalResticClient") as res_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_m = pve_cls.return_value
+            res_m = res_cls.return_value
+            pve_m.get_backup_schedules.return_value = pbs_jobs or []
+            pve_m.is_backup_running.return_value = pbs_running
+            res_m.get_next_run.return_value = restic_next
+            res_m.is_running.return_value = restic_running
+            res_m.get_retention.return_value = restic_retention or {}
+            res_m.get_pbs_prune_jobs.return_value = pbs_prune_jobs or []
+            resp = agent_client.get("/schedules")
+        return resp, json.loads(resp.data)
+
+    def test_returns_200(self, agent_client, agent_cfg):
+        resp, _ = self._get(agent_client, agent_cfg)
+        assert resp.status_code == 200
+
+    def test_all_keys_present(self, agent_client, agent_cfg):
+        _, data = self._get(agent_client, agent_cfg)
+        for key in ("pbs_jobs", "pbs_running", "restic_next",
+                    "restic_running", "pbs_retention", "restic_retention"):
+            assert key in data, f"missing key: {key}"
+
+    def test_pbs_jobs_passed_through(self, agent_client, agent_cfg):
+        jobs = [{"id": "nightly", "schedule": "02:00", "left": "in 3h", "storage": "pbs-local"}]
+        _, data = self._get(agent_client, agent_cfg, pbs_jobs=jobs)
+        assert data["pbs_jobs"] == jobs
+
+    def test_pbs_running_flag(self, agent_client, agent_cfg):
+        _, data = self._get(agent_client, agent_cfg, pbs_running=True)
+        assert data["pbs_running"] is True
+
+    def test_restic_retention_passed_through(self, agent_client, agent_cfg):
+        ret = {"keep-last": "3", "keep-daily": "7"}
+        _, data = self._get(agent_client, agent_cfg, restic_retention=ret)
+        assert data["restic_retention"] == ret
+
+    def test_pbs_retention_filtered_by_datastore(self, agent_client, agent_cfg):
+        jobs = [
+            {"id": "match",   "keep-last": 3, "store": "ci-pbs"},
+            {"id": "nomatch", "keep-last": 5, "store": "other-pbs"},
+        ]
+        _, data = self._get(agent_client, agent_cfg, pbs_prune_jobs=jobs)
+        ids = [j["id"] for j in data["pbs_retention"]]
+        assert "match" in ids and "nomatch" not in ids
+
+    def test_pve_down_returns_200_with_empty_pbs(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient", side_effect=Exception("pve down")), \
+             patch("pve_agent.LocalResticClient") as res_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            res_cls.return_value.get_next_run.return_value = None
+            res_cls.return_value.is_running.return_value = False
+            res_cls.return_value.get_retention.return_value = {}
+            res_cls.return_value.get_pbs_prune_jobs.return_value = []
+            resp = agent_client.get("/schedules")
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["pbs_jobs"] == []
+
+    def test_restic_down_returns_200(self, agent_client, agent_cfg):
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.LocalResticClient", side_effect=Exception("restic down")), \
+             patch("pve_agent._cfg", agent_cfg):
+            pve_cls.return_value.get_backup_schedules.return_value = []
+            pve_cls.return_value.is_backup_running.return_value = False
+            resp = agent_client.get("/schedules")
+        assert resp.status_code == 200
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentDeleteSnapshot
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentDeleteSnapshot:
+
+    def test_delete_pbs_snapshot_returns_200(self, agent_client, agent_cfg):
+        with patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pbs_cls.return_value.delete_snapshot.return_value = None
+            resp = agent_client.delete("/snapshots/vm/101/1700000000")
+        assert resp.status_code == 200
+
+    def test_delete_lxc_snapshot_returns_200(self, agent_client, agent_cfg):
+        with patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pbs_cls.return_value.delete_snapshot.return_value = None
+            resp = agent_client.delete("/snapshots/ct/300/1700000000")
+        assert resp.status_code == 200
+
+    def test_delete_invalid_type_returns_400(self, agent_client, agent_cfg):
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.delete("/snapshots/invalid/101/1700000000")
+        assert resp.status_code == 400
+
+    def test_delete_non_int_timestamp_returns_400(self, agent_client, agent_cfg):
+        with patch("pve_agent._cfg", agent_cfg):
+            resp = agent_client.delete("/snapshots/vm/101/notanumber")
+        assert resp.status_code == 400
+
+    def test_delete_calls_pbs_with_correct_args(self, agent_client, agent_cfg):
+        with patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pbs_cls.return_value.delete_snapshot.return_value = None
+            agent_client.delete("/snapshots/vm/101/1700000000")
+        pbs_cls.return_value.delete_snapshot.assert_called_once_with(
+            "vm", "101", 1700000000
+        )
+
+    def test_delete_pbs_error_returns_500(self, agent_client, agent_cfg):
+        with patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent._cfg", agent_cfg):
+            pbs_cls.return_value.delete_snapshot.side_effect = Exception("locked")
+            resp = agent_client.delete("/snapshots/vm/101/1700000000")
+        assert resp.status_code == 500
+
+
+# =============================================================================
+# AGENT_CLIENT — AgentClient HTTP client + app.py integration
+# =============================================================================
+
+import agent_client as _ac
+from agent_client import AgentClient
+
+
+def _mock_resp(status=200, body=None):
+    """Return a mock requests.Response with given status and JSON body."""
+    r = MagicMock()
+    r.status_code = status
+    r.ok = status < 400
+    r.json.return_value = body if body is not None else {}
+    r.text = json.dumps(body) if body is not None else "{}"
+    r.iter_lines.return_value = iter([])
+    return r
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAgentClient — unit tests for AgentClient methods
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAgentClientHealth:
+
+    def _client(self):
+        return AgentClient("http://10.10.0.1:8099")
+
+    def test_health_returns_dict(self):
+        c = self._client()
+        resp = _mock_resp(200, {"status": "ok", "version": "0.1.0", "uptime": 42.0})
+        with patch.object(c._session, "get", return_value=resp):
+            result = c.health()
+        assert result["status"] == "ok"
+        assert result["version"] == "0.1.0"
+
+    def test_health_connection_error_raises(self):
+        c = self._client()
+        with patch.object(c._session, "get", side_effect=Exception("refused")):
+            with pytest.raises(Exception):
+                c.health()
+
+    def test_health_calls_correct_url(self):
+        c = self._client()
+        resp = _mock_resp(200, {"status": "ok", "version": "0.1", "uptime": 1})
+        with patch.object(c._session, "get", return_value=resp) as mock_get:
+            c.health()
+        mock_get.assert_called_once()
+        assert "/health" in mock_get.call_args[0][0]
+
+
+class TestAgentClientVMs:
+
+    def _client(self):
+        return AgentClient("http://10.10.0.1:8099")
+
+    _VM_LIST = [
+        {"vmid": 101, "name": "vm-101", "type": "vm",
+         "status": "running", "os": "linux", "template": False},
+        {"vmid": 300, "name": "ct-300", "type": "lxc",
+         "status": "running", "os": "linux", "template": False},
+    ]
+
+    def test_get_vms_returns_list(self):
+        c = self._client()
+        with patch.object(c._session, "get", return_value=_mock_resp(200, self._VM_LIST)):
+            result = c.get_vms()
+        assert isinstance(result, list) and len(result) == 2
+
+    def test_get_vms_preserves_vmid(self):
+        c = self._client()
+        with patch.object(c._session, "get", return_value=_mock_resp(200, self._VM_LIST)):
+            result = c.get_vms()
+        assert result[0]["vmid"] == 101
+
+    def test_get_vms_server_error_raises(self):
+        c = self._client()
+        with patch.object(c._session, "get", return_value=_mock_resp(500, {"error": "oops"})):
+            with pytest.raises(Exception):
+                c.get_vms()
+
+    def test_get_vms_network_error_raises(self):
+        c = self._client()
+        with patch.object(c._session, "get", side_effect=Exception("connect timeout")):
+            with pytest.raises(Exception):
+                c.get_vms()
+
+
+class TestAgentClientSnapshots:
+
+    def _client(self):
+        return AgentClient("http://10.10.0.1:8099")
+
+    _SNAPS = {
+        "pbs": [{"backup_id": "101", "backup_time": 1700000000}],
+        "restic": [{"id": "abc", "tags": ["vm-101-1700000000"]}],
+    }
+
+    def test_get_snapshots_returns_pbs_and_restic(self):
+        c = self._client()
+        with patch.object(c._session, "get", return_value=_mock_resp(200, self._SNAPS)):
+            result = c.get_snapshots("vm", 101)
+        assert "pbs" in result and "restic" in result
+
+    def test_get_snapshots_calls_correct_url(self):
+        c = self._client()
+        with patch.object(c._session, "get", return_value=_mock_resp(200, self._SNAPS)) as m:
+            c.get_snapshots("vm", 101)
+        assert "/snapshots/vm/101" in m.call_args[0][0]
+
+    def test_get_snapshots_ct_url(self):
+        c = self._client()
+        with patch.object(c._session, "get",
+                          return_value=_mock_resp(200, {"pbs": [], "restic": []})) as m:
+            c.get_snapshots("ct", 300)
+        assert "/snapshots/ct/300" in m.call_args[0][0]
+
+    def test_get_snapshots_400_raises(self):
+        c = self._client()
+        with patch.object(c._session, "get", return_value=_mock_resp(400, {"error": "bad type"})):
+            with pytest.raises(Exception):
+                c.get_snapshots("invalid", 101)
+
+
+class TestAgentClientOperations:
+
+    def _client(self):
+        return AgentClient("http://10.10.0.1:8099")
+
+    def test_backup_returns_op_id(self):
+        c = self._client()
+        resp = _mock_resp(202, {"op_id": "abc-123"})
+        with patch.object(c._session, "post", return_value=resp):
+            op_id = c.backup(vmid=101, vm_type="vm", node="pve", storage="pbs-local")
+        assert op_id == "abc-123"
+
+    def test_backup_posts_to_correct_url(self):
+        c = self._client()
+        with patch.object(c._session, "post",
+                          return_value=_mock_resp(202, {"op_id": "x"})) as m:
+            c.backup(vmid=101, vm_type="vm", node="pve", storage="pbs-local")
+        assert "/operations/backup" in m.call_args[0][0]
+
+    def test_backup_sends_correct_body(self):
+        c = self._client()
+        with patch.object(c._session, "post",
+                          return_value=_mock_resp(202, {"op_id": "x"})) as m:
+            c.backup(vmid=202, vm_type="lxc", node="mynode", storage="my-storage")
+        body = m.call_args[1]["json"]
+        assert body["vmid"] == 202
+        assert body["vm_type"] == "lxc"
+        assert body["node"] == "mynode"
+        assert body["storage"] == "my-storage"
+
+    def test_backup_server_error_raises(self):
+        c = self._client()
+        with patch.object(c._session, "post", return_value=_mock_resp(400, {"error": "x"})):
+            with pytest.raises(Exception):
+                c.backup(vmid=101, vm_type="vm", node="pve", storage="s")
+
+    def test_restore_returns_op_id(self):
+        c = self._client()
+        with patch.object(c._session, "post",
+                          return_value=_mock_resp(202, {"op_id": "res-99"})):
+            op_id = c.restore(vmid=101, vm_type="vm", node="pve",
+                              storage_id="pbs-local",
+                              backup_time_iso="2023-11-14T12:00:00",
+                              pbs_datastore="ci-pbs")
+        assert op_id == "res-99"
+
+    def test_restore_posts_to_correct_url(self):
+        c = self._client()
+        with patch.object(c._session, "post",
+                          return_value=_mock_resp(202, {"op_id": "x"})) as m:
+            c.restore(vmid=101, vm_type="vm", node="pve",
+                      storage_id="s", backup_time_iso="t", pbs_datastore="d")
+        assert "/operations/restore" in m.call_args[0][0]
+
+    def test_get_operation_returns_dict(self):
+        c = self._client()
+        op = {"op_id": "abc", "type": "backup", "status": "ok",
+              "log": [], "created_at": 1700000000.0}
+        with patch.object(c._session, "get", return_value=_mock_resp(200, op)):
+            result = c.get_operation("abc")
+        assert result["op_id"] == "abc" and result["status"] == "ok"
+
+    def test_get_operation_404_raises(self):
+        c = self._client()
+        with patch.object(c._session, "get", return_value=_mock_resp(404, {"error": "nf"})):
+            with pytest.raises(Exception):
+                c.get_operation("no-such-id")
+
+    def test_get_operations_returns_list(self):
+        c = self._client()
+        items = [{"op_id": "a", "type": "backup", "status": "ok", "created_at": 1.0}]
+        with patch.object(c._session, "get", return_value=_mock_resp(200, items)):
+            result = c.get_operations()
+        assert isinstance(result, list) and result[0]["op_id"] == "a"
+
+    def test_delete_snapshot_calls_delete(self):
+        c = self._client()
+        with patch.object(c._session, "delete",
+                          return_value=_mock_resp(200, {"ok": True})) as m:
+            c.delete_snapshot("vm", 101, 1700000000)
+        assert "/snapshots/vm/101/1700000000" in m.call_args[0][0]
+
+    def test_delete_snapshot_server_error_raises(self):
+        c = self._client()
+        with patch.object(c._session, "delete", return_value=_mock_resp(500, {"error": "locked"})):
+            with pytest.raises(Exception):
+                c.delete_snapshot("vm", 101, 1700000000)
+
+
+class TestAgentClientSchedules:
+
+    def _client(self):
+        return AgentClient("http://10.10.0.1:8099")
+
+    _SCHED = {
+        "pbs_jobs": [], "pbs_running": False,
+        "restic_next": None, "restic_running": False,
+        "pbs_retention": [], "restic_retention": {},
+    }
+
+    def test_get_schedules_returns_dict(self):
+        c = self._client()
+        with patch.object(c._session, "get", return_value=_mock_resp(200, self._SCHED)):
+            result = c.get_schedules()
+        assert "pbs_jobs" in result and "restic_retention" in result
+
+    def test_get_schedules_calls_correct_url(self):
+        c = self._client()
+        with patch.object(c._session, "get",
+                          return_value=_mock_resp(200, self._SCHED)) as m:
+            c.get_schedules()
+        assert "/schedules" in m.call_args[0][0]
+
+
+class TestAgentClientWaitForOp:
+
+    def _client(self):
+        return AgentClient("http://10.10.0.1:8099")
+
+    def test_wait_returns_true_on_ok(self):
+        c = self._client()
+        op_ok = {"op_id": "x", "type": "backup", "status": "ok",
+                 "log": ["done"], "created_at": 1.0}
+        with patch.object(c._session, "get", return_value=_mock_resp(200, op_ok)):
+            result = c.wait_for_op("x", log=lambda _: None, poll_interval=0)
+        assert result is True
+
+    def test_wait_returns_false_on_failed(self):
+        c = self._client()
+        op_fail = {"op_id": "x", "type": "backup", "status": "failed",
+                   "log": ["ERROR: oops"], "created_at": 1.0}
+        with patch.object(c._session, "get", return_value=_mock_resp(200, op_fail)):
+            result = c.wait_for_op("x", log=lambda _: None, poll_interval=0)
+        assert result is False
+
+    def test_wait_calls_log_with_lines(self):
+        c = self._client()
+        op_ok = {"op_id": "x", "type": "backup", "status": "ok",
+                 "log": ["step 1", "step 2"], "created_at": 1.0}
+        seen = []
+        with patch.object(c._session, "get", return_value=_mock_resp(200, op_ok)):
+            c.wait_for_op("x", log=seen.append, poll_interval=0)
+        assert "step 1" in seen and "step 2" in seen
+
+    def test_wait_polls_until_done(self):
+        c = self._client()
+        responses = [
+            _mock_resp(200, {"op_id": "x", "type": "backup", "status": "running",
+                             "log": [], "created_at": 1.0}),
+            _mock_resp(200, {"op_id": "x", "type": "backup", "status": "running",
+                             "log": ["working..."], "created_at": 1.0}),
+            _mock_resp(200, {"op_id": "x", "type": "backup", "status": "ok",
+                             "log": ["working...", "done"], "created_at": 1.0}),
+        ]
+        with patch.object(c._session, "get", side_effect=responses):
+            result = c.wait_for_op("x", log=lambda _: None, poll_interval=0)
+        assert result is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestAppAgentIntegration — app.py routes use AgentClient when agent_url set
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAppAgentIntegration:
+    """When host.agent_url is set, app.py delegates to AgentClient instead of
+    direct PVE/PBS/Restic calls. Tests patch AgentClient at the app module level."""
+
+    @pytest.fixture
+    def agent_host(self):
+        """HostConfig with agent_url configured."""
+        from config import HostConfig
+        return HostConfig(
+            id=HOST_ID, label="Agent-Test",
+            pve_url="https://1.2.3.4:8006", pve_user="root@pam", pve_password="x",
+            pbs_url="https://1.2.3.4:8007", pbs_user="b@pbs", pbs_password="x",
+            pbs_datastore="test-store",
+            agent_url="http://10.10.0.1:8099",
+        )
+
+    def test_items_uses_agent_get_items(self, flask_client, agent_host):
+        """GET /api/host/<id>/items calls agent.get_items() when agent_url is set."""
+        agent_items = {
+            "vms": [{"id": 101, "name": "vm-101", "type": "vm",
+                     "status": "running", "os": "linux", "template": False,
+                     "in_pve": True, "snapshots": [], "restic_snaps": []}],
+            "lxcs": [], "storage": {}, "pbs_stale": False,
+        }
+        with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
+             patch("app.AgentClient") as ac_cls:
+            ac = ac_cls.return_value
+            ac.get_items.return_value = agent_items
+            resp = flask_client.get(f"/api/host/{HOST_ID}/items")
+        assert resp.status_code == 200
+        ac.get_items.assert_called_once()
+
+    def test_items_agent_returns_snapshots_with_restic_id(self, flask_client, agent_host):
+        """items endpoint passes through restic_id from agent's /items response."""
+        pbs_snap = {"backup_id": "101", "backup_time": 1700000000,
+                    "size": "1 GiB", "incremental": False, "local": True,
+                    "cloud": True, "restic_id": "abc123"}
+        agent_items = {
+            "vms": [{"id": 101, "name": "vm-101", "type": "vm",
+                     "status": "running", "os": "linux", "template": False,
+                     "in_pve": True, "snapshots": [pbs_snap], "restic_snaps": []}],
+            "lxcs": [], "storage": {}, "pbs_stale": False,
+        }
+        with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
+             patch("app.AgentClient") as ac_cls:
+            ac = ac_cls.return_value
+            ac.get_items.return_value = agent_items
+            data = json.loads(flask_client.get(f"/api/host/{HOST_ID}/items").data)
+        snap = data["vms"][0]["snapshots"][0]
+        assert snap["backup_time"] == 1700000000
+        assert snap["restic_id"] == "abc123"
+
+    def test_schedules_uses_agent_get_schedules(self, flask_client, agent_host):
+        """GET /api/host/<id>/schedules uses agent when agent_url set."""
+        sched = {
+            "pbs_jobs": [{"id": "nightly", "schedule": "02:00"}],
+            "pbs_running": False, "restic_next": None,
+            "restic_running": False, "pbs_retention": [],
+            "restic_retention": {"keep-last": "3"},
+        }
+        with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
+             patch("app.AgentClient") as ac_cls:
+            ac_cls.return_value.get_schedules.return_value = sched
+            data = json.loads(flask_client.get(f"/api/host/{HOST_ID}/schedules").data)
+        assert data["restic_retention"] == {"keep-last": "3"}
+        assert data["pbs_jobs"][0]["id"] == "nightly"
+
+    def test_agent_down_items_returns_500(self, flask_client, agent_host):
+        """If agent is unreachable, /items should return 500 (not hang)."""
+        with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
+             patch("app.AgentClient") as ac_cls:
+            ac_cls.return_value.get_items.side_effect = Exception("connection refused")
+            resp = flask_client.get(f"/api/host/{HOST_ID}/items")
+        assert resp.status_code == 500
+
+    def test_no_agent_url_uses_direct_clients(self, flask_client, mock_host):
+        """When agent_url is NOT set, original PBSClient/PVEClient/ResticClient used."""
+        with _mock_clients(mock_host, pbs_snaps=[], pve_meta={}, restic_by_vm={}) as (_, pve_m, _):
+            flask_client.get(f"/api/host/{HOST_ID}/items")
+        pve_m.get_vms_and_lxcs.assert_called_once()
+
+    def _backup_via_agent(self, flask_client, agent_host, vmid=101, vm_type="vm"):
+        with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
+             patch("app.AgentClient") as ac_cls, \
+             patch("app.PVEClient") as pve_cls:
+            pve_cls.return_value.get_nodes.return_value = ["pve"]
+            ac = ac_cls.return_value
+            ac.backup.return_value = "op-abc"
+            ac.wait_for_op.return_value = True
+            resp = flask_client.post(f"/api/host/{HOST_ID}/backup/pbs",
+                                     json={"vmid": vmid, "type": vm_type})
+        return resp, ac
+
+    def test_backup_pbs_uses_agent_when_agent_url_set(self, flask_client, agent_host):
+        resp, ac = self._backup_via_agent(flask_client, agent_host)
+        assert resp.status_code == 200
+        assert "job_id" in json.loads(resp.data)
+
+    def test_backup_pbs_calls_agent_backup(self, flask_client, agent_host):
+        _, ac = self._backup_via_agent(flask_client, agent_host, vmid=101, vm_type="vm")
+        # Give the background job time to run
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not ac.backup.called:
+            time.sleep(0.05)
+        ac.backup.assert_called_once_with(101, "vm", "pve", agent_host.pbs_storage_id)
+
+    def test_backup_pbs_agent_wait_called(self, flask_client, agent_host):
+        _, ac = self._backup_via_agent(flask_client, agent_host)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not ac.wait_for_op.called:
+            time.sleep(0.05)
+        ac.wait_for_op.assert_called_once_with("op-abc", ANY)
+
+    def _restore_via_agent(self, flask_client, agent_host, vmid=101, vm_type="ct",
+                           backup_time=1700000000):
+        with patch.dict(_app.HOSTS, {HOST_ID: agent_host}, clear=True), \
+             patch("app.AgentClient") as ac_cls, \
+             patch("app.PVEClient") as pve_cls:
+            pve_cls.return_value.get_nodes.return_value = ["pve"]
+            ac = ac_cls.return_value
+            ac.restore.return_value = "op-xyz"
+            ac.wait_for_op.return_value = True
+            resp = flask_client.post(f"/api/host/{HOST_ID}/restore",
+                                     json={"vmid": vmid, "type": vm_type,
+                                           "backup_time": backup_time, "source": "local"})
+        return resp, ac
+
+    def test_restore_local_uses_agent_when_agent_url_set(self, flask_client, agent_host):
+        resp, _ = self._restore_via_agent(flask_client, agent_host)
+        assert resp.status_code == 200
+        assert "job_id" in json.loads(resp.data)
+
+    def test_restore_local_calls_agent_restore(self, flask_client, agent_host):
+        _, ac = self._restore_via_agent(flask_client, agent_host, vmid=301,
+                                        backup_time=1700000000)
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and not ac.restore.called:
+            time.sleep(0.05)
+        assert ac.restore.called
+        args = ac.restore.call_args[0]
+        assert args[0] == 301           # vmid
+        assert args[2] == "pve"         # node
