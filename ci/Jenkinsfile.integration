@@ -364,6 +364,9 @@ DEPLOY_AGENT
                         # Install any new Python deps into the venv (e.g. flask-login added after template was created)
                         pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/pip install --quiet -r /opt/proxmox-backup-gui/requirements.txt
 
+                        # Ensure curl is available (needed for authenticated CI API calls)
+                        pct exec 300 -- bash -c "command -v curl >/dev/null || apt-get install -y -q curl"
+
                         # Wire up agent_url + agent_token in hosts.json so the Flask
                         # backend can authenticate to the agent. The token matches
                         # the pbs_password already in hosts.json (reused as shared secret).
