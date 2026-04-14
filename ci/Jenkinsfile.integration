@@ -220,7 +220,7 @@ STEP_B
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "mkdir -p /tmp/gui-update/tests"
 
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
-                        backend/app.py backend/config.py \
+                        backend/app.py backend/auth.py backend/config.py \
                         backend/pbs_client.py backend/pve_client.py \
                         backend/restic_client.py backend/jobs.py \
                         backend/agent_client.py backend/pve_agent.py \
