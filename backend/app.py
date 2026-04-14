@@ -154,6 +154,15 @@ def _cached(key: str, fn):
 
 
 # ──────────────────────────────────────────────
+# Health check (no auth required — used by CI and monitoring)
+# ──────────────────────────────────────────────
+
+@app.get("/health")
+def health():
+    return jsonify({"status": "ok"})
+
+
+# ──────────────────────────────────────────────
 # Serve frontend
 # ──────────────────────────────────────────────
 

@@ -400,6 +400,12 @@ print('CI admin user created')
                             exit 1
                         fi
 
+                        # Create CI session cookie for authenticated API calls in seed stage
+                        pct exec 300 -- curl -sc /tmp/ci-cookie.txt -s -X POST http://localhost:5000/api/auth/login \
+                            -H 'Content-Type: application/json' \
+                            -d '{"username":"admin","password":"proxmox-ci-2024"}' > /dev/null
+                        echo "CI session cookie created"
+
                         # Update test files and frontend in CI working dir
                         # (mock server in test_frontend.py reads frontend/index.html
                         # relative to the working dir — must match deployed version)
@@ -453,7 +459,7 @@ PURGE_STALE_PBS
                     # Tests restore ct/301 to avoid self-restore deadlock (app runs in ct/300).
                     echo "Triggering PBS backup of LXC 301..."
                     JOB=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
+                        "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s -X POST http://localhost:5000/api/host/ci/backup/pbs -H 'Content-Type: application/json' -d '{\"vmid\":301,\"type\":\"ct\"}'")
                     JOB_ID=$(echo "${JOB}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup job: ${JOB_ID}"
 
@@ -461,7 +467,7 @@ PURGE_STALE_PBS
                     for i in $(seq 1 60); do
                         sleep 5
                         STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "pct exec 300 -- python3 -c \\"import urllib.request; print(urllib.request.urlopen('http://localhost:5000/api/job/${JOB_ID}',timeout=5).read().decode())\\"" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                            "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s http://localhost:5000/api/job/${JOB_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
                         echo "  PBS backup status: ${STATUS}"
                         [ "${STATUS}" = "done" ] && { echo "PBS backup complete"; break; }
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup failed"; exit 1; }
@@ -547,14 +553,14 @@ WAITPBS
                     # Step 3: PBS backup #2 (T2) — exists at time of R2, will become local+cloud.
                     echo "Triggering PBS backup #2 (T2)..."
                     JOB3=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
+                        "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s -X POST http://localhost:5000/api/host/ci/backup/pbs -H 'Content-Type: application/json' -d '{\"vmid\":301,\"type\":\"ct\"}'")
                     JOB3_ID=$(echo "${JOB3}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup #2 job: ${JOB3_ID}"
 
                     for i in $(seq 1 60); do
                         sleep 5
                         STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "pct exec 300 -- python3 -c \\"import urllib.request; print(urllib.request.urlopen('http://localhost:5000/api/job/${JOB3_ID}',timeout=5).read().decode())\\"" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                            "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s http://localhost:5000/api/job/${JOB3_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
                         echo "  PBS backup #2 status: ${STATUS}"
                         [ "${STATUS}" = "done" ] && { echo "PBS backup #2 complete"; break; }
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #2 failed"; exit 1; }
@@ -602,14 +608,14 @@ WAITPBS2
                     # so T3 has no restic coverage). Provides the local-only test scenario.
                     echo "Triggering PBS backup #3 (T3, local-only)..."
                     JOB3C=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
+                        "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s -X POST http://localhost:5000/api/host/ci/backup/pbs -H 'Content-Type: application/json' -d '{\"vmid\":301,\"type\":\"ct\"}'")
                     JOB3C_ID=$(echo "${JOB3C}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup #3 job: ${JOB3C_ID}"
 
                     for i in $(seq 1 60); do
                         sleep 5
                         STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "pct exec 300 -- python3 -c \\"import urllib.request; print(urllib.request.urlopen('http://localhost:5000/api/job/${JOB3C_ID}',timeout=5).read().decode())\\"" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                            "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s http://localhost:5000/api/job/${JOB3C_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
                         echo "  PBS backup #3 status: ${STATUS}"
                         [ "${STATUS}" = "done" ] && { echo "PBS backup #3 complete"; break; }
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #3 failed"; exit 1; }
@@ -822,11 +828,11 @@ PYEOF
                         # If LXC 300 was accidentally stopped (e.g. prior restore), fail fast.
                         echo "Checking Flask backend health at http://10.10.0.100:5000..."
                         for i in $(seq 1 20); do
-                            curl -sf http://10.10.0.100:5000/api/hosts > /dev/null 2>&1 && { echo "Backend ready"; break; }
+                            curl -sf http://10.10.0.100:5000/health > /dev/null 2>&1 && { echo "Backend ready"; break; }
                             echo "  waiting... ($i/20)"
                             sleep 3
                         done
-                        curl -sf http://10.10.0.100:5000/api/hosts > /dev/null 2>&1 || {
+                        curl -sf http://10.10.0.100:5000/health > /dev/null 2>&1 || {
                             echo "ERROR: Flask backend not reachable at http://10.10.0.100:5000"
                             echo "LXC 300 status: $(pct status 300)"
                             pct exec 300 -- ss -tlnp 2>/dev/null | grep 5000 || echo "Nothing on port 5000"
@@ -834,8 +840,12 @@ PYEOF
                         }
 
                         # Diagnose restic/cloud coverage before tests run
+                        # Get session cookie for authenticated diagnostic calls
+                        curl -sc /tmp/diag-cookie.txt -s -X POST http://10.10.0.100:5000/api/auth/login \
+                            -H 'Content-Type: application/json' \
+                            -d '{"username":"admin","password":"proxmox-ci-2024"}' > /dev/null
                         echo "--- PRE-TEST RESTIC DIAGNOSTICS ---"
-                        curl -sf "http://10.10.0.100:5000/api/host/ci/items" 2>/dev/null | \
+                        curl -sb /tmp/diag-cookie.txt -sf "http://10.10.0.100:5000/api/host/ci/items" 2>/dev/null | \
                             python3 -c "
 import json,sys
 d=json.load(sys.stdin)
