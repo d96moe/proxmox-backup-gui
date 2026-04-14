@@ -237,6 +237,11 @@ STEP_B
                         ci/tests/test_self_restore.py ci/tests/conftest.py \
                         root@${VM_IP}:/tmp/gui-update/tests/
 
+                    # Push ci_api.py helper (avoids JSON quoting hell in seed stage)
+                    scp ${SSH_OPTS} -i ${SSH_KEY} \
+                        ci/ci_api.py \
+                        root@${VM_IP}:/tmp/gui-update/
+
                     # ── Deploy agent to PVE host (runs directly on VM, not in LXC) ──
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'DEPLOY_AGENT'
 set -e
@@ -360,6 +365,8 @@ DEPLOY_AGENT
                             /opt/proxmox-backup-gui/frontend/index.html
                         pct push 300 /tmp/gui-update/login.html \
                             /opt/proxmox-backup-gui/frontend/login.html
+                        pct push 300 /tmp/gui-update/ci_api.py \
+                            /tmp/ci_api.py
 
                         # Install any new Python deps into the venv (e.g. flask-login added after template was created)
                         pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/pip install --quiet -r /opt/proxmox-backup-gui/requirements.txt
@@ -402,12 +409,6 @@ print('CI admin user created')
                             echo "=== end journal ==="
                             exit 1
                         fi
-
-                        # Create CI session cookie for authenticated API calls in seed stage
-                        pct exec 300 -- curl -sc /tmp/ci-cookie.txt -s -X POST http://localhost:5000/api/auth/login \
-                            -H 'Content-Type: application/json' \
-                            -d '{"username":"admin","password":"proxmox-ci-2024"}' > /dev/null
-                        echo "CI session cookie created"
 
                         # Update test files and frontend in CI working dir
                         # (mock server in test_frontend.py reads frontend/index.html
@@ -462,19 +463,21 @@ PURGE_STALE_PBS
                     # Tests restore ct/301 to avoid self-restore deadlock (app runs in ct/300).
                     echo "Triggering PBS backup of LXC 301..."
                     JOB=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s -X POST http://localhost:5000/api/host/ci/backup/pbs -H 'Content-Type: application/json' -d '{\"vmid\":301,\"type\":\"ct\"}'")
+                        "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py backup 301 ct")
                     JOB_ID=$(echo "${JOB}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup job: ${JOB_ID}"
+                    [ -z "${JOB_ID}" ] && { echo "ERROR: no job_id returned — backup API call failed. Response: ${JOB}"; exit 1; }
 
                     # Poll until PBS backup done (max 5 min)
                     for i in $(seq 1 60); do
                         sleep 5
                         STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s http://localhost:5000/api/job/${JOB_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                            "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py job ${JOB_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
                         echo "  PBS backup status: ${STATUS}"
                         [ "${STATUS}" = "done" ] && { echo "PBS backup complete"; break; }
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup failed"; exit 1; }
                     done
+                    [ "${STATUS}" != "done" ] && { echo "ERROR: PBS backup timed out (60×5s)"; exit 1; }
 
                     # Step 2: Restic backup of PBS datastore to Google Drive.
                     # Tagged ct-301 so restic_client.py maps it to LXC 301.
@@ -556,18 +559,20 @@ WAITPBS
                     # Step 3: PBS backup #2 (T2) — exists at time of R2, will become local+cloud.
                     echo "Triggering PBS backup #2 (T2)..."
                     JOB3=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s -X POST http://localhost:5000/api/host/ci/backup/pbs -H 'Content-Type: application/json' -d '{\"vmid\":301,\"type\":\"ct\"}'")
+                        "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py backup 301 ct")
                     JOB3_ID=$(echo "${JOB3}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup #2 job: ${JOB3_ID}"
+                    [ -z "${JOB3_ID}" ] && { echo "ERROR: no job_id for PBS backup #2. Response: ${JOB3}"; exit 1; }
 
                     for i in $(seq 1 60); do
                         sleep 5
                         STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s http://localhost:5000/api/job/${JOB3_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                            "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py job ${JOB3_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
                         echo "  PBS backup #2 status: ${STATUS}"
                         [ "${STATUS}" = "done" ] && { echo "PBS backup #2 complete"; break; }
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #2 failed"; exit 1; }
                     done
+                    [ "${STATUS}" != "done" ] && { echo "ERROR: PBS backup #2 timed out (60×5s)"; exit 1; }
 
                     # Step 3b: Restic backup R2 — covers BOTH T1 and T2.
                     # This creates the multi-restic scenario: T1 is covered by R1 *and* R2.
@@ -611,18 +616,20 @@ WAITPBS2
                     # so T3 has no restic coverage). Provides the local-only test scenario.
                     echo "Triggering PBS backup #3 (T3, local-only)..."
                     JOB3C=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s -X POST http://localhost:5000/api/host/ci/backup/pbs -H 'Content-Type: application/json' -d '{\"vmid\":301,\"type\":\"ct\"}'")
+                        "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py backup 301 ct")
                     JOB3C_ID=$(echo "${JOB3C}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup #3 job: ${JOB3C_ID}"
+                    [ -z "${JOB3C_ID}" ] && { echo "ERROR: no job_id for PBS backup #3. Response: ${JOB3C}"; exit 1; }
 
                     for i in $(seq 1 60); do
                         sleep 5
                         STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "pct exec 300 -- curl -sb /tmp/ci-cookie.txt -s http://localhost:5000/api/job/${JOB3C_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                            "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py job ${JOB3C_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
                         echo "  PBS backup #3 status: ${STATUS}"
                         [ "${STATUS}" = "done" ] && { echo "PBS backup #3 complete"; break; }
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #3 failed"; exit 1; }
                     done
+                    [ "${STATUS}" != "done" ] && { echo "ERROR: PBS backup #3 timed out (60×5s)"; exit 1; }
 
                     # Step 3d: Create a ghost PBS snapshot for ct/399 — a vmid that does
                     # not exist in PVE. This produces an in_pve=False item in the GUI,
