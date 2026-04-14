@@ -376,7 +376,7 @@ open('/opt/proxmox-backup-gui/backend/hosts.json','w').write(json.dumps(h))
 print('hosts.json: agent_url and agent_token configured')
 "
                         # Create CI admin user with known password (overwrites any existing users.json)
-                        pct exec 300 -- python3 -c "
+                        pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 -c "
 import json, sys
 sys.path.insert(0, '/opt/proxmox-backup-gui/backend')
 from werkzeug.security import generate_password_hash
