@@ -1321,3 +1321,57 @@ def test_concurrent_cloud_delete_returns_409(host_id, items):
 
     # Let the first job finish to clean up restic lock
     _poll_job(resp1["job_id"], timeout=600)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GUI CORRECTNESS — no duplicates in backup view or cloud snapshot view
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_no_duplicate_vm_cards(real_page, host_id):
+    """Each VM/LXC must appear exactly once in the backup view.
+
+    Guards against MQTT upsert races where a retained message is replayed
+    and _upsertCard() creates a second card instead of updating the first.
+    """
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0",
+        timeout=15000,
+    )
+    cards = real_page.locator(".vm-card").all()
+    vmids = [c.get_attribute("data-vmid") for c in cards]
+    dupes = [v for v in set(vmids) if vmids.count(v) > 1]
+    assert not dupes, (
+        f"Duplicate VM cards in backup view for host {host_id}: {dupes}\n"
+        f"All vmids seen: {vmids}"
+    )
+
+
+def test_no_duplicate_cloud_snapshot_rows(real_page, host_id, items):
+    """Each cloud snapshot row must appear exactly once per VM in the expanded view.
+
+    Guards against restic snapshot list being appended instead of replaced on
+    MQTT update, which would show the same snapshot twice.
+    """
+    vmid, _vm_type, _snap = _find_snap(items, local=False, cloud=True)
+    if vmid is None:
+        pytest.skip("No cloud snapshot available to check for duplicates")
+
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        f"() => document.querySelector('.vm-card[data-vmid=\"{vmid}\"]') !== null",
+        timeout=15000,
+    )
+    # Expand the VM card to reveal snapshot rows
+    real_page.locator(f".vm-card[data-vmid='{vmid}'] .expand-btn").first.click()
+    real_page.wait_for_selector(f".vm-card[data-vmid='{vmid}'] .snap-row", timeout=5000)
+
+    snap_rows = real_page.locator(f".vm-card[data-vmid='{vmid}'] .snap-row").all()
+    backup_times = [r.get_attribute("data-backup-time") for r in snap_rows]
+    dupes = [t for t in set(backup_times) if backup_times.count(t) > 1]
+    assert not dupes, (
+        f"Duplicate snapshot rows for vmid {vmid} on host {host_id}: {dupes}\n"
+        f"All backup times seen: {backup_times}"
+    )
