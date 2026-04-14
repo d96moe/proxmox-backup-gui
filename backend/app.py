@@ -14,8 +14,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from datetime import timezone, datetime
-from flask import Flask, jsonify, send_from_directory, abort, request
+from flask import Flask, jsonify, send_from_directory, abort, request, redirect, url_for, session
 from flask_cors import CORS
+from flask_login import login_user, logout_user, login_required, current_user
 
 from config import load_hosts, HostConfig
 from pbs_client import PBSClient
@@ -23,10 +24,14 @@ from restic_client import ResticClient
 from pve_client import PVEClient
 from agent_client import AgentClient
 from jobs import create_job, get_job, get_active_jobs, run_job
+from auth import init_login_manager, get_or_create_secret_key, get_user, add_user, \
+    remove_user, update_password, get_all_users, admin_required
 
 
 app = Flask(__name__, static_folder=None)
 CORS(app)
+app.secret_key = get_or_create_secret_key()
+init_login_manager(app)
 
 HOSTS: dict[str, HostConfig] = {h.id: h for h in load_hosts()}
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
@@ -152,13 +157,105 @@ def _cached(key: str, fn):
 # ──────────────────────────────────────────────
 
 @app.route("/")
+@login_required
 def index():
     return send_from_directory(FRONTEND_DIR, "index.html")
 
 
+@app.route("/login")
+def login_page():
+    if current_user.is_authenticated:
+        return redirect(url_for("index"))
+    return send_from_directory(FRONTEND_DIR, "login.html")
+
+
 @app.route("/<path:filename>")
+@login_required
 def static_files(filename: str):
     return send_from_directory(FRONTEND_DIR, filename)
+
+
+# ──────────────────────────────────────────────
+# Auth routes
+# ──────────────────────────────────────────────
+
+@app.post("/api/auth/login")
+def api_login():
+    body = request.get_json() or {}
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+    user = get_user(username)
+    if not user or not user.check_password(password):
+        return jsonify({"error": "Invalid username or password"}), 401
+    login_user(user, remember=True)
+    return jsonify({"username": user.username, "role": user.role})
+
+
+@app.post("/api/auth/logout")
+@login_required
+def api_logout():
+    logout_user()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/auth/me")
+@login_required
+def api_me():
+    return jsonify({"username": current_user.username, "role": current_user.role})
+
+
+@app.post("/api/auth/change-password")
+@login_required
+def api_change_password():
+    body = request.get_json() or {}
+    current_pw = body.get("current_password", "")
+    new_pw     = body.get("new_password", "")
+    if not current_user.check_password(current_pw):
+        return jsonify({"error": "Current password is incorrect"}), 400
+    if len(new_pw) < 8:
+        return jsonify({"error": "New password must be at least 8 characters"}), 400
+    update_password(current_user.username, new_pw)
+    return jsonify({"ok": True})
+
+
+# ── User management (admin only) ──────────────────────────────────────────────
+
+@app.get("/api/auth/users")
+@login_required
+@admin_required
+def api_list_users():
+    users = get_all_users()
+    return jsonify([{"username": u.username, "role": u.role} for u in users])
+
+
+@app.post("/api/auth/users")
+@login_required
+@admin_required
+def api_add_user():
+    body = request.get_json() or {}
+    username = body.get("username", "").strip()
+    password = body.get("password", "")
+    role     = body.get("role", "viewer")
+    if not username or not password:
+        return jsonify({"error": "username and password required"}), 400
+    if role not in ("admin", "viewer"):
+        return jsonify({"error": "role must be admin or viewer"}), 400
+    try:
+        add_user(username, password, role)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 409
+    return jsonify({"ok": True}), 201
+
+
+@app.delete("/api/auth/users/<username>")
+@login_required
+@admin_required
+def api_delete_user(username: str):
+    if username == current_user.username:
+        return jsonify({"error": "Cannot delete your own account"}), 400
+    if not remove_user(username):
+        return jsonify({"error": "User not found"}), 404
+    return jsonify({"ok": True})
 
 
 # ──────────────────────────────────────────────
@@ -166,6 +263,7 @@ def static_files(filename: str):
 # ──────────────────────────────────────────────
 
 @app.get("/api/hosts")
+@login_required
 def get_hosts():
     return jsonify([
         {"id": h.id, "label": h.label, "self_vmid": SELF_VMID}
@@ -174,6 +272,7 @@ def get_hosts():
 
 
 @app.get("/api/host/<host_id>/items")
+@login_required
 def get_items(host_id: str):
     host = HOSTS.get(host_id)
     if not host:
@@ -385,6 +484,7 @@ def get_items(host_id: str):
 
 
 @app.get("/api/host/<host_id>/storage")
+@login_required
 def get_storage(host_id: str):
     """PBS + restic storage sizes. Restic stats can be slow — called async by frontend."""
     host = HOSTS.get(host_id)
@@ -523,6 +623,7 @@ def get_ha_sensors(host_id: str):
 
 
 @app.get("/api/host/<host_id>/info")
+@login_required
 def get_info(host_id: str):
     host = HOSTS.get(host_id)
     if not host:
@@ -553,6 +654,7 @@ def _get_items_via_agent(host: HostConfig, host_id: str):
 
 
 @app.get("/api/host/<host_id>/schedules")
+@login_required
 def get_schedules(host_id: str):
     """Return next scheduled PBS (vzdump) and restic backup times for the host."""
     host = HOSTS.get(host_id)
@@ -607,6 +709,8 @@ def get_schedules(host_id: str):
 # ──────────────────────────────────────────────
 
 @app.post("/api/host/<host_id>/backup/pbs")
+@login_required
+@admin_required
 def backup_pbs(host_id: str):
     """Trigger an immediate PBS backup of a single VM/LXC."""
     host = HOSTS.get(host_id)
@@ -680,6 +784,8 @@ def backup_pbs(host_id: str):
 
 
 @app.post("/api/host/<host_id>/restore")
+@login_required
+@admin_required
 def restore(host_id: str):
     """Restore a VM/LXC from PBS (local) or restic (cloud).
 
@@ -836,6 +942,8 @@ def restore(host_id: str):
 
 
 @app.post("/api/host/<host_id>/backup/restic")
+@login_required
+@admin_required
 def backup_restic(host_id: str):
     """Trigger a restic backup of the PBS datastore to cloud."""
     host = HOSTS.get(host_id)
@@ -868,6 +976,8 @@ def backup_restic(host_id: str):
 # ──────────────────────────────────────────────
 
 @app.post("/api/host/<host_id>/delete/pbs")
+@login_required
+@admin_required
 def delete_pbs(host_id: str):
     """Delete a single local PBS snapshot.
 
@@ -900,6 +1010,8 @@ def delete_pbs(host_id: str):
 
 
 @app.post("/api/host/<host_id>/delete/pbs/all")
+@login_required
+@admin_required
 def delete_pbs_all(host_id: str):
     """Delete all local PBS snapshots for a VM/LXC.
 
@@ -930,6 +1042,8 @@ def delete_pbs_all(host_id: str):
 
 
 @app.post("/api/host/<host_id>/delete/cloud")
+@login_required
+@admin_required
 def delete_cloud(host_id: str):
     """Delete a snapshot that exists ONLY in cloud (no local PBS copy).
 
@@ -1046,6 +1160,8 @@ def delete_cloud(host_id: str):
 
 
 @app.post("/api/host/<host_id>/delete/both")
+@login_required
+@admin_required
 def delete_both(host_id: str):
     """Delete a snapshot that exists locally AND in cloud.
 
@@ -1105,6 +1221,7 @@ def delete_both(host_id: str):
 
 
 @app.get("/api/job/<job_id>")
+@login_required
 def get_job_status(job_id: str):
     job = get_job(job_id)
     if not job:
@@ -1113,6 +1230,7 @@ def get_job_status(job_id: str):
 
 
 @app.get("/api/jobs/active")
+@login_required
 def get_active_jobs_endpoint():
     """Return all currently running or pending jobs."""
     return jsonify(get_active_jobs())
@@ -1123,6 +1241,7 @@ def get_active_jobs_endpoint():
 # ──────────────────────────────────────────────
 
 @app.get("/api/host/<host_id>/restic/snapshots")
+@login_required
 def restic_snapshot_list(host_id: str):
     """List all restic snapshots with per-PBS-snapshot local coverage info."""
     host = HOSTS.get(host_id)
@@ -1175,6 +1294,8 @@ def restic_snapshot_list(host_id: str):
 
 
 @app.post("/api/host/<host_id>/delete/restic")
+@login_required
+@admin_required
 def delete_restic(host_id: str):
     """Delete a specific restic snapshot by ID (forget + prune + cleanup).
 
@@ -1210,6 +1331,8 @@ def delete_restic(host_id: str):
 
 
 @app.post("/api/host/<host_id>/restore/datastore")
+@login_required
+@admin_required
 def restore_datastore(host_id: str):
     """Restore the full PBS datastore from a restic snapshot (no per-VM PBS restore).
 
