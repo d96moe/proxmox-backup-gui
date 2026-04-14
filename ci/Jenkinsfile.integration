@@ -1,7 +1,7 @@
 // =============================================================================
 // Proxmox Backup GUI — Integration pipeline
-// Trigger : Nightly (02:00) + manual "Build Now"
-// Runtime : ~12-18 min
+// Trigger : Nightly (~23:00) + manual "Build Now"
+// Runtime : ~12-18 min (full suite); less when TEST_SUITE is narrowed
 //
 // Spins up a fresh clone of template 9092 (PVE + backup-gui LXC + minimal PBS),
 // pushes latest code, seeds backup data (PBS + cloud via real Google Drive),
@@ -15,7 +15,12 @@ pipeline {
 
     parameters {
         string(name: 'BRANCH', defaultValue: 'main',
-               description: 'Branch to test (e.g. main, feature/backup-restore)')
+               description: 'Branch to test (e.g. main, feature/gui-settings)')
+        choice(name: 'TEST_SUITE',
+               choices: ['all', 'frontend', 'restore', 'self_restore'],
+               description: 'Which test file(s) to run — "all" runs the full suite')
+        string(name: 'TEST_FILTER', defaultValue: '',
+               description: 'Optional pytest -k expression for extra filtering (e.g. "backup" or "restore and not cloud")')
     }
 
     options {
@@ -758,12 +763,32 @@ PYEOF
 
         stage('Integration tests') {
             steps {
+                script {
+                    // Resolve which test files and optional -k filter to pass to pytest.
+                    // These become positional args to "bash -s" so they are available
+                    // inside the single-quoted heredoc on the remote host as $1 / $2.
+                    def suiteMap = [
+                        all:          'tests/',
+                        frontend:     'tests/test_frontend.py',
+                        restore:      'tests/test_restore.py',
+                        self_restore: 'tests/test_self_restore.py',
+                    ]
+                    env.PYTEST_FILES  = suiteMap.get(params.TEST_SUITE, 'tests/')
+                    env.PYTEST_FILTER = params.TEST_FILTER ?: ''
+                    echo "TEST_SUITE=${params.TEST_SUITE}  →  ${env.PYTEST_FILES}"
+                    if (env.PYTEST_FILTER) echo "TEST_FILTER: -k '${env.PYTEST_FILTER}'"
+                }
                 sh '''
                     VM_IP=$(cat vm_ip.txt)
 
                     # Run Playwright tests on the VM (it can reach LXC 10.10.0.100:5000)
-                    # Pass BACKEND_URL so tests hit real backend instead of mock
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'EOF'
+                    # Pass BACKEND_URL so tests hit real backend instead of mock.
+                    # PYTEST_FILES and PYTEST_FILTER are forwarded as $1 / $2 via bash -s.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        bash -s "${PYTEST_FILES}" "${PYTEST_FILTER}" << 'EOF'
+                        PYTEST_TARGET="$1"
+                        PYTEST_FILTER_ARG="$2"
+
                         source /etc/profile.d/ci-venv.sh
                         mkdir -p /tmp/test-results
 
@@ -797,10 +822,12 @@ for item in d.get('lxcs',[]):
 " 2>/dev/null || echo "items endpoint failed"
                         echo "--- END DIAGNOSTICS ---"
 
+                        echo "Running: pytest ${PYTEST_TARGET} ${PYTEST_FILTER_ARG:+-k} ${PYTEST_FILTER_ARG}"
                         cd /opt/ci/proxmox-backup-gui
                         BACKEND_URL=http://10.10.0.100:5000 \
-                        pytest tests/ \
+                        pytest ${PYTEST_TARGET} \
                             -v --tb=short \
+                            ${PYTEST_FILTER_ARG:+-k "${PYTEST_FILTER_ARG}"} \
                             --junit-xml=/tmp/test-results/integration.xml \
                             2>&1 | tee /tmp/test-results/integration.log
 EOF
