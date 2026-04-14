@@ -1997,6 +1997,21 @@ const MQTTBus = (() => {
       } catch (_) {}
       return;
     }
+    // proxmox/<host>/vms/index — list of all known VMIDs for this host.
+    // When the list is empty the agent has no VMs/containers: show empty state.
+    if (parts[2] === 'vms' && parts[3] === 'index') {
+      try {
+        const vmids = JSON.parse(msg);
+        if (vmids.length === 0) {
+          const content = document.getElementById('content');
+          if (content?.querySelector('.state-msg')) {
+            content.innerHTML = '<div class="state-msg">No VMs or containers found.</div>';
+          }
+          _updateSubtitle();
+        }
+      } catch (_) {}
+      return;
+    }
     // proxmox/<host>/vm/<vmid>/meta|pbs|restic
     if (parts[2] === 'vm' && parts.length === 5) {
       const vmid = parts[3];
@@ -2133,6 +2148,7 @@ const MQTTBus = (() => {
       // Subscribe to all agent state topics (wildcards)
       _client.subscribe(`${_prefix}/+/agent/status`);
       _client.subscribe(`${_prefix}/+/state/ready`);
+      _client.subscribe(`${_prefix}/+/vms/index`);
       _client.subscribe(`${_prefix}/+/vm/+/meta`);
       _client.subscribe(`${_prefix}/+/vm/+/pbs`);
       _client.subscribe(`${_prefix}/+/vm/+/restic`);

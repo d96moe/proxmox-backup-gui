@@ -1246,9 +1246,26 @@ def delete_both(host_id: str):
 @login_required
 def get_job_status(job_id: str):
     job = get_job(job_id)
-    if not job:
-        abort(404)
-    return jsonify(job)
+    if job:
+        return jsonify(job)
+    # Fall back: MQTT-triggered operations are tracked on the agent, not in Flask jobs.
+    # Normalize agent op format → Flask job format so _pollJob works unchanged.
+    for host in HOSTS.values():
+        if host.agent_url:
+            try:
+                op = AgentClient(host.agent_url, token=host.agent_token).get_operation(job_id)
+                if op:
+                    return jsonify({
+                        "id":      job_id,
+                        "label":   op.get("type", "operation"),
+                        "status":  {"ok": "done", "failed": "error"}.get(op["status"], op["status"]),
+                        "logs":    op.get("log", []),
+                        "started": op.get("created_at"),
+                        "ended":   op.get("finished_at"),
+                    })
+            except Exception:
+                pass
+    abort(404)
 
 
 @app.get("/api/jobs/active")
