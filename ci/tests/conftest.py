@@ -13,9 +13,26 @@ except ImportError:
     _playwright_available = False
 
 # ── make backend importable ──────────────────────────────────────────────────
+# In dev: conftest lives at ci/tests/conftest.py → parent.parent.parent = repo root
+# In CI deploy: conftest lives at /opt/ci/proxmox-backup-gui/tests/conftest.py
+#   → parent.parent.parent = /opt/ci, but backend is at /opt/proxmox-backup-gui/backend/
+# Fall back to known CI path if calculated path doesn't exist.
 BACKEND = Path(__file__).parent.parent.parent / "backend"
+if not BACKEND.is_dir():
+    BACKEND = Path("/opt/proxmox-backup-gui/backend")
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
+
+# Check whether auth (and its deps: flask-login etc.) are actually importable.
+# In test_frontend.py (mock server), the backend is not needed at all.
+# In integration CI the backend runs in LXC 300 and the test process on the
+# PVE host can't import it — auth fixtures become no-ops in that case.
+_BACKEND_IMPORTABLE = False
+try:
+    import auth as _auth_probe  # noqa: F401
+    _BACKEND_IMPORTABLE = True
+except ImportError:
+    pass
 
 # ── auth test user constants ─────────────────────────────────────────────────
 ADMIN_USER = "admin"
@@ -33,10 +50,15 @@ _BASE_USERS = [
 def _auth_files(tmp_path_factory):
     """Session-scoped: patch auth module to use temp users.json + .secret_key.
 
-    Runs once per test session, before any test. Because auth.USERS_FILE is
-    read on every _load_users() call, patching the module-level variable here
-    is sufficient — no restart of the app needed.
+    No-op in integration CI (backend not importable from test process).
+    Runs once per test session in unit/mock mode, before any test. Because
+    auth.USERS_FILE is read on every _load_users() call, patching the
+    module-level variable here is sufficient — no restart of the app needed.
     """
+    if not _BACKEND_IMPORTABLE:
+        yield {}
+        return
+
     import auth
     tmp = tmp_path_factory.mktemp("auth_files")
 
@@ -59,8 +81,12 @@ def _auth_files(tmp_path_factory):
 
 @pytest.fixture(autouse=True)
 def _reset_users(_auth_files):
-    """Reset users.json to base state before every test."""
-    _auth_files["users_file"].write_text(json.dumps(_BASE_USERS))
+    """Reset users.json to base state before every test.
+
+    No-op in integration CI (backend not importable from test process).
+    """
+    if _BACKEND_IMPORTABLE and _auth_files:
+        _auth_files["users_file"].write_text(json.dumps(_BASE_USERS))
     yield
 
 
@@ -70,7 +96,10 @@ def flask_client(_reset_users):
 
     All existing tests keep working because this client has a valid session.
     Auth-specific tests that need an unauthenticated client create their own.
+    Skipped in integration CI (backend not importable from test process).
     """
+    if not _BACKEND_IMPORTABLE:
+        pytest.skip("backend not importable — integration CI uses real backend")
     import app as _app
     _app._cache.clear()
     with _app.app.test_client() as c:
