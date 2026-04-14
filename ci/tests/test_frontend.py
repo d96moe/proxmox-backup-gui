@@ -387,6 +387,50 @@ def test_deploy_no_lxcs_section_reference(mock_server):
     assert "lxcs-section" not in html, \
         "Old broken getElementById('lxcs-section') still present in served HTML!"
 
+def test_deploy_mqtt_bus_present(mock_server):
+    """MQTTBus closure must be in served HTML — it is the entire MQTT backbone."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "MQTTBus" in html, \
+        "MQTTBus not found — MQTT data pipeline not deployed"
+
+def test_deploy_render_cloud_from_ds_present(mock_server):
+    """renderCloudFromDS must be in served HTML — replaces REST for cloud tab."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "renderCloudFromDS" in html, \
+        "renderCloudFromDS() missing — cloud snapshots tab will never render"
+
+def test_deploy_agent_hostname_tracking_present(mock_server):
+    """_agentHostname must be in served HTML.
+    Without it backup/rescan commands go to the wrong MQTT topic."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "_agentHostname" in html, \
+        "_agentHostname missing — backup commands will publish to wrong topic"
+
+def test_deploy_loaddata_is_mqtt_only(mock_server):
+    """loadData() must be pure MQTT — no fetch('/api/host/...') REST calls."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    idx = html.find("function loadData")
+    assert idx != -1, "loadData() not found in served HTML"
+    snippet = html[idx:idx + 300]
+    assert "/api/host" not in snippet, \
+        "loadData() still contains REST call to /api/host — should be pure MQTT"
+
+def test_deploy_progress_regex_matches_new_format(mock_server):
+    """_pollJob progress regex must match '  42% —' (space-prefixed, not '[42%').
+    Wrong regex = progress bar never moves during restic backup."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    # New pattern must be present
+    assert r"^\s+(\d+)%\s+" in html, \
+        "Updated progress regex not found — progress bar will not update during backup"
+    # Old broken pattern must be gone
+    assert r"^\[(\d+)%\s+" not in html, \
+        "Old broken '[X%' progress regex still present"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DOM — required elements exist, no JS errors thrown during page lifecycle
