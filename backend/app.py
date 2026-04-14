@@ -7,6 +7,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -261,6 +262,27 @@ def api_delete_user(username: str):
 # ──────────────────────────────────────────────
 # API
 # ──────────────────────────────────────────────
+
+@app.get("/api/mqtt-config")
+@login_required
+def get_mqtt_config():
+    """Return MQTT broker WebSocket config for the browser (MQTT.js).
+
+    Set MQTT_WS_URL (e.g. ws://192.168.0.196:9001) to enable.
+    Optional MQTT_WS_USER / MQTT_WS_PASSWORD for broker auth.
+    If not configured, returns {"enabled": false} and browser skips MQTT.
+    """
+    ws_url = os.environ.get("MQTT_WS_URL", "")
+    if not ws_url:
+        return jsonify({"enabled": False})
+    return jsonify({
+        "enabled":  True,
+        "ws_url":   ws_url,
+        "username": os.environ.get("MQTT_WS_USER", ""),
+        "password": os.environ.get("MQTT_WS_PASSWORD", ""),
+        "topic_prefix": os.environ.get("MQTT_TOPIC_PREFIX", "proxmox"),
+    })
+
 
 @app.get("/api/hosts")
 @login_required

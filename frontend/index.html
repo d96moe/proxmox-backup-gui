@@ -667,6 +667,7 @@
   </div>
 </div>
 
+<script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
 <script>
 // ─────────────────────────────────────────────
 // Config — point this at your Flask instance
@@ -714,6 +715,9 @@ async function init() {
   if (hosts.length > 0) {
     selectHost(hosts[0].id);
   }
+
+  // Start MQTT bus (no-op if not configured)
+  MQTTBus.start();
 
   // Restore running job indicator after page reload (works cross-browser via backend)
   try {
@@ -2037,6 +2041,104 @@ async function submitChangePw() {
 
 // ─────────────────────────────────────────────
 // Global 401 → redirect to login
+// ─────────────────────────────────────────────
+// MQTT event bus (optional — enabled when /api/mqtt-config returns ws_url)
+// Subscribes to proxmox/+/vm/+/backup/# and proxmox/+/agent/status
+// Replaces 60s data polling with push-based updates from the agent.
+// ─────────────────────────────────────────────
+const MQTTBus = (() => {
+  let _client = null;
+  let _prefix  = 'proxmox';
+
+  function _onMessage(topic, payload) {
+    const msg = payload.toString();
+    const parts = topic.split('/');
+    // proxmox/<hostname>/agent/status
+    if (parts.length === 3 && parts[2] === 'status') {
+      const online = msg === 'online';
+      setStatus(online ? 'ok' : 'error',
+                online ? 'agent online' : 'agent offline');
+      return;
+    }
+    // proxmox/<hostname>/vm/<vmid>/backup/<type>
+    if (parts.length === 6 && parts[2] === 'vm' && parts[4] === 'backup') {
+      const vmid   = parts[3];
+      const type   = parts[5]; // status | progress | last_ok
+      _handleVmEvent(vmid, type, msg);
+    }
+  }
+
+  function _handleVmEvent(vmid, type, msg) {
+    if (type === 'status') {
+      // Update status badge on VM card if visible
+      const badge = document.querySelector(`[data-vmid="${vmid}"] .backup-status`);
+      if (badge) {
+        badge.textContent = msg;
+        badge.className   = `backup-status ${msg}`;
+      }
+      if (msg === 'done' || msg === 'failed') {
+        // Refresh data so snapshot list updates
+        loadData();
+      }
+    } else if (type === 'progress') {
+      try {
+        const d = JSON.parse(msg);
+        const pct = d.pct ?? 0;
+        const bar = document.querySelector(`[data-vmid="${vmid}"] .progress-bar`);
+        if (bar) bar.style.width = `${pct}%`;
+        const label = document.querySelector(`[data-vmid="${vmid}"] .progress-label`);
+        if (label) {
+          let txt = `${pct.toFixed(0)}%`;
+          if (d.speed_mbps) txt += ` · ${d.speed_mbps.toFixed(0)} MB/s`;
+          if (d.eta_s)      txt += ` · ETA ${_fmtEta(d.eta_s)}`;
+          label.textContent = txt;
+        }
+      } catch (_) {}
+    }
+  }
+
+  function _fmtEta(s) {
+    if (s < 60)   return `${s}s`;
+    if (s < 3600) return `${Math.round(s/60)}m`;
+    return `${Math.floor(s/3600)}h${Math.round((s%3600)/60)}m`;
+  }
+
+  async function start() {
+    let cfg;
+    try {
+      const r = await fetch('/api/mqtt-config');
+      cfg = await r.json();
+    } catch (_) { return; }
+
+    if (!cfg.enabled) {
+      console.debug('MQTT not configured — staying with REST polling');
+      return;
+    }
+    _prefix = cfg.topic_prefix || 'proxmox';
+
+    const opts = { clientId: `pbgui-${Math.random().toString(16).slice(2)}` };
+    if (cfg.username) { opts.username = cfg.username; opts.password = cfg.password; }
+
+    _client = mqtt.connect(cfg.ws_url, opts);
+
+    _client.on('connect', () => {
+      console.info('MQTT connected →', cfg.ws_url);
+      setStatus('ok', 'MQTT connected');
+      _client.subscribe(`${_prefix}/+/agent/status`);
+      _client.subscribe(`${_prefix}/+/vm/+/backup/status`);
+      _client.subscribe(`${_prefix}/+/vm/+/backup/progress`);
+    });
+
+    _client.on('message', (topic, payload) => _onMessage(topic, payload));
+
+    _client.on('error',      e  => console.warn('MQTT error', e));
+    _client.on('reconnect',  () => setStatus('error', 'MQTT reconnecting…'));
+    _client.on('offline',    () => setStatus('error', 'MQTT offline'));
+  }
+
+  return { start };
+})();
+
 // ─────────────────────────────────────────────
 const _origFetch = window.fetch;
 window.fetch = async function(...args) {

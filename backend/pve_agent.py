@@ -8,12 +8,23 @@ Inspired by Backrest's operation model:
   - Status tracked: pending → running → ok | failed
   - SSE stream delivers log lines live; replays full log when op is done
 
+MQTT events (optional — requires mqtt_host in config):
+  proxmox/<hostname>/agent/status         → online/offline (LWT, retained)
+  proxmox/<hostname>/vm/<id>/backup/status   → idle/running/done/failed (retained)
+  proxmox/<hostname>/vm/<id>/backup/progress → {"pct":42,"speed_mbps":…,"eta_s":…}
+  proxmox/<hostname>/vm/<id>/backup/last_ok  → ISO timestamp (retained)
+  proxmox/<hostname>/ops/<op_id>/log      → individual log lines
+
+HA MQTT Discovery payloads published automatically per VM (lazy, on first op).
+
 Bind to 10.10.0.1:8099 so only LXC containers on vmbr0 can reach it.
 """
 from __future__ import annotations
 
 import json
+import logging
 import re
+import socket
 import subprocess
 import threading
 import time
@@ -32,6 +43,174 @@ VERSION = "0.1.0"
 _start_time = time.monotonic()
 
 app = Flask(__name__)
+log = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MQTT publisher (optional — only active when mqtt_host is configured)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MQTTPublisher:
+    """Thin paho-mqtt wrapper with LWT and HA Discovery support.
+
+    All publishes are fire-and-forget (QoS 0 for progress, QoS 1 for state).
+    Connection runs in a background thread via loop_start().
+    """
+
+    def __init__(self, host: str, port: int = 1883,
+                 user: str = "", password: str = "",
+                 hostname: str = "") -> None:
+        import paho.mqtt.client as mqtt
+
+        self._hostname = hostname or socket.gethostname()
+        self._base     = f"proxmox/{self._hostname}"
+        self._discovered: set[str] = set()  # vmids already announced to HA
+        self._lock = threading.Lock()
+
+        lwt_topic = f"{self._base}/agent/status"
+
+        self._client = mqtt.Client(client_id=f"pve-agent-{self._hostname}")
+        self._client.will_set(lwt_topic, "offline", retain=True, qos=1)
+
+        if user:
+            self._client.username_pw_set(user, password)
+
+        self._client.on_connect    = self._on_connect
+        self._client.on_disconnect = self._on_disconnect
+
+        try:
+            self._client.connect_async(host, port, keepalive=60)
+            self._client.loop_start()
+        except Exception as exc:
+            log.warning("MQTT connect_async failed: %s", exc)
+
+    # ── internal callbacks ────────────────────────────────────────────────────
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            log.info("MQTT connected — publishing online status")
+            client.publish(f"{self._base}/agent/status", "online",
+                           retain=True, qos=1)
+        else:
+            log.warning("MQTT connect failed rc=%s", rc)
+
+    def _on_disconnect(self, client, userdata, rc):
+        if rc != 0:
+            log.warning("MQTT unexpected disconnect rc=%s — will auto-reconnect", rc)
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def publish_op_started(self, op_id: str, vmid: str | None) -> None:
+        if vmid:
+            self._ensure_discovery(vmid)
+            self._client.publish(f"{self._base}/vm/{vmid}/backup/status",
+                                 "running", retain=True, qos=1)
+        self._client.publish(f"{self._base}/ops/{op_id}/status",
+                             "running", qos=1)
+
+    def publish_op_done(self, op_id: str, vmid: str | None,
+                        ok: bool, finished_at: float) -> None:
+        status = "done" if ok else "failed"
+        if vmid:
+            self._client.publish(f"{self._base}/vm/{vmid}/backup/status",
+                                 status, retain=True, qos=1)
+            if ok:
+                ts = datetime.fromtimestamp(finished_at, tz=timezone.utc).isoformat()
+                self._client.publish(f"{self._base}/vm/{vmid}/backup/last_ok",
+                                     ts, retain=True, qos=1)
+        self._client.publish(f"{self._base}/ops/{op_id}/status", status, qos=1)
+
+    def publish_progress(self, op_id: str, vmid: str | None,
+                         pct: float, speed_mbps: float | None = None,
+                         eta_s: int | None = None) -> None:
+        payload = json.dumps({
+            "pct": round(pct, 1),
+            **({"speed_mbps": round(speed_mbps, 1)} if speed_mbps is not None else {}),
+            **({"eta_s": eta_s} if eta_s is not None else {}),
+        })
+        self._client.publish(f"{self._base}/ops/{op_id}/progress", payload, qos=0)
+        if vmid:
+            self._client.publish(f"{self._base}/vm/{vmid}/backup/progress",
+                                 payload, qos=0)
+
+    def publish_log(self, op_id: str, line: str) -> None:
+        self._client.publish(f"{self._base}/ops/{op_id}/log", line, qos=0)
+
+    def publish_vm_idle(self, vmid: str) -> None:
+        """Mark a VM's backup status as idle (e.g. after startup scan)."""
+        self._ensure_discovery(vmid)
+        self._client.publish(f"{self._base}/vm/{vmid}/backup/status",
+                             "idle", retain=True, qos=1)
+
+    def shutdown(self) -> None:
+        try:
+            self._client.publish(f"{self._base}/agent/status", "offline",
+                                 retain=True, qos=1)
+            time.sleep(0.2)  # let the publish flush
+        finally:
+            self._client.loop_stop()
+            self._client.disconnect()
+
+    # ── HA MQTT Discovery ─────────────────────────────────────────────────────
+
+    def _ensure_discovery(self, vmid: str) -> None:
+        """Publish HA Discovery payloads for a vmid once per session."""
+        with self._lock:
+            if vmid in self._discovered:
+                return
+            self._discovered.add(vmid)
+
+        hn  = self._hostname
+        dev = {"identifiers": [f"proxmox_{hn}"], "name": f"Proxmox {hn}",
+               "manufacturer": "Proxmox"}
+
+        def _pub(component: str, obj_id: str, cfg: dict) -> None:
+            topic = f"homeassistant/{component}/proxmox_{hn}_{obj_id}/config"
+            self._client.publish(topic, json.dumps(cfg), retain=True, qos=1)
+
+        _pub("sensor", f"vm{vmid}_backup_status", {
+            "name": f"VM {vmid} Backup Status",
+            "state_topic": f"{self._base}/vm/{vmid}/backup/status",
+            "unique_id": f"proxmox_{hn}_vm{vmid}_backup_status",
+            "icon": "mdi:backup-restore",
+            "device": dev,
+        })
+        _pub("sensor", f"vm{vmid}_backup_last_ok", {
+            "name": f"VM {vmid} Last Backup",
+            "state_topic": f"{self._base}/vm/{vmid}/backup/last_ok",
+            "device_class": "timestamp",
+            "unique_id": f"proxmox_{hn}_vm{vmid}_backup_last_ok",
+            "device": dev,
+        })
+        _pub("sensor", f"vm{vmid}_backup_progress", {
+            "name": f"VM {vmid} Backup Progress",
+            "state_topic": f"{self._base}/vm/{vmid}/backup/progress",
+            "value_template": "{{ value_json.pct }}",
+            "unit_of_measurement": "%",
+            "unique_id": f"proxmox_{hn}_vm{vmid}_backup_progress",
+            "icon": "mdi:progress-upload",
+            "device": dev,
+        })
+
+    def publish_agent_discovery(self) -> None:
+        """Publish agent-level HA Discovery (online/offline binary sensor)."""
+        hn  = self._hostname
+        dev = {"identifiers": [f"proxmox_{hn}"], "name": f"Proxmox {hn}",
+               "manufacturer": "Proxmox"}
+        topic = f"homeassistant/binary_sensor/proxmox_{hn}_agent/config"
+        self._client.publish(topic, json.dumps({
+            "name": f"Proxmox {hn} Agent",
+            "state_topic": f"{self._base}/agent/status",
+            "payload_on": "online",
+            "payload_off": "offline",
+            "unique_id": f"proxmox_{hn}_agent_status",
+            "device_class": "connectivity",
+            "device": dev,
+        }), retain=True, qos=1)
+
+
+# Module-level publisher — None when MQTT is not configured
+_mqtt: MQTTPublisher | None = None
 
 
 @app.before_request
@@ -65,6 +244,12 @@ class AgentConfig:
     verify_ssl: bool = False
     restic_env: dict = field(default_factory=dict)
     agent_token: str = ""        # if set, all requests must present "Authorization: Bearer <token>"
+    # MQTT (all optional — omit mqtt_host to disable)
+    mqtt_host: str = ""
+    mqtt_port: int = 1883
+    mqtt_user: str = ""
+    mqtt_password: str = ""
+    mqtt_hostname: str = ""      # MQTT topic prefix override (defaults to socket.gethostname())
 
     def to_host_config(self):
         """Return a HostConfig-compatible object for existing clients."""
@@ -247,9 +432,14 @@ class Operation:
     log: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    vmid: str | None = None         # associated VM/LXC id (for MQTT per-VM topics)
 
     def append_log(self, line: str) -> None:
         self.log.append(line)
+        if _mqtt:
+            _mqtt.publish_log(self.op_id, line)
+            # Parse restic JSON progress lines
+            _try_publish_restic_progress(self.op_id, self.vmid, line)
 
     def to_dict(self, *, full=True) -> dict:
         d = {
@@ -269,8 +459,8 @@ _operations: dict[str, Operation] = {}
 _ops_lock = threading.Lock()
 
 
-def _new_op(op_type: str) -> Operation:
-    op = Operation(op_id=str(uuid.uuid4()), type=op_type)
+def _new_op(op_type: str, vmid: str | None = None) -> Operation:
+    op = Operation(op_id=str(uuid.uuid4()), type=op_type, vmid=vmid)
     with _ops_lock:
         _operations[op.op_id] = op
     return op
@@ -285,10 +475,28 @@ def _get_op(op_id: str) -> Operation | None:
 # Background task runner
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _try_publish_restic_progress(op_id: str, vmid: str | None, line: str) -> None:
+    """If line is a restic --json status event, publish MQTT progress."""
+    if not _mqtt or not line.startswith("{"):
+        return
+    try:
+        d = json.loads(line)
+        if d.get("message_type") == "status":
+            pct      = d.get("percent_done", 0) * 100
+            bps      = d.get("bytes_per_second")
+            eta_s    = d.get("seconds_remaining")
+            speed    = bps / 1_048_576 if bps else None  # bytes/s → MB/s
+            _mqtt.publish_progress(op_id, vmid, pct, speed, eta_s)
+    except (json.JSONDecodeError, KeyError):
+        pass
+
+
 def _run_in_background(op: Operation, fn) -> None:
     """Execute fn(op) in a daemon thread; set status on finish."""
     def _worker():
         op.status = "running"
+        if _mqtt:
+            _mqtt.publish_op_started(op.op_id, op.vmid)
         try:
             fn(op)
             op.status = "ok"
@@ -297,6 +505,10 @@ def _run_in_background(op: Operation, fn) -> None:
             op.status = "failed"
         finally:
             op.finished_at = time.time()
+            if _mqtt:
+                _mqtt.publish_op_done(op.op_id, op.vmid,
+                                      ok=(op.status == "ok"),
+                                      finished_at=op.finished_at)
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
@@ -658,7 +870,7 @@ def op_backup():
     if storage is None:
         return jsonify({"error": "storage required"}), 400
 
-    op = _new_op("backup")
+    op = _new_op("backup", vmid=str(vmid))
 
     def _do(op: Operation):
         pve = PVEClient(_host())
@@ -691,7 +903,7 @@ def op_restore():
     if missing:
         return jsonify({"error": f"Missing fields: {', '.join(missing)}"}), 400
 
-    op = _new_op("restore")
+    op = _new_op("restore", vmid=str(vmid))
 
     def _do(op: Operation):
         pve = PVEClient(_host())
@@ -765,10 +977,31 @@ def _load_config(path: str = "/etc/pve-agent/config.json") -> AgentConfig:
 
 
 if __name__ == "__main__":
+    import atexit
     import os
     import sys
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
     cfg_path = sys.argv[1] if len(sys.argv) > 1 else "/etc/pve-agent/config.json"
     _cfg = _load_config(cfg_path)
+
+    # Start MQTT publisher if configured
+    if _cfg.mqtt_host:
+        _mqtt = MQTTPublisher(
+            host=_cfg.mqtt_host,
+            port=_cfg.mqtt_port,
+            user=_cfg.mqtt_user,
+            password=_cfg.mqtt_password,
+            hostname=_cfg.mqtt_hostname,
+        )
+        # Give the async connect a moment, then publish Discovery
+        threading.Timer(2.0, _mqtt.publish_agent_discovery).start()
+        atexit.register(_mqtt.shutdown)
+        log.info("MQTT publisher started → %s:%s", _cfg.mqtt_host, _cfg.mqtt_port)
+    else:
+        log.info("MQTT not configured — running without event publishing")
+
     # Bind address: AGENT_BIND env overrides the default 10.10.0.1.
     # On a nested CI VM, vmbr0 is 10.10.0.1. On a real PVE host, use the
     # actual bridge IP (e.g. 192.168.0.200) or 0.0.0.0 for all interfaces.
