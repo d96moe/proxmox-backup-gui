@@ -229,9 +229,11 @@
   .job-indicator-dot { width:6px; height:6px; border-radius:50%; background:var(--accent); animation:pulse 1s infinite; flex-shrink:0; }
 
   /* Footer */
-  .footer { position:fixed; bottom:0; left:0; right:0; height:30px; background:var(--surface); border-top:1px solid var(--border); display:flex; align-items:center; padding:0 20px; gap:24px; }
+  .footer { position:fixed; bottom:0; left:0; right:0; height:30px; background:var(--surface); border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; padding:0 20px; }
+  .footer-left { display:flex; align-items:center; gap:24px; }
   .footer-item { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); display:flex; align-items:center; gap:6px; }
   .footer-dot { width:5px; height:5px; border-radius:50%; }
+  .footer-sync { display:flex; align-items:center; gap:7px; font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); }
 
   /* Content loading overlay */
   .tab-content-wrap { position:relative; }
@@ -335,8 +337,6 @@
   </div>
   <div class="status-pill">
     <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme"></button>
-    <div class="status-dot" id="status-dot"></div>
-    <span id="sync-status">connecting…</span>
     <div style="position:relative;">
       <button class="user-btn" id="user-btn" onclick="toggleUserMenu()">
         <div class="user-avatar" id="user-avatar">?</div>
@@ -422,8 +422,14 @@
 </div>
 
 <div class="footer">
-  <div class="footer-item"><div class="footer-dot" style="background:var(--green)"></div><span id="footer-pbs">PBS —</span></div>
-  <div class="footer-item"><div class="footer-dot" style="background:var(--accent)"></div><span id="footer-restic">restic —</span></div>
+  <div class="footer-left">
+    <div class="footer-item"><div class="footer-dot" style="background:var(--green)"></div><span id="footer-pbs">PBS —</span></div>
+    <div class="footer-item"><div class="footer-dot" style="background:var(--accent)"></div><span id="footer-restic">restic —</span></div>
+  </div>
+  <div class="footer-sync">
+    <div class="status-dot" id="status-dot"></div>
+    <span id="sync-status">connecting…</span>
+  </div>
 </div>
 
 <!-- Restore Modal -->
