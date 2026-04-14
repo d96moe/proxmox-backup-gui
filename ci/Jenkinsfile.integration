@@ -228,7 +228,7 @@ STEP_B
                         root@${VM_IP}:/tmp/gui-update/
 
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
-                        frontend/index.html \
+                        frontend/index.html frontend/login.html \
                         root@${VM_IP}:/tmp/gui-update/
 
                     # Push latest test files to VM (so we always run the current test suite)
@@ -358,6 +358,8 @@ DEPLOY_AGENT
                             /opt/proxmox-backup-gui/requirements.txt
                         pct push 300 /tmp/gui-update/index.html \
                             /opt/proxmox-backup-gui/frontend/index.html
+                        pct push 300 /tmp/gui-update/login.html \
+                            /opt/proxmox-backup-gui/frontend/login.html
 
                         # Install any new Python deps into the venv (e.g. flask-login added after template was created)
                         pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/pip install --quiet -r /opt/proxmox-backup-gui/requirements.txt
@@ -372,6 +374,15 @@ h[0]['agent_url']   = 'http://10.10.0.1:8099'
 h[0]['agent_token'] = h[0].get('pbs_password', '')
 open('/opt/proxmox-backup-gui/backend/hosts.json','w').write(json.dumps(h))
 print('hosts.json: agent_url and agent_token configured')
+"
+                        # Create CI admin user with known password (overwrites any existing users.json)
+                        pct exec 300 -- python3 -c "
+import json, sys
+sys.path.insert(0, '/opt/proxmox-backup-gui/backend')
+from werkzeug.security import generate_password_hash
+users = [{'username': 'admin', 'password_hash': generate_password_hash('proxmox-ci-2024'), 'role': 'admin'}]
+open('/opt/proxmox-backup-gui/backend/users.json', 'w').write(json.dumps(users))
+print('CI admin user created')
 "
                         pct exec 300 -- systemctl restart proxmox-backup-gui
                         # Poll until active (MQTT connect can take >3s on cold start)
@@ -840,6 +851,7 @@ for item in d.get('lxcs',[]):
                         echo "Running: pytest ${PYTEST_TARGET} ${PYTEST_FILTER_ARG:+-k} ${PYTEST_FILTER_ARG}"
                         cd /opt/ci/proxmox-backup-gui
                         BACKEND_URL=http://10.10.0.100:5000 \
+                        CI_ADMIN_PASSWORD=proxmox-ci-2024 \
                         pytest ${PYTEST_TARGET} \
                             -v --tb=short \
                             ${PYTEST_FILTER_ARG:+-k "${PYTEST_FILTER_ARG}"} \
