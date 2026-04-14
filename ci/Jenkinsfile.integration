@@ -372,13 +372,19 @@ print('hosts.json: agent_url and agent_token configured')
 "
                         pct exec 300 -- systemctl restart proxmox-backup-gui
                         # Poll until active (MQTT connect can take >3s on cold start)
-                        for i in $(seq 1 15); do
+                        for i in $(seq 1 20); do
                             STATUS=$(pct exec 300 -- systemctl is-active proxmox-backup-gui 2>/dev/null || true)
                             [ "$STATUS" = "active" ] && break
-                            echo "  waiting for proxmox-backup-gui... ($i/15) [$STATUS]"
-                            sleep 2
+                            echo "  waiting for proxmox-backup-gui... ($i/20) [$STATUS]"
+                            sleep 3
                         done
-                        pct exec 300 -- systemctl is-active proxmox-backup-gui
+                        # Final check — dump journal on failure so we can diagnose
+                        if ! pct exec 300 -- systemctl is-active proxmox-backup-gui; then
+                            echo "=== proxmox-backup-gui journal (last 50 lines) ==="
+                            pct exec 300 -- journalctl -u proxmox-backup-gui -n 50 --no-pager || true
+                            echo "=== end journal ==="
+                            exit 1
+                        fi
 
                         # Update test files and frontend in CI working dir
                         # (mock server in test_frontend.py reads frontend/index.html
