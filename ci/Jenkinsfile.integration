@@ -359,8 +359,8 @@ DEPLOY_AGENT
                         pct push 300 /tmp/gui-update/index.html \
                             /opt/proxmox-backup-gui/frontend/index.html
 
-                        # Install any new Python deps (e.g. flask-login added after template was created)
-                        pct exec 300 -- pip install --quiet -r /opt/proxmox-backup-gui/requirements.txt
+                        # Install any new Python deps into the venv (e.g. flask-login added after template was created)
+                        pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/pip install --quiet -r /opt/proxmox-backup-gui/requirements.txt
 
                         # Wire up agent_url + agent_token in hosts.json so the Flask
                         # backend can authenticate to the agent. The token matches
