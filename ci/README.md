@@ -18,7 +18,7 @@ Two Jenkins pipelines test the GUI at different levels:
 | Pipeline | Jenkins job | Jenkinsfile | Trigger | What it tests |
 |---|---|---|---|---|
 | Mock / fast | `proxmox-backup-gui` | `ci/Jenkinsfile` | Every push (webhook) | Playwright against mock server, ~60s, no VM |
-| Integration | `proxmox-backup-gui-integration` | `ci/Jenkinsfile.integration` | Nightly 02:00 + manual | Playwright against real Flask + PBS + Google Drive, ~15 min |
+| Integration | `proxmox-backup-gui-integration` | `ci/Jenkinsfile.integration` | Nightly ~23:00 + manual | Playwright against real Flask + PBS + Google Drive, ~20 min |
 
 The fast pipeline gives rapid feedback on every push. The integration pipeline verifies end-to-end behaviour against a real Proxmox environment.
 

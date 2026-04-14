@@ -33,7 +33,7 @@ The GUI LXC talks to your PVE host over both the API and SSH. The following must
 | `rclone` binary | Required for cloud features; must be in `$PATH` |
 | rclone configured | A Google Drive remote (`rclone.conf`) with a remote path for the restic repo |
 | restic repo initialized | `restic -r rclone:<remote>:<path> init` must have been run |
-| Passwordless SSH from GUI LXC | The GUI LXC (default: LXC 199) must be able to SSH to the PVE host as root without a password prompt — all cloud operations (restic backup, restore, datastore wipe) run via SSH, never inside the LXC |
+| **PVE agent** (recommended) or **SSH** | See [Agent mode vs SSH mode](#agent-mode-vs-ssh-mode) below |
 
 ### Optional (cloud features only)
 
@@ -68,21 +68,29 @@ ssh-copy-id root@<your-pve-host-ip>
 The GUI is designed to run **inside a dedicated LXC container** on your PVE host — not on the PVE host itself. This keeps it isolated from the hypervisor and makes it easy to deploy, update, and destroy independently.
 
 ```
-┌─ LXC 199 (GUI container) ──────────────────────────────┐
-│                                                         │
-│  pbs_client.py   ◄── PBS API (HTTPS)                   │
-│  pve_client.py   ◄── PVE API (HTTPS)                   │
-│  restic_client.py ◄── SSH → PVE host → restic/rclone   │
-│                                                         │
-│  Flask app.py ──► index.html                            │
-└─────────────────────────────────────────────────────────┘
+┌─ LXC 199 (GUI container) ──────────────────────────────────┐
+│                                                             │
+│  agent_client.py  ◄── HTTP → pve_agent.py (port 8099)      │
+│                           (runs on PVE host — handles all   │
+│                            PBS, PVE, restic, rclone calls)  │
+│                                                             │
+│  Flask app.py ──► index.html                                │
+└─────────────────────────────────────────────────────────────┘
          ▲
     browser (port 5000)
 ```
 
-**Why SSH for restic/rclone?** restic and rclone are installed on the PVE host (not inside the LXC), and restic must stop/start PBS to safely back up or restore the datastore. All cloud operations are therefore run remotely on the PVE host via `ssh root@<pve_host>`. The LXC itself needs no restic, rclone, or Google Drive access.
+### Agent mode vs SSH mode
 
-> Running the GUI directly on the PVE host is technically possible but not recommended — it breaks isolation, and restic commands would then SSH to localhost (redundant). The setup scripts only support the LXC model.
+The GUI supports two modes for reaching the PVE host:
+
+**Agent mode** (recommended): a small Flask HTTP agent (`pve_agent.py`) runs on the PVE host and exposes a local REST API. The GUI LXC calls it over plain HTTP — no SSH, no credentials for PBS/PVE stored in `hosts.json`. The agent handles all PBS, PVE, restic, and rclone calls locally. Bearer token protects the endpoint.
+
+**SSH mode** (legacy): the GUI LXC SSHes into the PVE host to run restic/rclone commands, and calls the PBS and PVE APIs directly. Requires passwordless SSH from LXC 199 to the PVE host as root.
+
+When `agent_url` is set in `hosts.json`, agent mode is used automatically.
+
+> Running the GUI directly on the PVE host is technically possible but not recommended — it breaks isolation. The setup scripts only support the LXC model.
 
 ## Deployment
 
@@ -114,7 +122,22 @@ Pushes updated backend + frontend files to the LXC and restarts the service.
 
 ## Configuration
 
-Edit `/opt/proxmox-backup-gui/backend/hosts.json` on the LXC:
+Edit `/opt/proxmox-backup-gui/backend/hosts.json` on the LXC.
+
+**Agent mode** (recommended — no SSH, no direct PBS/PVE credentials in the GUI):
+
+```json
+[
+  {
+    "id": "home",
+    "label": "pve · home",
+    "agent_url": "http://192.168.0.200:8099",
+    "agent_token": "your-pbs-password"
+  }
+]
+```
+
+**SSH mode** (legacy):
 
 ```json
 [
@@ -133,6 +156,8 @@ Edit `/opt/proxmox-backup-gui/backend/hosts.json` on the LXC:
   }
 ]
 ```
+
+The agent token is the PBS user password — it is used as a Bearer token to authenticate requests to the agent.
 
 ## API Endpoints
 
