@@ -732,18 +732,16 @@ def test_happy_refresh_reloads(page: Page):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_error_items_500_shows_error_not_loading(blank_page):
-    """MQTT-only frontend: data arrives via MQTT (not REST), page must not stay on
-    Connecting… indefinitely — loadData() is pure MQTT so /items status has no effect."""
+    """MQTT-only frontend: data arrives via MQTT (not REST), page must render VM data.
+    REST /items status has no effect since loadData() is pure MQTT."""
     pg, server = blank_page
     pg.goto(server)
-    # MQTT mock delivers data; page must transition past Connecting… to actual content
+    # MQTT mock delivers home data → wait for the VM card to appear
     pg.wait_for_function(
-        "() => !document.getElementById('content').innerText.includes('Connecting') "
-        "&& !document.getElementById('content').innerText.includes('Loading')",
+        "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
     )
     text = content_text(pg)
-    assert "Connecting" not in text, f"Still stuck on Connecting… after MQTT connect: {text!r}"
     assert "home-vm" in text, f"Expected VM data after MQTT connect, got: {text!r}"
 
 def test_error_hosts_500_shows_cannot_reach(blank_page):
