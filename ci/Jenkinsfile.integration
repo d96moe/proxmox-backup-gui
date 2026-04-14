@@ -371,7 +371,13 @@ open('/opt/proxmox-backup-gui/backend/hosts.json','w').write(json.dumps(h))
 print('hosts.json: agent_url and agent_token configured')
 "
                         pct exec 300 -- systemctl restart proxmox-backup-gui
-                        sleep 3
+                        # Poll until active (MQTT connect can take >3s on cold start)
+                        for i in $(seq 1 15); do
+                            STATUS=$(pct exec 300 -- systemctl is-active proxmox-backup-gui 2>/dev/null || true)
+                            [ "$STATUS" = "active" ] && break
+                            echo "  waiting for proxmox-backup-gui... ($i/15) [$STATUS]"
+                            sleep 2
+                        done
                         pct exec 300 -- systemctl is-active proxmox-backup-gui
 
                         # Update test files and frontend in CI working dir
