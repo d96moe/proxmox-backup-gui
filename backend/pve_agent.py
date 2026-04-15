@@ -200,8 +200,10 @@ class MQTTPublisher:
 
     def _handle_cmd_restore(self, body: dict) -> None:
         vmid        = body.get("vmid")
-        vm_type     = body.get("type", "vm")
+        vm_type     = _pbs_type(body.get("type", "vm"))  # normalize "lxc" → "ct" for PVE+PBS API
         backup_time = body.get("backup_time")
+        source      = body.get("source", "local")        # 'local' | 'cloud'
+        restic_id   = body.get("restic_id")
         corr_id     = body.get("corr_id", str(uuid.uuid4()))
         run_backup_after = body.get("run_backup_after", False)
         if not vmid or not backup_time or not _cfg:
@@ -209,17 +211,31 @@ class MQTTPublisher:
         node         = self._node()
         storage_id   = _cfg.pbs_storage_id
         pbs_ds       = _cfg.pbs_datastore
-        bt_iso       = datetime.fromtimestamp(int(backup_time), tz=timezone.utc).isoformat()
+        bt_iso       = datetime.fromtimestamp(int(backup_time), tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         op           = _new_op("restore", vmid=str(vmid))
         self._ack(corr_id, op.op_id)
-        log.info("MQTT cmd/restore: %s/%s ts=%s corr_id=%s", vm_type, vmid, backup_time, corr_id)
+        log.info("MQTT cmd/restore: %s/%s ts=%s source=%s corr_id=%s", vm_type, vmid, backup_time, source, corr_id)
+
+        from_cloud = source == "cloud" and bool(restic_id and _cfg.restic_repo)
+        step       = 0
+
+        def _step(n, total, msg):
+            op.append_log(f"Step {n}/{total} — {msg}")
 
         def _do(op: Operation):
+            total = (3 if from_cloud else 2) + (1 if run_backup_after else 0)
+            n = 1
+
+            if from_cloud:
+                _step(n, total, f"Restoring PBS datastore from restic snapshot {restic_id[:8]}…"); n += 1
+                res = LocalResticClient(_cfg)
+                res.restore_datastore(restic_id, op.append_log)
+                # PBS is now running again; snapshot is back in local datastore
+
             pve = PVEClient(_host())
-            total = 3 if run_backup_after else 2
-            op.append_log(f"Step 1/{total} — Stopping {vm_type}/{vmid}…")
+            _step(n, total, f"Stopping {vm_type}/{vmid}…"); n += 1
             pve.stop_vm(int(vmid), vm_type, node)
-            op.append_log(f"Step 2/{total} — Restoring from PBS snapshot {bt_iso}…")
+            _step(n, total, f"Restoring from PBS snapshot {bt_iso}…"); n += 1
             upid = pve.restore_vm(int(vmid), vm_type, bt_iso, storage_id, node, pbs_ds)
             ok   = pve.wait_for_task(node, upid, op.append_log)
             if not ok:
@@ -228,7 +244,14 @@ class MQTTPublisher:
             pve.start_vm(int(vmid), vm_type, node)
             op.append_log(f"Started {vm_type}/{vmid}.")
 
-        _run_in_background(op, _do)
+            if run_backup_after and _cfg and _cfg.restic_repo:
+                _step(n, total, "Starting restic cloud backup after restore…"); n += 1
+                res2 = LocalResticClient(_cfg)
+                pbs_snaps = _fetch_pbs_snaps(_host())
+                res2.backup_datastore(_cfg.pbs_datastore_path, op.append_log, pbs_snaps)
+                op.append_log("Cloud backup complete.")
+
+        _run_in_background(op, _do, rescan_restic=from_cloud or run_backup_after)
 
     def _handle_cmd_delete(self, body: dict) -> None:
         vmid        = body.get("vmid")
@@ -243,13 +266,13 @@ class MQTTPublisher:
         self._ack(corr_id, op.op_id)
         log.info("MQTT cmd/delete: %s/%s ts=%s scope=%s", vm_type, vmid, backup_time, scope)
 
-        do_restic = scope == "both" and bool(restic_id and _cfg.restic_repo)
+        do_restic = scope in ("both", "cloud") and bool(restic_id and _cfg.restic_repo)
 
         def _do(op: Operation):
             if scope in ("pbs", "both"):
                 pbs = PBSClient(_host())
                 op.append_log(f"Deleting PBS snapshot {vm_type}/{vmid} at {backup_time}…")
-                deleted = pbs.delete_snapshot(vm_type, str(vmid), int(backup_time))
+                deleted = pbs.delete_snapshot(_pbs_type(vm_type), str(vmid), int(backup_time))
                 if deleted:
                     op.append_log("PBS snapshot deleted.")
                     op.append_log("Starting datastore GC…")
@@ -277,7 +300,7 @@ class MQTTPublisher:
 
         def _do(op: Operation):
             pbs  = PBSClient(_host())
-            count = pbs.delete_all_snapshots_for_vm(vm_type, str(vmid), op.append_log)
+            count = pbs.delete_all_snapshots_for_vm(_pbs_type(vm_type), str(vmid), op.append_log)
             op.append_log(f"Deleted {count} snapshot(s).")
 
         _run_in_background(op, _do)
@@ -1232,6 +1255,9 @@ class LocalResticClient:
             log_fn("Starting PBS…")
             subprocess.run(["systemctl", "start", "proxmox-backup", "proxmox-backup-proxy"],
                            env=self._full_env, timeout=30)
+            log_fn("Waiting for PBS to become ready…")
+            time.sleep(5)
+            log_fn("PBS ready.")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1271,6 +1297,11 @@ class Operation:
 
 _operations: dict[str, Operation] = {}
 _ops_lock = threading.Lock()
+
+
+def _pbs_type(vm_type: str) -> str:
+    """Normalize PVE VM type to PBS backup-type. PVE/frontend uses 'lxc', PBS API uses 'ct'."""
+    return "ct" if vm_type == "lxc" else vm_type
 
 
 def _fetch_pbs_snaps(host_cfg) -> list[tuple[str, str, int]]:

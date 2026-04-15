@@ -331,12 +331,13 @@ def _mqtt_retained_messages(host_id: str) -> list[dict]:
 def _mqtt_mock_script(host_ids: list[str]) -> str:
     """Return JS to inject before page load via add_init_script().
 
-    Defines window.mqtt as non-writable/non-configurable so that any later
-    CDN load of mqtt.min.js cannot overwrite it.  The fake connect() returns
-    a client that:
-      1. Fires 'connect' after 5 ms
-      2. On first subscribe, delivers retained messages for ALL configured hosts
-         so every host's data is in the DataStore from the start.
+    Mocks window.WebSocket so that connections to /mqtt-ws are intercepted.
+    The fake WebSocket:
+      1. Fires onopen after 5 ms
+      2. On {"type":"replay","prefix":"proxmox/<host>"} delivers retained
+         messages for that host — matching the Flask MQTT proxy wire protocol.
+      3. On rescan cmd: increments _rescanCount and re-delivers retained data.
+      4. On action cmd: delivers a job/ack message so the job modal can open.
     """
     all_msgs = {}
     for hid in host_ids:
@@ -345,102 +346,109 @@ def _mqtt_mock_script(host_ids: list[str]) -> str:
     return f"""
 (function() {{
   const _retainedByHost = {json.dumps(all_msgs)};
+  let _currentWs = null;
 
-  function _deliverForHost(hostId, handlers) {{
+  function _deliver(ws, topic, payload) {{
+    if (ws && ws.onmessage) {{
+      ws.onmessage({{ data: JSON.stringify({{ topic: topic, payload: payload }}) }});
+    }}
+  }}
+
+  function _deliverForHost(hostId, ws) {{
     const msgs = _retainedByHost[hostId] || [];
     msgs.forEach(function(m) {{
-      if (handlers.message) handlers.message(m.topic, m.payload);
+      _deliver(ws, m.topic, m.payload);
     }});
   }}
 
-  function _activeHostId() {{
-    // Read the currently active host from the sidebar nav element.
-    const el = document.querySelector('.host-item.active');
-    return el ? el.id.replace('nav-', '') : null;
-  }}
+  const _RealWebSocket = window.WebSocket;
 
-  function _mockConnect(url, opts) {{
-    const handlers = {{}};
-    let _subscribed = false;
-    const client = {{
-      on: function(ev, fn) {{ handlers[ev] = fn; return this; }},
-      subscribe: function(pattern, o, cb) {{
-        // On first subscribe (or after unsubscribe reset) deliver retained
-        // messages for the currently active host — simulates broker re-delivery.
-        if (!_subscribed) {{
-          _subscribed = true;
-          setTimeout(function() {{
-            const host = _activeHostId() || Object.keys(_retainedByHost)[0];
-            _deliverForHost(host, handlers);
-          }}, 30);
-        }}
-        if (typeof o === 'function') o(null, []);
-        else if (typeof cb === 'function') cb(null, []);
-        return this;
-      }},
-      unsubscribe: function(topics, cb) {{
-        // Reset _subscribed so the next subscribe() re-delivers for the new host.
-        // Simulates broker unsubscribing and clearing retained message state.
-        _subscribed = false;
-        if (typeof cb === 'function') cb();
-        return this;
-      }},
-      publish: function(t, p, o, cb) {{
-        // On any rescan command re-deliver retained messages for the currently
-        // active host — correct even mid-switch because we read the DOM.
-        if (t.indexOf('/cmd/rescan') !== -1) {{
+  function MockWebSocket(url, protocols) {{
+    // Only intercept /mqtt-ws; pass other URLs to the real WebSocket.
+    if (typeof url === 'string' && url.indexOf('/mqtt-ws') === -1) {{
+      return new _RealWebSocket(url, protocols);
+    }}
+
+    this.readyState = 0;
+    this.onopen    = null;
+    this.onmessage = null;
+    this.onerror   = null;
+    this.onclose   = null;
+
+    _currentWs = this;
+    const self = this;
+
+    setTimeout(function() {{
+      self.readyState = 1;
+      if (self.onopen) self.onopen({{}});
+    }}, 5);
+
+    this.send = function(data) {{
+      let msg;
+      try {{ msg = JSON.parse(data); }} catch(_) {{ return; }}
+
+      if (msg.type === 'pong') return;
+
+      if (msg.type === 'replay') {{
+        // Extract host from prefix e.g. "proxmox/home" → "home"
+        const parts = (msg.prefix || '').split('/');
+        const hostId = parts[parts.length - 1];
+        setTimeout(function() {{ _deliverForHost(hostId, self); }}, 30);
+        return;
+      }}
+
+      if (msg.topic) {{
+        const topic = msg.topic;
+
+        // Rescan command — re-deliver retained for the currently active host.
+        if (topic.indexOf('/cmd/rescan') !== -1) {{
           window._rescanCount++;
-          var host = _activeHostId();
-          if (host) {{
-            setTimeout(function() {{ _deliverForHost(host, handlers); }}, 30);
-          }}
+          const el = document.querySelector('.host-item.active');
+          const host = el ? el.id.replace('nav-', '') : Object.keys(_retainedByHost)[0];
+          setTimeout(function() {{ _deliverForHost(host, self); }}, 30);
+          return;
         }}
-        // On any action command (backup/restore/delete/…), reply with a job ack
-        // so the frontend can open the job progress modal.
-        // Topic format: {{prefix}}/{{host}}/cmd/{{action}}
-        var cmdMatch = t.match(/^([^/]+)[/]([^/]+)[/]cmd[/](?!rescan)(.+)$/);
+
+        // Action command (backup/restore/delete/…) — reply with a job ack.
+        const cmdMatch = topic.match(/^([^\/]+)\/([^\/]+)\/cmd\/(?!rescan)(.+)$/);
         if (cmdMatch) {{
-          var _prefix = cmdMatch[1];
-          var _host   = cmdMatch[2];
+          const _pfx  = cmdMatch[1];
+          const _host = cmdMatch[2];
           try {{
-            var _pl = JSON.parse(p);
-            var _corr_id = _pl.corr_id;
+            const _pl      = JSON.parse(msg.payload || '{{}}');
+            const _corr_id = _pl.corr_id;
             if (_corr_id) {{
               setTimeout(function() {{
-                if (handlers.message) {{
-                  handlers.message(
-                    _prefix + '/' + _host + '/job/' + _corr_id + '/ack',
-                    JSON.stringify({{ op_id: 'mock-job-1' }})
-                  );
-                }}
+                _deliver(self, _pfx + '/' + _host + '/job/' + _corr_id + '/ack',
+                         JSON.stringify({{ op_id: 'mock-job-1' }}));
               }}, 20);
             }}
           }} catch(_) {{}}
         }}
-        if (typeof o === 'function') o(null);
-        else if (typeof cb === 'function') cb(null);
-        return this;
-      }},
-      end: function() {{}},
-      connected: true,
+      }}
     }};
-    // Expose inject helper so tests can deliver arbitrary MQTT messages directly.
-    window._mqttInject = function(topic, payload) {{
-      if (handlers.message) handlers.message(topic, typeof payload === 'string' ? payload : JSON.stringify(payload));
+
+    this.close = function() {{
+      this.readyState = 3;
+      if (this.onclose) this.onclose({{ code: 1000, reason: '' }});
     }};
-    setTimeout(function() {{ if (handlers.connect) handlers.connect(); }}, 5);
-    return client;
   }}
+
+  MockWebSocket.CONNECTING = 0;
+  MockWebSocket.OPEN       = 1;
+  MockWebSocket.CLOSING    = 2;
+  MockWebSocket.CLOSED     = 3;
+
+  window.WebSocket = MockWebSocket;
+
+  // Expose inject helper so tests can deliver arbitrary MQTT messages directly.
+  window._mqttInject = function(topic, payload) {{
+    _deliver(_currentWs, topic,
+             typeof payload === 'string' ? payload : JSON.stringify(payload));
+  }};
 
   // Rescan command counter — readable via page.evaluate("window._rescanCount")
   window._rescanCount = 0;
-
-  // Lock window.mqtt so that a later CDN mqtt.min.js load cannot overwrite it.
-  Object.defineProperty(window, 'mqtt', {{
-    configurable: false,
-    writable: false,
-    value: {{ connect: _mockConnect }},
-  }});
 }})();
 """
 
