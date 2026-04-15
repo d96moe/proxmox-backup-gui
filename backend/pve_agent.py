@@ -627,6 +627,7 @@ class StatePoller:
                 seen_cloud.add(bt)
                 annotated.append({
                     "backup_time":     bt,
+                    "date":            datetime.fromtimestamp(bt, tz=timezone.utc).strftime("%Y-%m-%d %H:%M"),
                     "local":           False,
                     "cloud":           True,
                     "incremental":     True,
@@ -646,7 +647,12 @@ class StatePoller:
                 {
                     **s,
                     "covers": [
-                        {**c, "local": c.get("pbs_time") in pbs_times}
+                        {
+                            **c,
+                            "local":    c.get("pbs_time") in pbs_times,
+                            "pbs_date": datetime.fromtimestamp(c["pbs_time"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                                        if c.get("pbs_time") else None,
+                        }
                         for c in s.get("covers", [])
                         if c.get("vmid") == (int(vmid) if vmid.isdigit() else vmid)
                     ],

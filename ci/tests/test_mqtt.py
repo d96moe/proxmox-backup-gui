@@ -901,3 +901,81 @@ class TestCloudOnlySnapshots:
         times = [s["backup_time"] for s in pub["vm/301/pbs"]["snapshots"]]
         assert times == sorted(times, reverse=True), \
             f"Snapshots must be sorted newest-first, got order: {times}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROD BUG 5: cloud-only entries missing date; restic covers missing pbs_date
+# Regression: date="undefined" shown in Backups tab for cloud-only snaps;
+# no hover tooltip on VM badges in Cloud tab (pbs_date was always empty).
+# Fix: _scan_pve_pbs must compute date from backup_time for cloud-only entries,
+# and pbs_date from pbs_time for each restic cover.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestTimestampFields:
+    """date and pbs_date fields must be present so the UI can render them."""
+
+    def _run_scan(self, poller, pve_vms, pbs_groups_dict, restic_snaps):
+        poller._restic_snaps = restic_snaps
+        published = {}
+        orig = poller._pub_if_changed
+        def _spy(suffix, data):
+            published[suffix] = data
+            poller._hashes.pop(suffix, None)
+            orig(suffix, data)
+        pbs_list = [
+            {"pve_id": int(vid), "snapshots": snaps}
+            for vid, snaps in pbs_groups_dict.items()
+        ]
+        with patch.object(poller, "_pub_if_changed", side_effect=_spy), \
+             patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent._host", return_value=MagicMock()):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = pve_vms
+            pbs_cls.return_value.get_snapshots.return_value = pbs_list
+            poller._scan_pve_pbs()
+        return published
+
+    def test_cloud_only_entry_has_date_field(self, agent_cfg):
+        """Cloud-only pbs entries must include a 'date' string from backup_time.
+        Bug: date field was missing → UI showed 'undefined'."""
+        poller, _ = _make_poller(agent_cfg)
+        pve_vms = {301: {"name": "ct-301", "type": "lxc",
+                         "status": "running", "os": "linux", "template": False}}
+        pbs_groups = {"301": [{"backup_time": 2000, "size_bytes": 512}]}
+        restic_snaps = [{
+            "id": "r1", "short_id": "r1s", "ts": 1050, "size_bytes": 500,
+            "covers": [{"vmid": 301, "pbs_time": 1000}],
+        }]
+
+        pub = self._run_scan(poller, pve_vms, pbs_groups, restic_snaps)
+
+        cloud_only = [s for s in pub["vm/301/pbs"]["snapshots"]
+                      if s.get("backup_time") == 1000]
+        assert cloud_only, "Cloud-only entry must exist"
+        assert "date" in cloud_only[0], "Cloud-only entry must have 'date' field"
+        assert cloud_only[0]["date"] not in (None, "", "undefined"), \
+            f"date must be a non-empty string, got: {cloud_only[0].get('date')!r}"
+        # Verify it's a sane timestamp string
+        assert "1970" in cloud_only[0]["date"] or "-" in cloud_only[0]["date"], \
+            f"date must look like a timestamp, got: {cloud_only[0]['date']!r}"
+
+    def test_restic_cover_has_pbs_date_field(self, agent_cfg):
+        """Restic covers must include pbs_date string for hover tooltip.
+        Bug: pbs_date was never set → hover on VM badge in Cloud tab was empty."""
+        poller, _ = _make_poller(agent_cfg)
+        pve_vms = {301: {"name": "ct-301", "type": "lxc",
+                         "status": "running", "os": "linux", "template": False}}
+        pbs_groups = {"301": [{"backup_time": 1000, "size_bytes": 512}]}
+        restic_snaps = [{
+            "id": "r1", "short_id": "r1s", "ts": 1050, "size_bytes": 500,
+            "covers": [{"vmid": 301, "pbs_time": 1000}],
+        }]
+
+        pub = self._run_scan(poller, pve_vms, pbs_groups, restic_snaps)
+
+        covers = pub["vm/301/restic"]["snapshots"][0]["covers"]
+        assert covers, "Covers must not be empty"
+        cover = covers[0]
+        assert "pbs_date" in cover, "Cover must have 'pbs_date' field for tooltip"
+        assert cover["pbs_date"] not in (None, "", "undefined"), \
+            f"pbs_date must be a non-empty string, got: {cover.get('pbs_date')!r}"
