@@ -394,6 +394,15 @@ users = [{'username': 'admin', 'password_hash': generate_password_hash('proxmox-
 open('/opt/proxmox-backup-gui/backend/users.json', 'w').write(json.dumps(users))
 print('CI admin user created')
 "
+                        # The service file was created on the template VM (192.168.0.249).
+                        # After cloning, the CI VM runs at 192.168.0.250 — patch the
+                        # MQTT_WS_URL so the browser connects to this clone's Mosquitto,
+                        # not the template's. The agent publishes to localhost:1883 on
+                        # this VM; the browser must connect to the same broker.
+                        pct exec 300 -- sed -i \
+                            "s|MQTT_WS_URL=.*|MQTT_WS_URL=ws://192.168.0.250:9001|" \
+                            /etc/systemd/system/proxmox-backup-gui.service
+                        pct exec 300 -- systemctl daemon-reload
                         pct exec 300 -- systemctl restart proxmox-backup-gui
                         # Poll until active (MQTT connect can take >3s on cold start)
                         for i in $(seq 1 20); do
