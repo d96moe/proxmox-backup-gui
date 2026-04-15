@@ -23,9 +23,31 @@ pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/index.html" "/opt/proxmox-backup-gu
 echo "  pushed: index.html"
 pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/login.html" "/opt/proxmox-backup-gui/frontend/login.html"
 echo "  pushed: login.html"
+pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/mqtt.min.js" "/opt/proxmox-backup-gui/frontend/mqtt.min.js"
+echo "  pushed: mqtt.min.js"
 
 # Re-run pip in case dependencies changed
 pct exec "${LXC_ID}" -- /opt/proxmox-backup-gui/.venv/bin/pip install -q -r /opt/proxmox-backup-gui/requirements.txt
+
+# Ensure Mosquitto is installed and running
+if ! pct exec "${LXC_ID}" -- systemctl is-active mosquitto >/dev/null 2>&1; then
+    echo "  installing/starting mosquitto..."
+    pct exec "${LXC_ID}" -- bash -c "
+        apt-get install -y -qq mosquitto
+        cat > /etc/mosquitto/conf.d/gui.conf << 'EOF'
+listener 1883
+protocol mqtt
+allow_anonymous true
+
+listener 9001
+protocol websockets
+allow_anonymous true
+EOF
+        systemctl enable mosquitto
+        systemctl restart mosquitto
+    "
+    echo "  mosquitto started"
+fi
 
 pct exec "${LXC_ID}" -- systemctl restart proxmox-backup-gui
 echo "  restarted service"

@@ -57,7 +57,24 @@ sleep 5
 echo "=== Installing Python + dependencies ==="
 pct exec "${LXC_ID}" -- bash -c "
     apt-get update -qq
-    apt-get install -y -qq python3 python3-pip python3-venv restic rclone curl 2>/dev/null
+    apt-get install -y -qq python3 python3-pip python3-venv restic rclone curl mosquitto 2>/dev/null
+"
+
+# ── Mosquitto (MQTT broker for browser WebSocket) ────────────────────────────
+echo "=== Configuring Mosquitto MQTT broker ==="
+pct exec "${LXC_ID}" -- bash -c "cat > /etc/mosquitto/conf.d/gui.conf << 'EOF'
+# TCP listener for pve-agent publishers
+listener 1883
+protocol mqtt
+allow_anonymous true
+
+# WebSocket listener for browser (MQTT.js)
+listener 9001
+protocol websockets
+allow_anonymous true
+EOF
+systemctl enable mosquitto
+systemctl restart mosquitto
 "
 
 # ── Deploy app files ───────────────────────────────────────────────────────────
@@ -73,6 +90,7 @@ done
 pct push "${LXC_ID}" "${SCRIPT_DIR}/requirements.txt" "/opt/proxmox-backup-gui/requirements.txt"
 pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/index.html" "/opt/proxmox-backup-gui/frontend/index.html"
 pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/login.html" "/opt/proxmox-backup-gui/frontend/login.html"
+pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/mqtt.min.js" "/opt/proxmox-backup-gui/frontend/mqtt.min.js"
 
 # Copy example hosts.json if no real one exists yet
 if [ ! -f "${SCRIPT_DIR}/backend/hosts.json" ]; then
@@ -120,10 +138,11 @@ PYEOF
 
 # ── systemd service ───────────────────────────────────────────────────────────
 echo "=== Creating systemd service ==="
-pct exec "${LXC_ID}" -- bash -c "cat > /etc/systemd/system/proxmox-backup-gui.service << 'EOF'
+LXC_ADDR=$(pct exec "${LXC_ID}" -- hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
+pct exec "${LXC_ID}" -- bash -c "cat > /etc/systemd/system/proxmox-backup-gui.service << EOF
 [Unit]
 Description=Proxmox Backup GUI
-After=network-online.target
+After=network-online.target mosquitto.service
 Wants=network-online.target
 
 [Service]
@@ -133,6 +152,7 @@ ExecStart=/opt/proxmox-backup-gui/.venv/bin/python app.py
 Restart=on-failure
 RestartSec=5
 Environment=PORT=${APP_PORT}
+Environment=MQTT_WS_URL=ws://${LXC_ADDR}:9001
 
 [Install]
 WantedBy=multi-user.target
