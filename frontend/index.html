@@ -1967,11 +1967,12 @@ const MQTTBus = (() => {
       const section = item.type === 'lxc' ? 'lxc-grid' : 'vm-grid';
       let grid = document.getElementById(section);
       if (!grid) {
-        // Section doesn't exist yet — create it
+        // Section doesn't exist yet — create it, always VMs before LXCs
         const content = document.getElementById('content');
         if (content?.querySelector('.state-msg')) content.innerHTML = '';
         const sectionTitle = item.type === 'lxc' ? 'Containers' : 'Virtual Machines';
         const sectionEl = document.createElement('div');
+        sectionEl.id = `${section}-wrapper`;
         sectionEl.innerHTML = `
           <div class="section-header">
             <span class="section-title">${sectionTitle}</span>
@@ -1979,10 +1980,30 @@ const MQTTBus = (() => {
             <span class="section-count" id="${section}-count">0</span>
           </div>
           <div class="vm-grid" id="${section}"></div>`;
-        content?.appendChild(sectionEl);
+        // LXC section always goes after VM section
+        const vmWrapper = document.getElementById('vm-grid-wrapper');
+        if (item.type === 'lxc' && vmWrapper) {
+          vmWrapper.insertAdjacentElement('afterend', sectionEl);
+        } else {
+          content?.appendChild(sectionEl);
+        }
         grid = document.getElementById(section);
       }
-      grid?.insertAdjacentHTML('beforeend', html);
+      // Insert in ascending vmid order (like PVE), not arrival order
+      const newId = isNaN(vmid) ? vmid : parseInt(vmid);
+      const siblings = Array.from(grid.children);
+      const after = siblings.find(el => {
+        const sibId = el.dataset.vmid;
+        const sibNum = isNaN(sibId) ? sibId : parseInt(sibId);
+        return typeof newId === 'number' && typeof sibNum === 'number'
+          ? sibNum > newId
+          : String(sibNum) > String(newId);
+      });
+      if (after) {
+        after.insertAdjacentHTML('beforebegin', html);
+      } else {
+        grid?.insertAdjacentHTML('beforeend', html);
+      }
       // Update count badge
       const count = document.getElementById(`${section}-count`);
       if (count) count.textContent = grid.children.length;
