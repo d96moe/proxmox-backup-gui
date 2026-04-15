@@ -77,6 +77,10 @@ class MQTTPublisher:
 
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
+        self._client.on_message    = self._on_message_bootstrap
+        # Populated from broker's retained vms/index on startup; used by StatePoller
+        # to detect and clear retained topics for VMIDs that no longer exist.
+        self._bootstrap_vmids: set[str] | None = None  # None = not yet received
 
         try:
             self._client.connect_async(host, port, keepalive=60)
@@ -93,8 +97,27 @@ class MQTTPublisher:
                            retain=True, qos=1)
             # Subscribe to command topics
             client.subscribe(f"{self._base}/cmd/+", qos=1)
+            # Subscribe to our own retained vms/index so we can seed _known_vmids
+            # with whatever VMIDs the previous agent instance published.  This lets
+            # StatePoller detect and clear stale retained topics across restarts.
+            client.subscribe(f"{self._base}/vms/index", qos=1)
         else:
             log.warning("MQTT connect failed rc=%s", rc)
+
+    def _on_message_bootstrap(self, client, userdata, msg):
+        """Handle the retained vms/index message received on connect."""
+        if msg.topic == f"{self._base}/vms/index" and msg.payload:
+            try:
+                vmids = json.loads(msg.payload)
+                self._bootstrap_vmids = set(str(v) for v in vmids)
+                log.debug("Bootstrap VMIDs from broker: %s", self._bootstrap_vmids)
+            except Exception:
+                pass
+            # Hand off to normal command handler for subsequent messages
+            client.unsubscribe(f"{self._base}/vms/index")
+        # Forward command messages to the normal handler
+        if "/cmd/" in msg.topic:
+            self._on_message(client, userdata, msg)
 
     def _on_message(self, client, userdata, msg):
         cmd = msg.topic.split("/")[-1]
@@ -173,7 +196,7 @@ class MQTTPublisher:
                                      progress_fn=_prog_backup)
                 op.append_log("Cloud backup complete.")
 
-        _run_in_background(op, _do)
+        _run_in_background(op, _do, rescan_restic=run_restic_after)
 
     def _handle_cmd_restore(self, body: dict) -> None:
         vmid        = body.get("vmid")
@@ -465,7 +488,9 @@ class StatePoller:
         self._restic_lock  = threading.Lock()
         # Track VMIDs seen in previous scan so we can clear retained topics for
         # VMIDs that have disappeared (e.g. restic-only VM whose snapshots were deleted).
-        self._known_vmids: set[str] = set()
+        # Lazily seeded from broker's retained vms/index on first scan so stale
+        # VMIDs are caught even across agent restarts.
+        self._known_vmids: set[str] | None = None   # None = seed from broker on first scan
         self._known_vmids_lock = threading.Lock()
         # Last known local PBS storage stats — merged with cloud stats in storage topic
         self._local_storage: dict = {}
@@ -702,7 +727,11 @@ class StatePoller:
         # Clear retained topics for VMIDs that have disappeared since the last scan
         # (e.g. a restic-only VM whose snapshots were all deleted).  Publishing an
         # empty payload with retain=True removes the retained message from the broker.
+        # On first scan, seed from the retained vms/index the broker sent on connect
+        # so stale VMIDs are detected even after an agent restart.
         with self._known_vmids_lock:
+            if self._known_vmids is None:
+                self._known_vmids = self._mqtt._bootstrap_vmids or set()
             gone = self._known_vmids - all_vmids
             self._known_vmids = set(all_vmids)
         for gvmid in gone:
