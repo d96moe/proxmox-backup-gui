@@ -197,7 +197,9 @@ def real_page(browser):
               lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
     pg = ctx.new_page()
     pg._js_errors = []
+    pg._console_msgs = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.on("console", lambda m: pg._console_msgs.append(f"[{m.type}] {m.text}"))
     # Log in if CI credentials are configured
     if CI_ADMIN_PASSWORD:
         pg.goto("/login")
@@ -208,13 +210,19 @@ def real_page(browser):
     else:
         pg.goto("/")
     # Wait until at least one VM card is rendered — MQTT broker has delivered
-    # retained messages. Do NOT check for "Loading…" text: the HTML ships with
-    # "loading…" (lowercase) so the !== 'Loading…' check is always true
-    # immediately, causing the fixture to yield before any MQTT data arrives.
-    pg.wait_for_function(
-        "() => document.querySelector('.vm-card') !== null",
-        timeout=45000,
-    )
+    # retained messages.
+    try:
+        pg.wait_for_function(
+            "() => document.querySelector('.vm-card') !== null",
+            timeout=45000,
+        )
+    except Exception as exc:
+        # Dump browser console for diagnosis before re-raising
+        console_dump = "\n  ".join(pg._console_msgs[-40:]) or "(none)"
+        page_text = pg.evaluate("() => document.body?.innerText?.slice(0,500) || ''")
+        raise type(exc)(
+            f"{exc}\n\nBrowser console (last 40):\n  {console_dump}\n\nPage text:\n  {page_text}"
+        ) from exc
     yield pg
     ctx.close()
 
