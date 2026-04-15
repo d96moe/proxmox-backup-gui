@@ -17,8 +17,18 @@ Two Jenkins pipelines test the GUI at different levels:
 
 | Pipeline | Jenkins job | Jenkinsfile | Trigger | What it tests |
 |---|---|---|---|---|
-| Mock / fast | `proxmox-backup-gui` | `ci/Jenkinsfile` | Every push (webhook) | Playwright against mock server, ~60s, no VM |
-| Integration | `proxmox-backup-gui-integration` | `ci/Jenkinsfile.integration` | Nightly ~23:00 + manual | Playwright against real Flask + PBS + Google Drive, ~20 min |
+| Mock / fast | `proxmox-backup-gui` | `ci/Jenkinsfile` | Every push (webhook) | Playwright against mock server + MQTT unit tests, ~60s, no VM |
+| Integration | `proxmox-backup-gui-integration` | `ci/Jenkinsfile.integration` | Nightly ~23:00 + manual | Playwright against real Flask + PBS + Google Drive + MQTT unit tests, ~20 min |
+
+**Integration test suites** (selectable via `TEST_SUITE` parameter):
+
+| Suite | Files | Description |
+|---|---|---|
+| `all` | `tests/` | All test files |
+| `frontend` | `test_frontend.py` | Playwright mock tests only |
+| `restore` | `test_restore.py` | Integration backup/restore tests |
+| `self_restore` | `test_self_restore.py` | Datastore self-restore tests |
+| `mqtt` | `test_mqtt.py` | MQTT agent unit tests only |
 
 The fast pipeline gives rapid feedback on every push. The integration pipeline verifies end-to-end behaviour against a real Proxmox environment.
 
@@ -77,6 +87,20 @@ Playwright tests against an in-process mock server. Cover:
 - **RACE** — rapid host switching, stale-data prevention, AbortController usage
 - **EDGE** — empty data, LXC-only, no cloud storage
 - **CONCURRENCY** — multiple simultaneous users from different browser contexts
+
+### Unit tests (`ci/tests/test_mqtt.py`)
+
+Pure Python unit tests (no VM, no network). Run in both the fast pipeline and as the `mqtt` suite in the integration pipeline. Cover the MQTT agent logic:
+
+- **STORAGE_MERGE** — `_scan_storage` preserves `cloud_used`/`cloud_total` across scans
+- **RESTIC_COVERS** — PBS snapshots annotated with `local`/`cloud` flags and `pbs_date` for hover tooltips
+- **RESTIC_RESCAN** — `_run_in_background` triggers `_scan_restic` after restic backup (not just `rescan_now`)
+- **BACKUP_PROGRESS** — `LocalResticClient.backup_datastore` parses `--json` output into readable log lines
+- **MQTT_TOPIC_BASE** — `MQTTPublisher._base` uses `mqtt_hostname` from config, not OS hostname
+- **RESTIC_PRUNE** — pruned snapshot IDs absent after rescan; newest restic wins for same PBS time
+- **RESTIC_ID_FORMAT** — `restic_id` = full 64-char hash (for API); `restic_short_id` = 8-char display
+- **CLOUD_ONLY** — PBS entries with `local=False, cloud=True` appear for pruned-locally times
+- **TIMESTAMP_FIELDS** — cloud-only entries have `date`; restic covers have `pbs_date` for tooltips
 
 ### Integration tests (`ci/tests/test_restore.py` + `ci/tests/test_frontend.py`)
 

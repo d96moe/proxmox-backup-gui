@@ -237,7 +237,8 @@ STEP_B
                     # Push latest test files to VM (so we always run the current test suite)
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
                         ci/tests/test_frontend.py ci/tests/test_restore.py \
-                        ci/tests/test_self_restore.py ci/tests/conftest.py \
+                        ci/tests/test_self_restore.py ci/tests/test_mqtt.py \
+                        ci/tests/conftest.py \
                         root@${VM_IP}:/tmp/gui-update/tests/
 
                     # Push ci_api.py helper (avoids JSON quoting hell in seed stage)
@@ -438,8 +439,17 @@ print('CI admin user created')
                             /opt/ci/proxmox-backup-gui/tests/test_restore.py
                         cp /tmp/gui-update/tests/test_self_restore.py \
                             /opt/ci/proxmox-backup-gui/tests/test_self_restore.py
+                        cp /tmp/gui-update/tests/test_mqtt.py \
+                            /opt/ci/proxmox-backup-gui/tests/test_mqtt.py
                         cp /tmp/gui-update/tests/conftest.py \
                             /opt/ci/proxmox-backup-gui/tests/conftest.py
+                        # test_mqtt.py resolves backend/ relative to its own path
+                        # (Path(__file__).parent.parent.parent/backend) — keep it in sync
+                        mkdir -p /opt/ci/proxmox-backup-gui/backend
+                        for f in pve_agent.py pbs_client.py pve_client.py config.py restic_client.py; do
+                            [ -f /tmp/gui-update/${f} ] && cp /tmp/gui-update/${f} \
+                                /opt/ci/proxmox-backup-gui/backend/${f}
+                        done
                         cp /tmp/gui-update/index.html \
                             /opt/ci/proxmox-backup-gui/frontend/index.html
                         cp /tmp/gui-update/mqtt.min.js \
@@ -833,6 +843,7 @@ PYEOF
                         frontend:     'tests/test_frontend.py',
                         restore:      'tests/test_restore.py',
                         self_restore: 'tests/test_self_restore.py',
+                        mqtt:         'tests/test_mqtt.py',
                     ]
                     env.PYTEST_FILES  = suiteMap.get(params.TEST_SUITE, 'tests/')
                     // Use sentinel NONE so empty filter doesn't collapse bash -s arg positions

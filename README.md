@@ -22,75 +22,74 @@ You can use this GUI without those scripts, but you must replicate the same envi
 
 The GUI LXC talks to your PVE host over both the API and SSH. The following must be in place before deploying:
 
-### On your PVE host
+### In LXC 199 (installed automatically by `setup-lxc.sh`)
+
+| Requirement | Notes |
+|---|---|
+| **Mosquitto MQTT broker** | Installed in LXC 199 by `setup-lxc.sh`; listens on TCP :1883 (agents) and WebSocket :9001 (browser) |
+| Flask + Python deps | Installed via pip into a venv |
+
+### On each PVE host
 
 | Requirement | Notes |
 |---|---|
 | Proxmox VE 8+ with PBS | PBS must be running with at least one datastore configured |
-| PBS user or API token | Needs `Datastore.Audit`, `Datastore.Backup`, `VM.Backup` privileges |
-| PVE user | `root@pam` or a user with `VM.PowerMgmt`, `Datastore.Allocate` (for restore) |
-| `restic` binary | Required for cloud backup/restore features; must be in `$PATH` |
+| `pve_agent.py` running | The agent publishes data to Mosquitto; install from this repo |
+| `paho-mqtt` Python library | Required by the agent; install with `pip install paho-mqtt` |
+| `restic` binary | Required for cloud backup/restore; must be in `$PATH` |
 | `rclone` binary | Required for cloud features; must be in `$PATH` |
-| rclone configured | A Google Drive remote (`rclone.conf`) with a remote path for the restic repo |
+| rclone configured | A remote (`rclone.conf`) with a path for the restic repo |
 | restic repo initialized | `restic -r rclone:<remote>:<path> init` must have been run |
-| **PVE agent** (recommended) or **SSH** | See [Agent mode vs SSH mode](#agent-mode-vs-ssh-mode) below |
 
 ### Optional (cloud features only)
 
-Cloud backup, cloud restore, and ☁ sync are all skipped gracefully if `restic_repo` / `restic_password` are omitted from `hosts.json`. The local PBS features work without any restic/rclone setup.
-
-### SSH key setup (if not already done)
-
-On the GUI LXC (LXC 199):
-
-```bash
-ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N ""
-ssh-copy-id root@<your-pve-host-ip>
-```
+Cloud backup, cloud restore, and ☁ sync are skipped gracefully if `restic_repo` / `restic_password` are omitted from the agent config. Local PBS features work without restic/rclone.
 
 ## Features
 
 - **Per-VM/LXC overview** — snapshot count, latest backup age, local/cloud coverage badges
-
 - **Cloud detection** — marks PBS snapshots as cloud-covered if restic ran after them
-- **Cloud-only snapshots** — shows older restic backups that no longer exist locally
+- **Cloud-only snapshots** — shows older restic backups that no longer exist locally in PBS
 - **Storage meters** — PBS local usage and Google Drive family quota
-- **Backup folder size** — actual restic repo size via `rclone size`
-- **Backup now** — trigger a PBS-only or PBS+cloud backup of any VM/LXC; backup type selection modal with live log
-- **☁ sync** — trigger a standalone restic cloud sync from any VM card or snapshot row that has local-only coverage
-- **Restore** — restore any VM/LXC from a PBS snapshot (local) or from a restic snapshot (cloud); restic operations run on the PVE host via SSH, never inside the GUI container
-- **Job indicator** — running backup/restore jobs show a pulsing indicator on the VM card; click to reopen the progress modal at any time
-- **Multi-host** — configure multiple PVE/PBS hosts in `hosts.json`
-- **HA integration** — `/api/host/<id>/ha/sensors` endpoint for the [proxmox-backup-ha](https://github.com/d96moe/proxmox-backup-ha) integration
+- **Backup now** — trigger a PBS-only or PBS+cloud backup of any VM/LXC; live log in job modal
+- **☁ sync** — trigger a standalone restic cloud sync from any VM card or snapshot row
+- **Restore** — restore from a PBS snapshot (local) or restic snapshot (cloud)
+- **Job indicator** — running jobs show a pulsing indicator on the VM card; click to reopen progress modal
+- **Multi-host** — monitor multiple PVE/PBS hosts simultaneously in one UI
+- **Real-time updates** — browser receives live data via MQTT WebSocket; no polling
 
 ## Architecture
 
-The GUI is designed to run **inside a dedicated LXC container** on your PVE host — not on the PVE host itself. This keeps it isolated from the hypervisor and makes it easy to deploy, update, and destroy independently.
+The GUI is **MQTT-driven**: the browser never polls the backend for VM/snapshot data. A lightweight agent (`pve_agent.py`) on each PVE host publishes retained MQTT messages to a Mosquitto broker co-located in LXC 199. The browser subscribes via WebSocket and renders the UI directly from those retained messages — full data in < 200 ms on page load, live updates as agents publish. There is no REST polling path for VM/snapshot data.
 
 ```
-┌─ LXC 199 (GUI container) ──────────────────────────────────┐
-│                                                             │
-│  agent_client.py  ◄── HTTP → pve_agent.py (port 8099)      │
-│                           (runs on PVE host — handles all   │
-│                            PBS, PVE, restic, rclone calls)  │
-│                                                             │
-│  Flask app.py ──► index.html                                │
-└─────────────────────────────────────────────────────────────┘
-         ▲
-    browser (port 5000)
+PVE host (home, 192.168.0.200)
+  └── pve_agent.py  ──MQTT──► Mosquitto :1883 ◄──── pve_agent.py (Pi5 / cabin)
+                                   │
+                               LXC 199
+                          ┌────────┴────────┐
+                          │  Mosquitto :9001 │  ◄── browser (WebSocket)
+                          │  Flask :5000     │  ◄── browser (HTTP login + job API)
+                          └─────────────────┘
 ```
 
-### Agent mode vs SSH mode
+### MQTT topics
 
-The GUI supports two modes for reaching the PVE host:
+Each agent publishes under `proxmox/<mqtt_hostname>/`:
 
-**Agent mode** (recommended): a small Flask HTTP agent (`pve_agent.py`) runs on the PVE host and exposes a local REST API. The GUI LXC calls it over plain HTTP — no SSH, no credentials for PBS/PVE stored in `hosts.json`. The agent handles all PBS, PVE, restic, and rclone calls locally. Bearer token protects the endpoint.
+| Topic suffix | Content |
+|---|---|
+| `vm/<id>/meta` | VM/LXC name, type, status |
+| `vm/<id>/pbs` | PBS snapshots with `local`/`cloud` flags and `restic_id` |
+| `vm/<id>/restic` | Restic snapshots with per-VM covers and `pbs_date` |
+| `vms/index` | Sorted list of all VMIDs |
+| `storage` | Local PBS usage + cloud quota |
+| `schedules` | PBS job and restic retention config |
+| `state/ready` | Agent health heartbeat |
+| `agent/status` | LWT online/offline |
 
-**SSH mode** (legacy): the GUI LXC SSHes into the PVE host to run restic/rclone commands, and calls the PBS and PVE APIs directly. Requires passwordless SSH from LXC 199 to the PVE host as root.
-
-When `agent_url` is set in `hosts.json`, agent mode is used automatically.
-
-> Running the GUI directly on the PVE host is technically possible but not recommended — it breaks isolation. The setup scripts only support the LXC model.
+> **`mqtt_hostname` must match the `id` field in `hosts.json`.**  
+> The GUI subscribes to `proxmox/<id>/#`. If the agent's `mqtt_hostname` is different (e.g. the OS hostname), the GUI shows "Connecting…" forever. Set `mqtt_hostname` explicitly in the agent's `config.json`.
 
 ## Deployment
 
@@ -122,9 +121,9 @@ Pushes updated backend + frontend files to the LXC and restarts the service.
 
 ## Configuration
 
-Edit `/opt/proxmox-backup-gui/backend/hosts.json` on the LXC.
+### `hosts.json` (in LXC 199)
 
-**Agent mode** (recommended — no SSH, no direct PBS/PVE credentials in the GUI):
+Edit `/opt/proxmox-backup-gui/backend/hosts.json`:
 
 ```json
 [
@@ -132,32 +131,46 @@ Edit `/opt/proxmox-backup-gui/backend/hosts.json` on the LXC.
     "id": "home",
     "label": "pve · home",
     "agent_url": "http://192.168.0.200:8099",
-    "agent_token": "your-pbs-password"
+    "agent_token": "your-token"
+  },
+  {
+    "id": "cabin",
+    "label": "pve · cabin",
+    "agent_url": "http://192.168.1.200:8099",
+    "agent_token": "your-token"
   }
 ]
 ```
 
-**SSH mode** (legacy):
+The `id` field **must match** `mqtt_hostname` in the agent's `config.json` on each PVE host.
+
+### Agent `config.json` (on each PVE host)
+
+`/etc/pve-agent/config.json`:
 
 ```json
-[
-  {
-    "id": "home",
-    "label": "pve · home",
-    "pbs_host": "192.168.0.200",
-    "pbs_user": "backup@pbs",
-    "pbs_password": "your-pbs-password",
-    "pbs_datastore": "local-store",
-    "pve_host": "192.168.0.200",
-    "pve_user": "root@pam",
-    "pve_password": "your-pve-password",
-    "restic_repo": "rclone:gdrive:bu/proxmox_home",
-    "restic_password": "your-restic-password"
-  }
-]
+{
+  "pve_url":          "https://192.168.0.200:8006",
+  "pve_user":         "root@pam",
+  "pve_password":     "your-pve-password",
+  "pbs_url":          "https://192.168.0.200:8007",
+  "pbs_user":         "backup@pbs",
+  "pbs_password":     "your-pbs-password",
+  "pbs_datastore":    "local-store",
+  "pbs_storage_id":   "pbs-local",
+  "pbs_datastore_path": "/mnt/pbs",
+  "restic_repo":      "rclone:gdrive:bu/proxmox_home",
+  "restic_password":  "your-restic-password",
+  "restic_env":       { "RCLONE_CONFIG": "/root/.config/rclone/rclone.conf" },
+  "mqtt_host":        "192.168.0.50",
+  "mqtt_port":        1883,
+  "mqtt_hostname":    "home",
+  "agent_token":      "your-token",
+  "verify_ssl":       false
+}
 ```
 
-The agent token is the PBS user password — it is used as a Bearer token to authenticate requests to the agent.
+> `mqtt_hostname` must match the `id` in `hosts.json`. The agent logs the effective hostname at startup — check `journalctl -u pve-agent` if the GUI shows "Connecting…".
 
 ## API Endpoints
 
