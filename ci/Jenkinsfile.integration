@@ -229,6 +229,7 @@ STEP_B
 
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
                         frontend/index.html frontend/login.html \
+                        frontend/mqtt.min.js \
                         root@${VM_IP}:/tmp/gui-update/
 
                     # Push latest test files to VM (so we always run the current test suite)
@@ -365,6 +366,8 @@ DEPLOY_AGENT
                             /opt/proxmox-backup-gui/frontend/index.html
                         pct push 300 /tmp/gui-update/login.html \
                             /opt/proxmox-backup-gui/frontend/login.html
+                        pct push 300 /tmp/gui-update/mqtt.min.js \
+                            /opt/proxmox-backup-gui/frontend/mqtt.min.js
                         pct push 300 /tmp/gui-update/ci_api.py \
                             /tmp/ci_api.py
 
@@ -434,6 +437,8 @@ print('CI admin user created')
                             /opt/ci/proxmox-backup-gui/tests/conftest.py
                         cp /tmp/gui-update/index.html \
                             /opt/ci/proxmox-backup-gui/frontend/index.html
+                        cp /tmp/gui-update/mqtt.min.js \
+                            /opt/ci/proxmox-backup-gui/frontend/mqtt.min.js
 EOF
                 '''
             }
