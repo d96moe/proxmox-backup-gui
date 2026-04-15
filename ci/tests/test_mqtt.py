@@ -19,7 +19,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # ── make backend importable ──────────────────────────────────────────────────
+# Fast pipeline: repo/ci/tests/test_mqtt.py → parent*3 = repo root → backend/
+# Integration CI: /opt/ci/proxmox-backup-gui/tests/test_mqtt.py → parent*2 → backend/
 BACKEND = Path(__file__).parent.parent.parent / "backend"
+if not (BACKEND / "pve_agent.py").exists():
+    BACKEND = Path(__file__).parent.parent / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
