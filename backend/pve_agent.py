@@ -1736,6 +1736,18 @@ if __name__ == "__main__":
 
     # Start MQTT publisher if configured
     if _cfg.mqtt_host:
+        effective_hostname = _cfg.mqtt_hostname or __import__("socket").gethostname()
+        log.info(
+            "MQTT publisher + StatePoller starting → %s:%s  (mqtt_hostname=%r — "
+            "MUST match the 'id' field in hosts.json or GUI will show 'Connecting…')",
+            _cfg.mqtt_host, _cfg.mqtt_port, effective_hostname,
+        )
+        if not _cfg.mqtt_hostname:
+            log.warning(
+                "mqtt_hostname is not set in config — falling back to OS hostname %r. "
+                "Set mqtt_hostname in config.json to avoid topic mismatch with hosts.json.",
+                effective_hostname,
+            )
         _mqtt = MQTTPublisher(
             host=_cfg.mqtt_host,
             port=_cfg.mqtt_port,
