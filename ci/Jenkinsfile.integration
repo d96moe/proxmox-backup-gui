@@ -21,6 +21,8 @@ pipeline {
                description: 'Which test file(s) to run — "all" runs the full suite')
         string(name: 'TEST_FILTER', defaultValue: '',
                description: 'Optional pytest -k expression for extra filtering (e.g. "backup" or "restore and not cloud")')
+        booleanParam(name: 'FAIL_FAST', defaultValue: false,
+                     description: 'Stop on first failure/error (-x) — useful when iterating to find root cause')
     }
 
     options {
@@ -831,19 +833,22 @@ PYEOF
                     ]
                     env.PYTEST_FILES  = suiteMap.get(params.TEST_SUITE, 'tests/')
                     env.PYTEST_FILTER = params.TEST_FILTER ?: ''
+                    env.PYTEST_FAILFAST = params.FAIL_FAST ? 'true' : 'false'
                     echo "TEST_SUITE=${params.TEST_SUITE}  →  ${env.PYTEST_FILES}"
                     if (env.PYTEST_FILTER) echo "TEST_FILTER: -k '${env.PYTEST_FILTER}'"
+                    if (params.FAIL_FAST) echo "FAIL_FAST: enabled (-x)"
                 }
                 sh '''
                     VM_IP=$(cat vm_ip.txt)
 
                     # Run Playwright tests on the VM (it can reach LXC 10.10.0.100:5000)
                     # Pass BACKEND_URL so tests hit real backend instead of mock.
-                    # PYTEST_FILES and PYTEST_FILTER are forwarded as $1 / $2 via bash -s.
+                    # PYTEST_FILES, PYTEST_FILTER, PYTEST_FAILFAST forwarded as $1/$2/$3 via bash -s.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        bash -s "${PYTEST_FILES}" "${PYTEST_FILTER}" << 'EOF'
+                        bash -s "${PYTEST_FILES}" "${PYTEST_FILTER}" "${PYTEST_FAILFAST}" << 'EOF'
                         PYTEST_TARGET="$1"
                         PYTEST_FILTER_ARG="$2"
+                        FAIL_FAST_FLAG="$3"
 
                         source /etc/profile.d/ci-venv.sh
                         mkdir -p /tmp/test-results
@@ -882,13 +887,14 @@ for item in d.get('lxcs',[]):
 " 2>/dev/null || echo "items endpoint failed"
                         echo "--- END DIAGNOSTICS ---"
 
-                        echo "Running: pytest ${PYTEST_TARGET} ${PYTEST_FILTER_ARG:+-k} ${PYTEST_FILTER_ARG}"
+                        echo "Running: pytest ${PYTEST_TARGET} ${PYTEST_FILTER_ARG:+-k} ${PYTEST_FILTER_ARG}${FAIL_FAST_FLAG:+ -x}"
                         cd /opt/ci/proxmox-backup-gui
                         BACKEND_URL=http://10.10.0.100:5000 \
                         CI_ADMIN_PASSWORD=proxmox-ci-2024 \
                         pytest ${PYTEST_TARGET} \
                             -v --tb=short \
                             ${PYTEST_FILTER_ARG:+-k "${PYTEST_FILTER_ARG}"} \
+                            $( [ "${FAIL_FAST_FLAG}" = "true" ] && echo "-x" ) \
                             --junit-xml=/tmp/test-results/integration.xml \
                             2>&1 | tee /tmp/test-results/integration.log
 EOF
