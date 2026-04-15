@@ -7,7 +7,9 @@ Endpoints:
 """
 from __future__ import annotations
 
+import json
 import os
+import queue
 import re
 import threading
 import time
@@ -18,6 +20,8 @@ from datetime import timezone, datetime
 from flask import Flask, jsonify, send_from_directory, abort, request, redirect, url_for, session
 from flask_cors import CORS
 from flask_login import login_user, logout_user, login_required, current_user
+from flask_sock import Sock
+import paho.mqtt.client as paho_mqtt
 
 from config import load_hosts, HostConfig
 from pbs_client import PBSClient
@@ -33,6 +37,12 @@ app = Flask(__name__, static_folder=None)
 CORS(app)
 app.secret_key = get_or_create_secret_key()
 init_login_manager(app)
+sock = Sock(app)
+
+# Internal MQTT broker connection (server-side only; browser never touches port 1883/9001)
+_MQTT_HOST   = os.environ.get("MQTT_BROKER_HOST", "localhost")
+_MQTT_PORT   = int(os.environ.get("MQTT_BROKER_PORT", "1883"))
+_MQTT_PREFIX = os.environ.get("MQTT_TOPIC_PREFIX", "proxmox")
 
 HOSTS: dict[str, HostConfig] = {h.id: h for h in load_hosts()}
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
@@ -272,25 +282,91 @@ def api_delete_user(username: str):
 # API
 # ──────────────────────────────────────────────
 
-@app.get("/api/mqtt-config")
-@login_required
-def get_mqtt_config():
-    """Return MQTT broker WebSocket config for the browser (MQTT.js).
+@sock.route('/mqtt-ws')
+def mqtt_proxy(ws):
+    """WebSocket proxy: browser ↔ Flask ↔ Mosquitto (TCP).
 
-    Set MQTT_WS_URL (e.g. ws://192.168.0.196:9001) to enable.
-    Optional MQTT_WS_USER / MQTT_WS_PASSWORD for broker auth.
-    If not configured, returns {"enabled": false} and browser skips MQTT.
+    Browser never connects to Mosquitto directly — all MQTT traffic flows
+    through this endpoint on the same host:port as the GUI.  Auth is checked
+    on the WebSocket upgrade request (same session cookie as the UI).
+
+    Wire protocol (both directions): newline-delimited JSON objects.
+      broker → browser: {"topic": "proxmox/home/vm/301/pbs", "payload": "{…}"}
+      browser → broker: {"topic": "proxmox/home/cmd/backup/pbs", "payload": "{…}"}
+      browser → proxy:  {"type": "replay", "prefix": "proxmox/home"}
+      proxy → browser:  {"type": "ping"}   (keepalive every 25 s)
+      browser → proxy:  {"type": "pong"}
     """
-    ws_url = os.environ.get("MQTT_WS_URL", "")
-    if not ws_url:
-        return jsonify({"enabled": False})
-    return jsonify({
-        "enabled":  True,
-        "ws_url":   ws_url,
-        "username": os.environ.get("MQTT_WS_USER", ""),
-        "password": os.environ.get("MQTT_WS_PASSWORD", ""),
-        "topic_prefix": os.environ.get("MQTT_TOPIC_PREFIX", "proxmox"),
-    })
+    if not current_user.is_authenticated:
+        return
+
+    msg_q    = queue.Queue(maxsize=2000)
+    retained = {}          # topic → payload str (for replay on host-switch)
+    stop_evt = threading.Event()
+
+    def _on_connect(client, _u, _f, rc):
+        if rc == 0:
+            client.subscribe(f"{_MQTT_PREFIX}/+/#", qos=1)
+
+    def _on_message(client, _u, msg):
+        payload = msg.payload.decode("utf-8", errors="replace")
+        if msg.retain:
+            retained[msg.topic] = payload
+        try:
+            msg_q.put_nowait({"topic": msg.topic, "payload": payload})
+        except queue.Full:
+            pass
+
+    client = paho_mqtt.Client(client_id=f"gui-ws-{id(ws)}", protocol=paho_mqtt.MQTTv311)
+    client.on_connect = _on_connect
+    client.on_message = _on_message
+    client.connect(_MQTT_HOST, _MQTT_PORT, keepalive=30)
+    client.loop_start()
+
+    def _sender():
+        while not stop_evt.is_set():
+            try:
+                item = msg_q.get(timeout=25)
+                ws.send(json.dumps(item))
+            except queue.Empty:
+                try:
+                    ws.send(json.dumps({"type": "ping"}))
+                except Exception:
+                    stop_evt.set()
+                    break
+            except Exception:
+                stop_evt.set()
+                break
+
+    threading.Thread(target=_sender, daemon=True).start()
+
+    try:
+        while not stop_evt.is_set():
+            data = ws.receive(timeout=60)
+            if data is None:
+                break
+            try:
+                msg = json.loads(data)
+                mtype = msg.get("type")
+                if mtype == "pong":
+                    continue
+                if mtype == "replay":
+                    # Re-send all retained messages for the requested host prefix
+                    prefix = msg.get("prefix", "")
+                    for t, p in list(retained.items()):
+                        if not prefix or t.startswith(prefix):
+                            try:
+                                msg_q.put_nowait({"topic": t, "payload": p})
+                            except queue.Full:
+                                break
+                elif msg.get("topic"):
+                    client.publish(msg["topic"], msg.get("payload", ""), qos=1)
+            except (json.JSONDecodeError, Exception):
+                pass
+    finally:
+        stop_evt.set()
+        client.loop_stop()
+        client.disconnect()
 
 
 @app.get("/api/hosts")
