@@ -311,7 +311,15 @@ def mqtt_proxy(ws):
     def _on_message(client, _u, msg):
         payload = msg.payload.decode("utf-8", errors="replace")
         if msg.retain:
-            retained[msg.topic] = payload
+            if payload:
+                retained[msg.topic] = payload
+            else:
+                # Empty payload + retain=True = broker clearing the retained message.
+                retained.pop(msg.topic, None)
+        elif not payload:
+            # Empty payload with retain=False: broker forwarding a retained-clear
+            # publish to existing subscribers.  Remove from our cache too.
+            retained.pop(msg.topic, None)
         try:
             msg_q.put_nowait({"topic": msg.topic, "payload": payload})
         except queue.Full:
