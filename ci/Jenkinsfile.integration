@@ -405,16 +405,15 @@ print('CI admin user created')
 "
                         # Flask uses MQTT_BROKER_HOST to connect to Mosquitto over TCP.
                         # The agent publishes to localhost:1883 on the PVE host (10.10.0.1
-                        # from LXC 300's perspective). Remove stale MQTT_WS_URL if present,
-                        # then ensure MQTT_BROKER_HOST points to the CI VM's broker.
-                        pct exec 300 -- bash -c '
-                            sed -i "/MQTT_WS_URL=/d" /etc/systemd/system/proxmox-backup-gui.service
-                            if grep -q "MQTT_BROKER_HOST=" /etc/systemd/system/proxmox-backup-gui.service; then
-                                sed -i "s|MQTT_BROKER_HOST=.*|MQTT_BROKER_HOST=10.10.0.1|" /etc/systemd/system/proxmox-backup-gui.service
-                            else
-                                sed -i "/\[Service\]/a Environment=MQTT_BROKER_HOST=10.10.0.1" /etc/systemd/system/proxmox-backup-gui.service
-                            fi
-                        '
+                        # from LXC 300's perspective). Replace stale MQTT_WS_URL with
+                        # MQTT_BROKER_HOST, or normalise the value if already present.
+                        # Three sed passes handle all template variants:
+                        #   1) Old template: MQTT_WS_URL line → rewrite to MQTT_BROKER_HOST
+                        #   2) New template: MQTT_BROKER_HOST already present → update value
+                        #   3) Neither present: insert before ExecStart=
+                        pct exec 300 -- sed -i 's|Environment=MQTT_WS_URL=.*|Environment=MQTT_BROKER_HOST=10.10.0.1|' /etc/systemd/system/proxmox-backup-gui.service
+                        pct exec 300 -- sed -i 's|Environment=MQTT_BROKER_HOST=.*|Environment=MQTT_BROKER_HOST=10.10.0.1|' /etc/systemd/system/proxmox-backup-gui.service
+                        pct exec 300 -- bash -c 'grep -q MQTT_BROKER_HOST /etc/systemd/system/proxmox-backup-gui.service || sed -i "/ExecStart=/i Environment=MQTT_BROKER_HOST=10.10.0.1" /etc/systemd/system/proxmox-backup-gui.service'
                         pct exec 300 -- systemctl daemon-reload
                         pct exec 300 -- systemctl restart proxmox-backup-gui
                         # Poll until active (MQTT connect can take >3s on cold start)
