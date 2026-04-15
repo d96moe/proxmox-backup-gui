@@ -463,6 +463,10 @@ class StatePoller:
         # Keep latest restic state so PBS poll can cross-reference
         self._restic_snaps: list[dict] = []
         self._restic_lock  = threading.Lock()
+        # Track VMIDs seen in previous scan so we can clear retained topics for
+        # VMIDs that have disappeared (e.g. restic-only VM whose snapshots were deleted).
+        self._known_vmids: set[str] = set()
+        self._known_vmids_lock = threading.Lock()
         # Last known local PBS storage stats — merged with cloud stats in storage topic
         self._local_storage: dict = {}
         self._storage_lock  = threading.Lock()
@@ -694,6 +698,18 @@ class StatePoller:
 
             # HA Discovery + per-VM backup status (idle unless job running)
             self._mqtt._ensure_discovery(vmid)
+
+        # Clear retained topics for VMIDs that have disappeared since the last scan
+        # (e.g. a restic-only VM whose snapshots were all deleted).  Publishing an
+        # empty payload with retain=True removes the retained message from the broker.
+        with self._known_vmids_lock:
+            gone = self._known_vmids - all_vmids
+            self._known_vmids = set(all_vmids)
+        for gvmid in gone:
+            for suffix in (f"vm/{gvmid}/meta", f"vm/{gvmid}/pbs", f"vm/{gvmid}/restic"):
+                self._mqtt._client.publish(f"{self._base}/{suffix}", b"", retain=True, qos=1)
+                self._hashes.pop(suffix, None)
+            log.info("Cleared retained MQTT topics for disappeared VMID %s", gvmid)
 
         # publish index (sorted list of known vmids)
         self._pub_if_changed("vms/index", sorted(all_vmids))

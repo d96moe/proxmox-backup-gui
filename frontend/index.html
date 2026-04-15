@@ -2066,6 +2066,22 @@ const MQTTBus = (() => {
     if (parts[2] === 'vm' && parts.length === 5) {
       const vmid = parts[3];
       const type = parts[4];
+      // Empty payload = broker clearing the retained topic (VMID disappeared).
+      // Remove the card and all cached data for this VMID.
+      if (!msg) {
+        if (_ds[vmid]) { delete _ds[vmid]; }
+        const card = document.getElementById(`vm-card-${vmid}`);
+        if (card) {
+          const grid = card.parentElement;
+          card.remove();
+          const count = document.getElementById(`${grid.id}-count`);
+          if (count) count.textContent = grid.children.length;
+          if (grid.children.length === 0) grid.closest('[id$="-wrapper"]')?.remove();
+        }
+        _updateSubtitle();
+        if (_activeTab === 'cloud') renderCloudFromDS();
+        return;
+      }
       if (!_ds[vmid]) _ds[vmid] = {};
       try {
         _ds[vmid][type] = JSON.parse(msg);
