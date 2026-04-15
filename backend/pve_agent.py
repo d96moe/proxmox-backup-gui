@@ -490,7 +490,7 @@ class StatePoller:
         # VMIDs that have disappeared (e.g. restic-only VM whose snapshots were deleted).
         # Lazily seeded from broker's retained vms/index on first scan so stale
         # VMIDs are caught even across agent restarts.
-        self._known_vmids: set[str] | None = None   # None = seed from broker on first scan
+        self._known_vmids: set[str] = set()
         self._known_vmids_lock = threading.Lock()
         # Last known local PBS storage stats — merged with cloud stats in storage topic
         self._local_storage: dict = {}
@@ -730,9 +730,10 @@ class StatePoller:
         # On first scan, seed from the retained vms/index the broker sent on connect
         # so stale VMIDs are detected even after an agent restart.
         with self._known_vmids_lock:
-            if self._known_vmids is None:
-                self._known_vmids = self._mqtt._bootstrap_vmids or set()
-            gone = self._known_vmids - all_vmids
+            # Union of in-memory history and broker-bootstrapped list so stale
+            # VMIDs are caught both within a lifecycle and across restarts.
+            prev = (self._known_vmids or set()) | (self._mqtt._bootstrap_vmids or set())
+            gone = prev - all_vmids
             self._known_vmids = set(all_vmids)
         for gvmid in gone:
             for suffix in (f"vm/{gvmid}/meta", f"vm/{gvmid}/pbs", f"vm/{gvmid}/restic"):
