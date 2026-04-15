@@ -75,21 +75,35 @@ PVE host (home, 192.168.0.200)
 
 ### MQTT topics
 
-Each agent publishes under `proxmox/<mqtt_hostname>/`:
+Each agent publishes under `proxmox/<mqtt_hostname>/`. The GUI subscribes to `proxmox/+/#` (all hosts, all topics) and filters by `currentHost` in `_onMessage`.
+
+#### Published by agent → received by browser
+
+| Topic suffix | Retained | Content |
+|---|---|---|
+| `agent/status` | yes | `{"status": "online"}` — LWT; broker publishes `"offline"` on disconnect |
+| `state/ready` | yes | `{"ts": …, "pve_ok": true, "pbs_ok": true}` — agent health heartbeat |
+| `vms/index` | yes | Sorted list of all VMIDs: `["101", "200", "301"]` |
+| `vm/<id>/meta` | yes | `{vmid, name, type, status, os, template, in_pve}` |
+| `vm/<id>/pbs` | yes | `{snapshots: [{backup_time, date, local, cloud, incremental, size, size_bytes, restic_id, restic_short_id}]}` — cloud-only entries have `local=false, cloud=true` |
+| `vm/<id>/restic` | yes | `{snapshots: [{id, short_id, time, covers: [{vmid, pbs_time, pbs_date, local, cloud}]}]}` |
+| `vm/<id>/backup/progress` | no | `{line: "…"}` — live log lines during a backup job |
+| `storage` | yes | `{local_used, local_total, cloud_used, cloud_total, cloud_quota_used, dedup_factor}` |
+| `info` | yes | `{pbs: "4.1.4", pve: "9.0.0", restic: "0.18.0"}` — version strings |
+| `schedules` | yes | `{pbs_jobs, pbs_running, restic_next, restic_running, pbs_retention, restic_retention}` |
+| `job/<corr_id>/ack` | no | `{op_id: "…"}` — correlation-ID response after the agent accepts a command |
+
+#### Published by browser → received by agent
 
 | Topic suffix | Content |
 |---|---|
-| `vm/<id>/meta` | VM/LXC name, type, status |
-| `vm/<id>/pbs` | PBS snapshots with `local`/`cloud` flags and `restic_id` |
-| `vm/<id>/restic` | Restic snapshots with per-VM covers and `pbs_date` |
-| `vms/index` | Sorted list of all VMIDs |
-| `storage` | Local PBS usage + cloud quota |
-| `schedules` | PBS job and restic retention config |
-| `state/ready` | Agent health heartbeat |
-| `agent/status` | LWT online/offline |
+| `cmd/rescan` | `{}` — request a full rescan and republish |
+| `cmd/backup/pbs` | `{vmid, vmtype, corr_id}` — trigger PBS backup of a VM/LXC |
+| `cmd/backup/restic` | `{vmid, corr_id}` — trigger restic cloud sync |
+| `cmd/restore` | `{vmid, vmtype, backup_time, source, backup_after, corr_id}` — trigger restore |
 
 > **`mqtt_hostname` must match the `id` field in `hosts.json`.**  
-> The GUI subscribes to `proxmox/<id>/#`. If the agent's `mqtt_hostname` is different (e.g. the OS hostname), the GUI shows "Connecting…" forever. Set `mqtt_hostname` explicitly in the agent's `config.json`.
+> If the agent's `mqtt_hostname` is different (e.g. the OS hostname), the GUI shows "Connecting…" forever. Set `mqtt_hostname` explicitly in the agent's `config.json` and verify with `journalctl -u pve-agent` on the PVE host.
 
 ## Deployment
 

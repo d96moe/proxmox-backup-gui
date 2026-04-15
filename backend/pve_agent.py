@@ -210,6 +210,7 @@ class MQTTPublisher:
         vmid        = body.get("vmid")
         vm_type     = body.get("type", "vm")
         backup_time = body.get("backup_time")
+        restic_id   = body.get("restic_id")
         scope       = body.get("scope", "pbs")   # 'pbs' | 'both' | 'cloud'
         corr_id     = body.get("corr_id", str(uuid.uuid4()))
         if not vmid or backup_time is None or not _cfg:
@@ -218,14 +219,27 @@ class MQTTPublisher:
         self._ack(corr_id, op.op_id)
         log.info("MQTT cmd/delete: %s/%s ts=%s scope=%s", vm_type, vmid, backup_time, scope)
 
+        do_restic = scope == "both" and bool(restic_id and _cfg.restic_repo)
+
         def _do(op: Operation):
             if scope in ("pbs", "both"):
                 pbs = PBSClient(_host())
                 op.append_log(f"Deleting PBS snapshot {vm_type}/{vmid} at {backup_time}…")
-                pbs.delete_snapshot(vm_type, str(vmid), int(backup_time))
-                op.append_log("PBS snapshot deleted.")
+                deleted = pbs.delete_snapshot(vm_type, str(vmid), int(backup_time))
+                if deleted:
+                    op.append_log("PBS snapshot deleted.")
+                    op.append_log("Starting datastore GC…")
+                    pbs.start_gc()
+                    op.append_log("GC started (runs in background on PBS).")
+                else:
+                    op.append_log("PBS snapshot already gone (400/404 — check agent log for PBS response body).")
+            if do_restic:
+                op.append_log("Deleting cloud (restic) copy…")
+                res = LocalResticClient(_cfg)
+                res.forget_snapshots([restic_id], op.append_log)
+                op.append_log("Cloud copy deleted.")
 
-        _run_in_background(op, _do)
+        _run_in_background(op, _do, rescan_restic=do_restic)
 
     def _handle_cmd_delete_all(self, body: dict) -> None:
         vmid    = body.get("vmid")
@@ -495,6 +509,20 @@ class StatePoller:
         """Trigger an immediate PVE+PBS+storage rescan."""
         threading.Thread(target=self._scan_pve_pbs, daemon=True, name="rescan-now").start()
 
+    def invalidate_vm_cache(self, vmid: str | None) -> None:
+        """Clear cached hashes for a VM so the next rescan always republishes.
+
+        Call this before rescan_now() after a delete/restore so _pub_if_changed
+        does not suppress publication even if the payload briefly appears unchanged
+        (e.g. PBS hasn't processed the deletion yet when the rescan races ahead).
+        """
+        if not vmid:
+            return
+        with self._hash_lock:
+            for suffix in (f"vm/{vmid}/pbs", f"vm/{vmid}/meta", f"vm/{vmid}/restic"):
+                self._hashes.pop(suffix, None)
+        log.debug("invalidated MQTT cache for vm/%s", vmid)
+
     def rescan_storage_now(self) -> None:
         """Trigger immediate storage-only rescan (e.g. after delete)."""
         threading.Thread(target=self._scan_storage, daemon=True, name="rescan-storage").start()
@@ -583,7 +611,9 @@ class StatePoller:
         restic_by_vm_pbstime = _build_restic_index(restic_snaps)
 
         # ── build per-VM state and publish diffs ──────────────────────────────
-        all_vmids = (set(str(k) for k in pve_meta) | set(pbs_groups))
+        # Include VMIDs from restic so cloud-only VMs (deleted from PVE+PBS but
+        # still in restic) remain visible in the UI.
+        all_vmids = (set(str(k) for k in pve_meta) | set(pbs_groups) | set(restic_by_vm_pbstime))
 
         for vmid in all_vmids:
             vid_int = int(vmid) if vmid.isdigit() else vmid
@@ -1262,6 +1292,8 @@ def _run_in_background(op: Operation, fn, rescan_restic: bool = False) -> None:
                 if rescan_restic:
                     _poller._scan_restic()   # updates cache → triggers rescan_now()
                 elif op.type in ("backup", "restore", "delete"):
+                    if op.type == "delete":
+                        _poller.invalidate_vm_cache(op.vmid)
                     _poller.rescan_now()
 
     t = threading.Thread(target=_worker, daemon=True)

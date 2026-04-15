@@ -1504,9 +1504,13 @@ function closeDeleteModal() {
 function confirmDelete() {
   const { vmid, type, backupTime, resticId, hasLocal, hasCloud, scope } = _deleteState;
   closeDeleteModal();
+  // Map frontend scope names to agent scope names.
+  // 'local' → 'pbs' (the agent uses 'pbs' for local-only deletion).
+  const agentScope = (!hasLocal && hasCloud) ? 'cloud'
+                   : scope === 'local'        ? 'pbs'
+                   :                            scope;  // 'both' passes unchanged
   MQTTBus.triggerAction('delete',
-    { vmid, type, backup_time: backupTime, restic_id: resticId,
-      scope: (!hasLocal && hasCloud) ? 'cloud' : scope },
+    { vmid, type, backup_time: backupTime, restic_id: resticId, scope: agentScope },
     'Delete snapshot', vmid);
 }
 

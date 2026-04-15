@@ -45,6 +45,15 @@ class PBSClient:
         resp.raise_for_status()
         return resp.json().get("data", {})
 
+    def _post(self, path: str, **data) -> dict:
+        resp = self._session.post(f"{self._base}/api2/json{path}", json=data or None)
+        resp.raise_for_status()
+        return resp.json().get("data", {})
+
+    def start_gc(self) -> None:
+        """Kick off a GC run on the datastore (async — PBS handles it in the background)."""
+        self._post(f"/admin/datastore/{self._datastore}/gc")
+
     def get_storage_info(self) -> dict:
         """Returns local_used, local_total in GB, and PBS dedup factor."""
         data = self._get(f"/admin/datastore/{self._datastore}/status")
@@ -103,21 +112,33 @@ class PBSClient:
             })
         return result
 
-    def delete_snapshot(self, backup_type: str, backup_id: str, backup_time: int) -> None:
-        """Delete a single PBS snapshot. Raises on failure.
+    def delete_snapshot(self, backup_type: str, backup_id: str, backup_time: int) -> bool:
+        """Delete a single PBS snapshot.
 
-        Treats 400/404 as "already gone" — PBS returns 400 (not 404) when the
-        snapshot doesn't exist, so we swallow those to keep delete workflows
-        idempotent.
+        Returns True if the snapshot was actually deleted (2xx), False if PBS
+        reported it as already gone (400/404).  Raises for any other error.
+
+        PBS returns 400 (not 404) when the snapshot doesn't exist, so we treat
+        both as "already gone" to keep delete workflows idempotent — but we log
+        the response body at WARNING level so the caller can diagnose real errors
+        that PBS mis-reports as 400.
         """
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
         try:
             self._delete(
                 f"/admin/datastore/{self._datastore}/snapshots",
                 **{"backup-type": backup_type, "backup-id": backup_id, "backup-time": backup_time},
             )
+            return True
         except requests.HTTPError as e:
             if e.response is not None and e.response.status_code in (400, 404):
-                return  # snapshot already gone — treat as success
+                _log.warning(
+                    "PBS delete_snapshot returned %s for %s/%s@%s — body: %s",
+                    e.response.status_code, backup_type, backup_id, backup_time,
+                    e.response.text[:500],
+                )
+                return False
             raise
 
     def delete_all_snapshots_for_vm(self, backup_type: str, backup_id: str, log) -> int:
@@ -134,6 +155,10 @@ class PBSClient:
             log(f"Deleting PBS snapshot {backup_type}/{backup_id} @ {dt}...")
             self.delete_snapshot(backup_type, backup_id, ts)
         log(f"Deleted {len(sorted_snaps)} PBS snapshot(s).")
+        if sorted_snaps:
+            log("Starting datastore GC…")
+            self.start_gc()
+            log("GC started (runs in background on PBS).")
         return len(sorted_snaps)
 
     def get_prune_jobs(self) -> list[dict]:

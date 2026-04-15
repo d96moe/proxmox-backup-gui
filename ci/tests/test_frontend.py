@@ -113,6 +113,26 @@ STORAGE = {
     "no-cloud": {"local_used": 30, "local_total": 100, "cloud_used": 0},
 }
 
+# sort-test: VMs and LXCs delivered out-of-order by MQTT (depends on agent scan order).
+# Expected render: VMs 101, 202, 303 ascending; LXCs 102, 204 ascending; VM section first.
+ITEMS["sort-test"] = {
+    "storage": {"local_used": 10, "local_total": 100, "cloud_used": 0},
+    "vms": [
+        {"id": 303, "name": "vm-303", "type": "vm", "os": "linux", "status": "running",
+         "template": False, "in_pve": True, "snapshots": []},
+        {"id": 101, "name": "vm-101", "type": "vm", "os": "linux", "status": "stopped",
+         "template": False, "in_pve": True, "snapshots": []},
+        {"id": 202, "name": "vm-202", "type": "vm", "os": "linux", "status": "running",
+         "template": False, "in_pve": True, "snapshots": []},
+    ],
+    "lxcs": [
+        {"id": 204, "name": "ct-204", "type": "lxc", "os": "linux", "status": "running",
+         "template": False, "in_pve": True, "snapshots": []},
+        {"id": 102, "name": "ct-102", "type": "lxc", "os": "linux", "status": "stopped",
+         "template": False, "in_pve": True, "snapshots": []},
+    ],
+}
+
 INFO = {
     "home":  {"pbs": "4.1.4", "pve": "9.1.4", "restic": "0.18.0"},
     "cabin": {"pbs": "4.1.4", "pve": "9.0.10", "restic": "0.18.0"},
@@ -345,7 +365,8 @@ def _mqtt_mock_script(host_ids: list[str]) -> str:
     const client = {{
       on: function(ev, fn) {{ handlers[ev] = fn; return this; }},
       subscribe: function(pattern, o, cb) {{
-        // On first subscribe deliver retained messages for the active host.
+        // On first subscribe (or after unsubscribe reset) deliver retained
+        // messages for the currently active host — simulates broker re-delivery.
         if (!_subscribed) {{
           _subscribed = true;
           setTimeout(function() {{
@@ -355,6 +376,13 @@ def _mqtt_mock_script(host_ids: list[str]) -> str:
         }}
         if (typeof o === 'function') o(null, []);
         else if (typeof cb === 'function') cb(null, []);
+        return this;
+      }},
+      unsubscribe: function(topics, cb) {{
+        // Reset _subscribed so the next subscribe() re-delivers for the new host.
+        // Simulates broker unsubscribing and clearing retained message state.
+        _subscribed = false;
+        if (typeof cb === 'function') cb();
         return this;
       }},
       publish: function(t, p, o, cb) {{
@@ -395,6 +423,10 @@ def _mqtt_mock_script(host_ids: list[str]) -> str:
       }},
       end: function() {{}},
       connected: true,
+    }};
+    // Expose inject helper so tests can deliver arbitrary MQTT messages directly.
+    window._mqttInject = function(topic, payload) {{
+      if (handlers.message) handlers.message(topic, typeof payload === 'string' ? payload : JSON.stringify(payload));
     }};
     setTimeout(function() {{ if (handlers.connect) handlers.connect(); }}, 5);
     return client;
@@ -636,6 +668,19 @@ def test_deploy_progress_regex_matches_new_format(mock_server):
     # Old broken pattern must be gone
     assert r"^\[(\d+)%\s+" not in html, \
         "Old broken '[X%' progress regex still present"
+
+def test_deploy_delete_scope_maps_local_to_pbs(mock_server):
+    """confirmDelete() must map scope 'local' to 'pbs' before sending to agent.
+    Bug: frontend sent scope:'local' but agent only handled 'pbs'/'both'/'cloud'.
+    Result: PBS snapshot was never deleted — job completed instantly with no log output."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    # The fix: 'local' must be remapped to 'pbs' in confirmDelete()
+    assert "'pbs'" in html or '"pbs"' in html, \
+        "scope 'pbs' not found in confirmDelete — local-only delete will silently skip PBS"
+    # The broken code used scope directly without remapping; confirm the remap is present
+    assert "=== 'local'" in html or "=== \"local\"" in html, \
+        "scope === 'local' check missing from confirmDelete — bug may be back"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1416,6 +1461,90 @@ def test_restore_no_js_errors_full_flow(page: Page):
         "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
     page.evaluate("closeJobModal()")
     assert page._js_errors == [], f"JS errors during restore flow: {page._js_errors}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DELETE SNAPSHOT — local-only and both scopes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_delete_modal_opens_for_snapshot(page: Page):
+    """Clicking ✕ Delete on a snapshot row must open the delete modal."""
+    expand_vm_card(page, 101)
+    del_btn = page.locator(".delete-btn[data-vmid='101']").first
+    del_btn.click()
+    page.wait_for_selector("#delete-modal.open", timeout=5000)
+    assert page.locator("#delete-modal .modal").is_visible()
+    assert page._js_errors == []
+    page.evaluate("closeDeleteModal()")
+
+
+def test_delete_local_only_sends_pbs_scope(page: Page):
+    """Confirming 'Local only' delete must publish scope:'pbs' to the agent.
+    Bug: scope was sent as 'local' which the agent ignored — PBS snapshot not deleted,
+    job completed instantly with no log output and 100% progress bar."""
+    # Expose published MQTT messages for inspection
+    page.evaluate("window._publishedCmds = []")
+    page.evaluate("""
+        const origPublish = window._mqttInject.__proto__;
+        // Intercept via redefining _mqttInject to also capture publishes
+        // Actually we need to hook into MQTTBus — override publish at mock level.
+        // The mock's _mockConnect already exposes connected client, but we can
+        // inject a publish interceptor via window.
+        window._capturePublish = true;
+        window._publishedCmds = [];
+    """)
+    # Rebuild mock with publish capture — easier to capture via event on window
+    # Instead: inspect the payload via a simpler approach.
+    # Reload and intercept publish before it goes to agent.
+
+    # Expand and open delete modal
+    expand_vm_card(page, 101)
+    page.locator(".delete-btn[data-vmid='101']").first.click()
+    page.wait_for_selector("#delete-modal.open", timeout=5000)
+
+    # For a local+cloud snapshot, "Local only" is pre-selected.
+    # Capture what scope gets passed to MQTTBus.triggerAction by overriding it.
+    page.evaluate("""
+        window._lastTriggerPayload = null;
+        const orig = MQTTBus.triggerAction;
+        MQTTBus.triggerAction = function(cmd, payload, title, vmid) {
+            if (cmd === 'delete') window._lastTriggerPayload = JSON.parse(JSON.stringify(payload));
+            return orig.call(this, cmd, payload, title, vmid);
+        };
+    """)
+
+    cfg.job_status = "done"
+    cfg.job_logs = ["PBS snapshot deleted."]
+    page.locator(".source-opt[data-scope='local']").click()  # ensure local is selected
+    page.click("button.btn-danger")  # click Delete confirm button
+
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+
+    payload = page.evaluate("window._lastTriggerPayload")
+    assert payload is not None, "triggerAction('delete') was never called"
+    assert payload.get("scope") == "pbs", \
+        f"Expected scope:'pbs' for local-only delete, got: {payload.get('scope')!r}. " \
+        "Bug: scope:'local' silently skipped PBS deletion in agent."
+
+    assert page._js_errors == []
+    page.evaluate("closeJobModal()")
+
+
+def test_delete_modal_full_flow_no_js_errors(page: Page):
+    """No JS errors across the entire delete flow: open → confirm → done → close."""
+    cfg.job_status = "done"
+    cfg.job_logs = ["PBS snapshot deleted."]
+    expand_vm_card(page, 101)
+    page.locator(".delete-btn[data-vmid='101']").first.click()
+    page.wait_for_selector("#delete-modal.open", timeout=5000)
+    page.click("button.btn-danger")
+    page.wait_for_selector("#job-modal.open", timeout=5000)
+    page.wait_for_function(
+        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+    page.evaluate("closeJobModal()")
+    assert page._js_errors == [], f"JS errors during delete flow: {page._js_errors}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2314,3 +2443,186 @@ def test_mobile_theme_toggle_works(mobile_page: Page):
     theme = mobile_page.evaluate("document.documentElement.getAttribute('data-theme')")
     assert theme == "light", f"Theme toggle broken on mobile, got: {theme!r}"
     assert mobile_page._js_errors == []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MQTT BUS — host isolation and resubscribe on host switch
+#
+# These tests cover bugs that were fixed but previously untested:
+#   • _onMessage must discard messages from hosts other than currentHost
+#   • resubscribe() must cause the broker to re-deliver retained messages for
+#     the new host after a host switch (unsubscribe → subscribe cycle)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_mqtt_host_isolation_foreign_message_ignored(page: Page):
+    """Messages from a non-current host must be silently dropped by _onMessage.
+    Bug: before the _onMessage host-filter fix, cabin messages delivered to the
+    DataStore while home was selected caused cabin VM cards to appear on the home view."""
+    # page fixture loads with home active. Inject a cabin message via _mqttInject.
+    page.evaluate("""
+        window._mqttInject(
+            'proxmox/cabin/vm/201/meta',
+            JSON.stringify({vmid:'201', name:'cabin-vm', type:'vm',
+                            status:'running', template:false, in_pve:true})
+        );
+    """)
+    page.wait_for_timeout(300)
+    text = content_text(page)
+    assert "cabin-vm" not in text, \
+        f"cabin-vm appeared in home view — _onMessage host filter not working: {text[:200]!r}"
+    assert "home-vm" in text, f"home-vm disappeared after injecting foreign message: {text[:200]!r}"
+    assert page._js_errors == []
+
+
+def test_mqtt_host_isolation_own_message_accepted(page: Page):
+    """Messages from the current host must be accepted and rendered."""
+    page.evaluate("""
+        window._mqttInject(
+            'proxmox/home/vm/199/meta',
+            JSON.stringify({vmid:'199', name:'injected-home-vm', type:'vm',
+                            status:'running', template:false, in_pve:true})
+        );
+        window._mqttInject(
+            'proxmox/home/vms/index',
+            JSON.stringify(['101', '104', '199'])
+        );
+    """)
+    page.wait_for_function(
+        "() => document.getElementById('content').innerText.includes('injected-home-vm')",
+        timeout=5000,
+    )
+    assert "injected-home-vm" in content_text(page), \
+        "Message from current host (home) was not rendered — _onMessage filter too aggressive"
+    assert page._js_errors == []
+
+
+def test_mqtt_resubscribe_delivers_new_host_data(page: Page):
+    """After switching hosts, resubscribe() must cause retained messages for the new
+    host to be delivered. Bug: without the unsubscribe/subscribe cycle, switching
+    hosts left the UI stuck on 'Connecting...' with no data."""
+    page.click("#nav-cabin")
+    wait_content(page, "cabin-vm")
+    text = content_text(page)
+    assert "cabin-vm" in text, \
+        "cabin data not delivered after host switch — resubscribe() may be broken"
+    assert "home-vm" not in text, \
+        "home data leaked into cabin view after resubscribe"
+    assert page._js_errors == [], f"JS errors during host switch: {page._js_errors}"
+
+
+def test_mqtt_resubscribe_delivers_home_data_on_switch_back(page: Page):
+    """Switching cabin → home must re-deliver home retained messages.
+    Verifies clearStore + resubscribe together prevent stale-data bleed-through."""
+    page.click("#nav-cabin")
+    wait_content(page, "cabin-vm")
+    page.click("#nav-home")
+    wait_content(page, "home-vm")
+    text = content_text(page)
+    assert "home-vm" in text, "home data missing after switching back from cabin"
+    assert "cabin-vm" not in text, "cabin data leaked into home view after switching back"
+    assert page._js_errors == []
+
+
+def test_mqtt_resubscribe_no_js_errors(page: Page):
+    """Multiple host switches must not cause any JS errors.
+    Specifically: _client.unsubscribe must not throw when resubscribe() is called."""
+    for host, vm in [("cabin", "cabin-vm"), ("home", "home-vm"),
+                     ("cabin", "cabin-vm"), ("home", "home-vm")]:
+        page.click(f"#nav-{host}")
+        wait_content(page, vm)
+    assert page._js_errors == [], \
+        f"JS errors during repeated host switches: {page._js_errors}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SORT ORDER — VM/LXC cards must appear in ascending VMID order; VM section
+# must always appear before the LXC section regardless of MQTT message order
+#
+# Uses the sort-test host which has VMs {303, 101, 202} and LXCs {204, 102}
+# delivered in that (non-sorted) order by MQTT, matching real agent behaviour
+# where message arrival order is non-deterministic.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def sort_page(browser, mock_server):
+    """Page loaded with the sort-test host (VMs 303/101/202, LXCs 204/102 — out of order)."""
+    orig_hosts = HOSTS[:]
+    HOSTS.append({"id": "sort-test", "label": "Sort Test"})
+    ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
+    pg = ctx.new_page()
+    pg._js_errors = []
+    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.goto("/")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText.includes('home-vm')",
+        timeout=10000,
+    )
+    pg.click("#nav-sort-test")
+    # Wait for all 5 cards (3 VMs + 2 LXCs) to render
+    pg.wait_for_function(
+        "() => document.querySelectorAll('#content .vm-card').length >= 5",
+        timeout=10000,
+    )
+    yield pg
+    ctx.close()
+    HOSTS[:] = orig_hosts
+
+
+def test_sort_vms_in_ascending_vmid_order(sort_page: Page):
+    """VM cards must appear in ascending VMID order (101, 202, 303).
+    Bug: MQTT messages arrive per-topic in arbitrary order; without explicit
+    sorted insertion the cards appeared in arrival order (303, 101, 202)."""
+    vmids = sort_page.evaluate(
+        "Array.from(document.querySelectorAll('#vm-grid > [data-vmid]'))"
+        ".map(el => parseInt(el.getAttribute('data-vmid')))"
+    )
+    assert vmids == sorted(vmids), \
+        f"VM cards not in ascending VMID order: {vmids} (expected {sorted(vmids)})"
+    assert vmids == [101, 202, 303], \
+        f"VM VMID order wrong: got {vmids}, expected [101, 202, 303]"
+
+
+def test_sort_lxcs_in_ascending_vmid_order(sort_page: Page):
+    """LXC cards must appear in ascending VMID order (102, 204).
+    Bug: same as VMs — without sorted insertion LXCs appeared in arrival order."""
+    vmids = sort_page.evaluate(
+        "Array.from(document.querySelectorAll('#lxc-grid > [data-vmid]'))"
+        ".map(el => parseInt(el.getAttribute('data-vmid')))"
+    )
+    assert vmids == sorted(vmids), \
+        f"LXC cards not in ascending VMID order: {vmids} (expected {sorted(vmids)})"
+    assert vmids == [102, 204], \
+        f"LXC VMID order wrong: got {vmids}, expected [102, 204]"
+
+
+def test_sort_vm_section_before_lxc_section(sort_page: Page):
+    """VM section (#vm-grid-wrapper) must appear before LXC section (#lxc-grid-wrapper)
+    in the DOM, regardless of which MQTT messages arrived first.
+    Bug: when LXC messages arrived before VM messages, the LXC section was inserted
+    first and VM section was appended after it, resulting in LXCs shown above VMs."""
+    order = sort_page.evaluate(
+        """(() => {
+            const vm  = document.getElementById('vm-grid-wrapper');
+            const lxc = document.getElementById('lxc-grid-wrapper');
+            if (!vm || !lxc) return null;
+            // Node.DOCUMENT_POSITION_FOLLOWING (4) means vm comes before lxc
+            return !!(vm.compareDocumentPosition(lxc) & Node.DOCUMENT_POSITION_FOLLOWING);
+        })()"""
+    )
+    assert order is True, \
+        "VM section (#vm-grid-wrapper) does not appear before LXC section (#lxc-grid-wrapper)"
+
+
+def test_sort_no_js_errors_on_sort_host(sort_page: Page):
+    """No JS errors when rendering the out-of-order sort-test host."""
+    assert sort_page._js_errors == [], \
+        f"JS errors while rendering sort-test host: {sort_page._js_errors}"
+
+
+def test_sort_vm_count_in_subtitle_correct(sort_page: Page):
+    """Subtitle must count VMs and LXCs correctly for sort-test host."""
+    subtitle = sort_page.locator("#page-subtitle").inner_text()
+    assert "3 VM" in subtitle, f"Expected '3 VM' in subtitle, got: {subtitle!r}"
+    assert "2 LXC" in subtitle, f"Expected '2 LXC' in subtitle, got: {subtitle!r}"

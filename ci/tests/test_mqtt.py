@@ -979,3 +979,80 @@ class TestTimestampFields:
         assert "pbs_date" in cover, "Cover must have 'pbs_date' field for tooltip"
         assert cover["pbs_date"] not in (None, "", "undefined"), \
             f"pbs_date must be a non-empty string, got: {cover.get('pbs_date')!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROD BUG 6: VM deleted from PVE+PBS but still in restic disappears from UI
+# Root cause: all_vmids = pve_meta | pbs_groups — restic-only VMs excluded.
+# Fix: all_vmids also unions restic_by_vm_pbstime keys so cloud-only VMs
+# remain visible with local=False, cloud=True.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestResticOnlyVmVisible:
+    """A VM that no longer exists in PVE or PBS but has restic snapshots must
+    still appear in published MQTT data as a cloud-only entry."""
+
+    def _run_scan(self, poller, pve_vms, pbs_groups_dict, restic_snaps):
+        poller._restic_snaps = restic_snaps
+        published = {}
+        orig = poller._pub_if_changed
+        def _spy(suffix, data):
+            published[suffix] = data
+            poller._hashes.pop(suffix, None)
+            orig(suffix, data)
+        pbs_list = [
+            {"pve_id": int(vid), "snapshots": snaps}
+            for vid, snaps in pbs_groups_dict.items()
+        ]
+        with patch.object(poller, "_pub_if_changed", side_effect=_spy), \
+             patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent._host", return_value=MagicMock()):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = pve_vms
+            pbs_cls.return_value.get_snapshots.return_value = pbs_list
+            pbs_cls.return_value.get_storage_info.return_value = {
+                "local_used": 0, "local_total": 100, "dedup_factor": 1.0}
+            poller._scan_pve_pbs()
+        return published
+
+    def test_restic_only_vm_is_published(self, agent_cfg):
+        """VM 9131 exists only in restic (deleted from PVE and PBS).
+        Bug: all_vmids never included it → vm/9131/pbs was never published →
+        MQTT broker kept stale local+cloud retained message forever."""
+        poller, _ = _make_poller(agent_cfg)
+        # PVE: vm-9131 is gone
+        pve_vms = {}
+        # PBS: no snapshot for 9131
+        pbs_groups = {}
+        # Restic: snapshot still exists for vm-9131
+        restic_snaps = [{
+            "id":       "dd1cb644c1d3f2ee49a93dfb220c30c9519b98e0a1626e3c218cc378ac429e71",
+            "short_id": "dd1cb644",
+            "ts": 1776211720, "size_bytes": 17179870154,
+            "covers": [{"vmid": 9131, "pbs_time": 1776211720}],
+        }]
+
+        pub = self._run_scan(poller, pve_vms, pbs_groups, restic_snaps)
+
+        assert "vm/9131/pbs" in pub, \
+            "vm/9131/pbs must be published even when VM is absent from PVE and PBS"
+        snaps = pub["vm/9131/pbs"]["snapshots"]
+        assert len(snaps) == 1, f"Expected 1 cloud-only snapshot, got {len(snaps)}"
+        s = snaps[0]
+        assert s["local"] is False, "Snapshot must be local=False (not in PBS)"
+        assert s["cloud"] is True,  "Snapshot must be cloud=True (in restic)"
+
+    def test_restic_only_vm_has_no_local_snapshots(self, agent_cfg):
+        """Cloud-only VM must have zero local=True snapshots."""
+        poller, _ = _make_poller(agent_cfg)
+        restic_snaps = [{
+            "id": "aabbccdd" * 8, "short_id": "aabbccdd",
+            "ts": 1000, "size_bytes": 100,
+            "covers": [{"vmid": 9131, "pbs_time": 1000}],
+        }]
+        pub = self._run_scan(poller, {}, {}, restic_snaps)
+
+        local_snaps = [s for s in pub.get("vm/9131/pbs", {}).get("snapshots", [])
+                       if s.get("local")]
+        assert not local_snaps, \
+            f"Restic-only VM must have no local snapshots, got: {local_snaps}"

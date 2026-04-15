@@ -87,6 +87,8 @@ Playwright tests against an in-process mock server. Cover:
 - **RACE** — rapid host switching, stale-data prevention, AbortController usage
 - **EDGE** — empty data, LXC-only, no cloud storage
 - **CONCURRENCY** — multiple simultaneous users from different browser contexts
+- **MQTT BUS** — host isolation (`_onMessage` filter drops messages from non-current hosts); `resubscribe()` on host switch delivers retained messages for the new host without JS errors
+- **SORT ORDER** — VM cards appear in ascending VMID order; LXC cards in ascending VMID order; VM section always before LXC section regardless of MQTT message arrival order
 
 ### Unit tests (`ci/tests/test_mqtt.py`)
 
@@ -101,6 +103,7 @@ Pure Python unit tests (no VM, no network). Run in both the fast pipeline and as
 - **RESTIC_ID_FORMAT** — `restic_id` = full 64-char hash (for API); `restic_short_id` = 8-char display
 - **CLOUD_ONLY** — PBS entries with `local=False, cloud=True` appear for pruned-locally times
 - **TIMESTAMP_FIELDS** — cloud-only entries have `date`; restic covers have `pbs_date` for tooltips
+- **RESTIC_ONLY_VM** — VM deleted from PVE+PBS but still in restic appears as cloud-only (regression: was invisible because `all_vmids` excluded restic-only VMIDs)
 
 ### Integration tests (`ci/tests/test_restore.py` + `ci/tests/test_frontend.py`)
 
