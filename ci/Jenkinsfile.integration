@@ -835,7 +835,8 @@ PYEOF
                         self_restore: 'tests/test_self_restore.py',
                     ]
                     env.PYTEST_FILES  = suiteMap.get(params.TEST_SUITE, 'tests/')
-                    env.PYTEST_FILTER = params.TEST_FILTER ?: ''
+                    // Use sentinel NONE so empty filter doesn't collapse bash -s arg positions
+                    env.PYTEST_FILTER = params.TEST_FILTER ?: 'NONE'
                     env.PYTEST_FAILFAST = params.FAIL_FAST ? 'true' : 'false'
                     echo "TEST_SUITE=${params.TEST_SUITE}  →  ${env.PYTEST_FILES}"
                     if (env.PYTEST_FILTER) echo "TEST_FILTER: -k '${env.PYTEST_FILTER}'"
@@ -850,7 +851,8 @@ PYEOF
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         bash -s "${PYTEST_FILES}" "${PYTEST_FILTER}" "${PYTEST_FAILFAST}" << 'EOF'
                         PYTEST_TARGET="$1"
-                        PYTEST_FILTER_ARG="$2"
+                        # $2 uses NONE sentinel to prevent Jenkins from collapsing empty args
+                        [ "$2" = "NONE" ] && PYTEST_FILTER_ARG="" || PYTEST_FILTER_ARG="$2"
                         FAIL_FAST_FLAG="$3"
 
                         source /etc/profile.d/ci-venv.sh
