@@ -781,6 +781,8 @@ function selectHost(id) {
   document.getElementById('hostname-label').textContent = host?.label ?? id;
   // Clear MQTT DataStore so stale VM cards from the previous host don't persist
   MQTTBus.clearStore();
+  // Re-subscribe so broker re-delivers all retained messages for the new host
+  MQTTBus.resubscribe();
   // Clear stale content immediately
   document.getElementById('content').innerHTML = MQTTBus.isEnabled()
     ? '<div class="state-msg">Connecting…</div>'
@@ -2163,18 +2165,8 @@ const MQTTBus = (() => {
         document.getElementById('page-subtitle').textContent = '—';
       }
       // Subscribe to all agent state topics (wildcards)
-      _client.subscribe(`${_prefix}/+/agent/status`);
-      _client.subscribe(`${_prefix}/+/state/ready`);
-      _client.subscribe(`${_prefix}/+/vms/index`);
-      _client.subscribe(`${_prefix}/+/vm/+/meta`);
-      _client.subscribe(`${_prefix}/+/vm/+/pbs`);
-      _client.subscribe(`${_prefix}/+/vm/+/restic`);
-      _client.subscribe(`${_prefix}/+/vm/+/backup/progress`);
-      _client.subscribe(`${_prefix}/+/storage`);
-      _client.subscribe(`${_prefix}/+/info`);
-      _client.subscribe(`${_prefix}/+/schedules`);
-      _client.subscribe(`${_prefix}/+/job/+/ack`);
       // Broker delivers all retained messages immediately → UI populates
+      _SUBS.map(s => `${_prefix}${s}`).forEach(t => _client.subscribe(t));
     });
 
     _client.on('message',   (t, p) => _onMessage(t, p));
@@ -2187,6 +2179,23 @@ const MQTTBus = (() => {
     // Use the agent's actual MQTT hostname (learned from inbound messages).
     // Falls back to currentHost if not yet known.
     return _agentHostname || currentHost;
+  }
+
+  // Unsubscribe then re-subscribe all wildcard topics so the broker re-delivers
+  // all retained messages for the newly selected host immediately.
+  const _SUBS = [
+    `/+/agent/status`, `/+/state/ready`, `/+/vms/index`,
+    `/+/vm/+/meta`, `/+/vm/+/pbs`, `/+/vm/+/restic`,
+    `/+/vm/+/backup/progress`, `/+/storage`, `/+/info`,
+    `/+/schedules`, `/+/job/+/ack`,
+  ];
+
+  function resubscribe() {
+    if (!_client || !_enabled) return;
+    const topics = _SUBS.map(s => `${_prefix}${s}`);
+    _client.unsubscribe(topics, () => {
+      topics.forEach(t => _client.subscribe(t));
+    });
   }
 
   function rescan(host) {
@@ -2222,7 +2231,7 @@ const MQTTBus = (() => {
   function clearStore() { Object.keys(_ds).forEach(k => delete _ds[k]); }
   function getDS() { return _ds; }
 
-  return { start, rescan, isEnabled, clearStore, getDS, triggerAction };
+  return { start, rescan, resubscribe, isEnabled, clearStore, getDS, triggerAction };
 })();
 
 // ─────────────────────────────────────────────
