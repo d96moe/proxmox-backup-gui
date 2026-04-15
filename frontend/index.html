@@ -2191,7 +2191,9 @@ const MQTTBus = (() => {
   ];
 
   function resubscribe() {
-    if (!_client || !_enabled) return;
+    // Only resubscribe when already connected — on initial connect, on('connect')
+    // handles subscription; calling unsubscribe before connect corrupts packet order.
+    if (!_client || !_enabled || !_client.connected) return;
     const topics = _SUBS.map(s => `${_prefix}${s}`);
     _client.unsubscribe(topics, () => {
       topics.forEach(t => _client.subscribe(t));
