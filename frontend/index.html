@@ -1570,12 +1570,27 @@ function refreshCurrentTab() {
 // Cloud snapshots — data loading + rendering
 // ─────────────────────────────────────────────
 function renderCloudFromDS() {
-  // Aggregate unique restic snapshots from DataStore, deduplicated by restic id
+  // Aggregate unique restic snapshots from DataStore, deduplicated by restic id.
+  // Each VM publishes the same restic snapshot with only its own covers — merge
+  // covers from all VMs so the cloud tab shows the full cross-VM coverage.
   const ds   = MQTTBus.getDS();
   const seen = new Map();
   Object.values(ds).forEach(d => {
     (d.restic?.snapshots || []).forEach(s => {
-      if (!seen.has(s.id)) seen.set(s.id, s);
+      if (!seen.has(s.id)) {
+        seen.set(s.id, { ...s, covers: [...(s.covers || [])] });
+      } else {
+        // Merge covers from this VM into the existing entry (avoid duplicates)
+        const existing = seen.get(s.id);
+        const existingKeys = new Set(
+          existing.covers.map(c => `${c.vmid}-${c.pbs_time}`)
+        );
+        (s.covers || []).forEach(c => {
+          if (!existingKeys.has(`${c.vmid}-${c.pbs_time}`)) {
+            existing.covers.push(c);
+          }
+        });
+      }
     });
   });
   const snaps = Array.from(seen.values())

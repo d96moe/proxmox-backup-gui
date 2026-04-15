@@ -604,15 +604,38 @@ class StatePoller:
             raw_snaps = pbs_groups.get(vmid, [])
             vm_restic  = restic_by_vm_pbstime.get(vmid, {})
             annotated  = []
+            local_times: set[int] = set()
             for snap in raw_snaps:
                 bt = snap.get("backup_time")
+                if bt is not None:
+                    local_times.add(bt)
                 rs = vm_restic.get(bt)
                 annotated.append({
                     **snap,
+                    "local":           True,
                     "cloud":           rs is not None,
                     "restic_id":       rs["id"]       if rs else None,
                     "restic_short_id": rs["short_id"] if rs else None,
                 })
+
+            # Add cloud-only entries: restic covers a PBS time that no longer
+            # exists locally (was pruned). These show as cloud-only in the UI.
+            seen_cloud: set[int] = set()
+            for bt, rs in sorted(vm_restic.items(), reverse=True):
+                if bt is None or bt in local_times or bt in seen_cloud:
+                    continue
+                seen_cloud.add(bt)
+                annotated.append({
+                    "backup_time":     bt,
+                    "local":           False,
+                    "cloud":           True,
+                    "incremental":     True,
+                    "size":            "—",
+                    "size_bytes":      0,
+                    "restic_id":       rs["id"],
+                    "restic_short_id": rs["short_id"],
+                })
+
             annotated.sort(key=lambda s: s.get("backup_time", 0), reverse=True)
 
             self._pub_if_changed(f"vm/{vmid}/pbs", {"snapshots": annotated})
