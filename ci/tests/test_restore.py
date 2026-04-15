@@ -207,10 +207,13 @@ def real_page(browser):
         pg.wait_for_url("/", timeout=5000)
     else:
         pg.goto("/")
+    # Wait until at least one VM card is rendered — MQTT broker has delivered
+    # retained messages. Do NOT check for "Loading…" text: the HTML ships with
+    # "loading…" (lowercase) so the !== 'Loading…' check is always true
+    # immediately, causing the fixture to yield before any MQTT data arrives.
     pg.wait_for_function(
-        "() => document.getElementById('content') && "
-        "document.getElementById('content').innerText !== 'Loading…'",
-        timeout=45000,  # agent /items includes one restic GDrive call — allow extra time
+        "() => document.querySelector('.vm-card') !== null",
+        timeout=45000,
     )
     yield pg
     ctx.close()
