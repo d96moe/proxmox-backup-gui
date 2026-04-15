@@ -1980,10 +1980,15 @@ const MQTTBus = (() => {
             <span class="section-count" id="${section}-count">0</span>
           </div>
           <div class="vm-grid" id="${section}"></div>`;
-        // LXC section always goes after VM section
-        const vmWrapper = document.getElementById('vm-grid-wrapper');
+        // VMs always before LXCs regardless of message arrival order
+        const lxcWrapper = document.getElementById('lxc-grid-wrapper');
+        const vmWrapper  = document.getElementById('vm-grid-wrapper');
         if (item.type === 'lxc' && vmWrapper) {
+          // LXC section: insert after VM section
           vmWrapper.insertAdjacentElement('afterend', sectionEl);
+        } else if (item.type !== 'lxc' && lxcWrapper) {
+          // VM section: insert before LXC section
+          lxcWrapper.insertAdjacentElement('beforebegin', sectionEl);
         } else {
           content?.appendChild(sectionEl);
         }
