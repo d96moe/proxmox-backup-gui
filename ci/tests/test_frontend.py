@@ -410,7 +410,7 @@ def _mqtt_mock_script(host_ids: list[str]) -> str:
         }}
 
         // Action command (backup/restore/delete/…) — reply with a job ack.
-        const cmdMatch = topic.match(/^([^\/]+)\/([^\/]+)\/cmd\/(?!rescan)(.+)$/);
+        const cmdMatch = topic.match(/^([^\\/]+)\\/([^\\/]+)\\/cmd\\/(?!rescan)(.+)$/);
         if (cmdMatch) {{
           const _pfx  = cmdMatch[1];
           const _host = cmdMatch[2];
@@ -1523,8 +1523,8 @@ def test_delete_local_only_sends_pbs_scope(page: Page):
 
     cfg.job_status = "done"
     cfg.job_logs = ["PBS snapshot deleted."]
-    page.locator(".source-opt[data-scope='local']").click()  # ensure local is selected
-    page.click("button.btn-danger")  # click Delete confirm button
+    page.locator("#delete-modal .source-opt[data-scope='local']").click()  # ensure local is selected
+    page.locator("#delete-modal button.btn-danger").first.click()  # click Delete confirm button
 
     page.wait_for_selector("#job-modal.open", timeout=5000)
     page.wait_for_function(
@@ -1547,7 +1547,7 @@ def test_delete_modal_full_flow_no_js_errors(page: Page):
     expand_vm_card(page, 101)
     page.locator(".delete-btn[data-vmid='101']").first.click()
     page.wait_for_selector("#delete-modal.open", timeout=5000)
-    page.click("button.btn-danger")
+    page.locator("#delete-modal button.btn-danger").first.click()
     page.wait_for_selector("#job-modal.open", timeout=5000)
     page.wait_for_function(
         "() => !document.getElementById('job-close-btn').disabled", timeout=6000)

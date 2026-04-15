@@ -333,7 +333,11 @@ def mqtt_proxy(ws):
     )
     client.on_connect = _on_connect
     client.on_message = _on_message
-    client.connect(_MQTT_HOST, _MQTT_PORT, keepalive=30)
+    try:
+        client.connect(_MQTT_HOST, _MQTT_PORT, keepalive=30)
+    except Exception as exc:
+        ws.send(json.dumps({"type": "error", "message": f"MQTT broker unavailable: {exc}"}))
+        return
     client.loop_start()
 
     def _sender():

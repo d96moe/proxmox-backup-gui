@@ -403,14 +403,18 @@ users = [{'username': 'admin', 'password_hash': generate_password_hash('proxmox-
 open('/opt/proxmox-backup-gui/backend/users.json', 'w').write(json.dumps(users))
 print('CI admin user created')
 "
-                        # The service file was created on the template VM (192.168.0.249).
-                        # After cloning, the CI VM runs at 192.168.0.250 — patch the
-                        # MQTT_WS_URL so the browser connects to this clone's Mosquitto,
-                        # not the template's. The agent publishes to localhost:1883 on
-                        # this VM; the browser must connect to the same broker.
-                        pct exec 300 -- sed -i \
-                            "s|MQTT_WS_URL=.*|MQTT_WS_URL=ws://192.168.0.250:9001|" \
-                            /etc/systemd/system/proxmox-backup-gui.service
+                        # Flask uses MQTT_BROKER_HOST to connect to Mosquitto over TCP.
+                        # The agent publishes to localhost:1883 on the PVE host (10.10.0.1
+                        # from LXC 300's perspective). Remove stale MQTT_WS_URL if present,
+                        # then ensure MQTT_BROKER_HOST points to the CI VM's broker.
+                        pct exec 300 -- bash -c '
+                            sed -i "/MQTT_WS_URL=/d" /etc/systemd/system/proxmox-backup-gui.service
+                            if grep -q "MQTT_BROKER_HOST=" /etc/systemd/system/proxmox-backup-gui.service; then
+                                sed -i "s|MQTT_BROKER_HOST=.*|MQTT_BROKER_HOST=10.10.0.1|" /etc/systemd/system/proxmox-backup-gui.service
+                            else
+                                sed -i "/\[Service\]/a Environment=MQTT_BROKER_HOST=10.10.0.1" /etc/systemd/system/proxmox-backup-gui.service
+                            fi
+                        '
                         pct exec 300 -- systemctl daemon-reload
                         pct exec 300 -- systemctl restart proxmox-backup-gui
                         # Poll until active (MQTT connect can take >3s on cold start)
