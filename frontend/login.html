@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login — Proxmox Backup Manager</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:      #0e0f11;
+    --surface: #161719;
+    --border:  #2a2c30;
+    --border2: #363840;
+    --text:    #d4d6db;
+    --muted:   #5a5e6a;
+    --accent:  #4a9eff;
+    --accent2: #2d7dd2;
+    --green:   #3ecf8e;
+    --red:     #f05252;
+  }
+  [data-theme="light"] {
+    --bg:      #f0f2f5;
+    --surface: #ffffff;
+    --border:  #d8dce5;
+    --border2: #b8bfcc;
+    --text:    #1a1d24;
+    --muted:   #6b7280;
+    --accent:  #1d6fd8;
+    --accent2: #1558b0;
+    --red:     #dc2626;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Sans', sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .login-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 36px 40px;
+    width: 360px;
+  }
+
+  .logo-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 28px;
+  }
+  .logo-mark {
+    width: 30px;
+    height: 30px;
+    background: var(--accent);
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 600;
+    font-size: 13px;
+    color: #fff;
+    letter-spacing: -1px;
+    flex-shrink: 0;
+  }
+  .logo-text {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    letter-spacing: 0.02em;
+  }
+  .logo-text span { color: var(--muted); font-weight: 300; }
+
+  h1 {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 20px;
+    letter-spacing: -0.01em;
+  }
+
+  .field { margin-bottom: 14px; }
+  label {
+    display: block;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 10px;
+    font-weight: 500;
+    color: var(--muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+  }
+  input {
+    width: 100%;
+    padding: 9px 12px;
+    background: var(--bg);
+    border: 1px solid var(--border2);
+    border-radius: 6px;
+    color: var(--text);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    outline: none;
+    transition: border-color .15s;
+  }
+  input:focus { border-color: var(--accent); }
+
+  .error-msg {
+    display: none;
+    padding: 9px 12px;
+    background: color-mix(in srgb, var(--red) 12%, transparent);
+    border: 1px solid color-mix(in srgb, var(--red) 30%, transparent);
+    border-radius: 6px;
+    color: var(--red);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    margin-bottom: 14px;
+  }
+
+  .btn-login {
+    width: 100%;
+    padding: 10px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: 6px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background .15s;
+    margin-top: 6px;
+  }
+  .btn-login:hover { background: var(--accent2); }
+  .btn-login:disabled { opacity: 0.6; cursor: not-allowed; }
+
+  .theme-toggle {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    width: 30px;
+    height: 30px;
+    border-radius: 6px;
+    border: 1px solid var(--border2);
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    transition: all .15s;
+  }
+  .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+</style>
+</head>
+<body>
+<button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle theme"></button>
+
+<div class="login-card">
+  <div class="logo-row">
+    <div class="logo-mark">pb</div>
+    <span class="logo-text">proxmox-backup <span>/ manager</span></span>
+  </div>
+  <h1>Sign in</h1>
+  <div class="error-msg" id="error-msg"></div>
+  <form id="login-form" onsubmit="doLogin(event)">
+    <div class="field">
+      <label>Username</label>
+      <input type="text" id="username" name="username" autocomplete="username" autofocus required>
+    </div>
+    <div class="field">
+      <label>Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+    </div>
+    <button class="btn-login" id="btn-login" type="submit">Sign in</button>
+  </form>
+</div>
+
+<script>
+async function doLogin(e) {
+  e.preventDefault();
+  const errEl = document.getElementById('error-msg');
+  const btn   = document.getElementById('btn-login');
+  errEl.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
+
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: document.getElementById('username').value,
+        password: document.getElementById('password').value,
+      }),
+    });
+    if (res.ok) {
+      const params = new URLSearchParams(window.location.search);
+      window.location.href = params.get('next') || '/';
+    } else {
+      const data = await res.json().catch(() => ({}));
+      errEl.textContent = data.error || 'Login failed';
+      errEl.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'Sign in';
+    }
+  } catch (err) {
+    errEl.textContent = 'Network error — please try again';
+    errEl.style.display = 'block';
+    btn.disabled = false;
+    btn.textContent = 'Sign in';
+  }
+}
+
+function _applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  document.getElementById('theme-toggle').textContent = theme === 'light' ? '☽' : '☀';
+}
+function toggleTheme() {
+  const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  localStorage.setItem('theme', next);
+  _applyTheme(next);
+}
+_applyTheme(localStorage.getItem('theme') || 'dark');
+</script>
+</body>
+</html>

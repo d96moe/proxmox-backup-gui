@@ -66,11 +66,13 @@ pct exec "${LXC_ID}" -- mkdir -p /opt/proxmox-backup-gui/backend /opt/proxmox-ba
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-for f in app.py config.py pbs_client.py pve_client.py restic_client.py; do
-    pct push "${LXC_ID}" "${SCRIPT_DIR}/backend/${f}" "/opt/proxmox-backup-gui/backend/${f}"
+for f in app.py config.py pbs_client.py pve_client.py restic_client.py agent_client.py jobs.py auth.py; do
+    [ -f "${SCRIPT_DIR}/backend/${f}" ] && \
+        pct push "${LXC_ID}" "${SCRIPT_DIR}/backend/${f}" "/opt/proxmox-backup-gui/backend/${f}"
 done
 pct push "${LXC_ID}" "${SCRIPT_DIR}/requirements.txt" "/opt/proxmox-backup-gui/requirements.txt"
 pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/index.html" "/opt/proxmox-backup-gui/frontend/index.html"
+pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/login.html" "/opt/proxmox-backup-gui/frontend/login.html"
 
 # Copy example hosts.json if no real one exists yet
 if [ ! -f "${SCRIPT_DIR}/backend/hosts.json" ]; then
@@ -91,6 +93,30 @@ pct exec "${LXC_ID}" -- bash -c "
     python3 -m venv /opt/proxmox-backup-gui/.venv
     /opt/proxmox-backup-gui/.venv/bin/pip install -q -r /opt/proxmox-backup-gui/requirements.txt
 "
+
+# ── Create initial admin user ─────────────────────────────────────────────────
+echo "=== Creating initial admin user ==="
+GUI_USER="${GUI_USER:-admin}"
+if [ -z "${GUI_PASSWORD:-}" ]; then
+    GUI_PASSWORD="$(tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 16)"
+    _GENERATED_PW=1
+fi
+pct exec "${LXC_ID}" -- bash -c "
+    cd /opt/proxmox-backup-gui/backend
+    /opt/proxmox-backup-gui/.venv/bin/python - <<'PYEOF'
+import sys
+sys.path.insert(0, '.')
+from auth import add_user, get_user
+import os
+username = os.environ.get('GUI_USER', 'admin')
+password = os.environ.get('GUI_PASSWORD', '')
+if get_user(username):
+    print(f'User {username!r} already exists — skipping')
+else:
+    add_user(username, password, 'admin')
+    print(f'Created admin user: {username}')
+PYEOF
+" GUI_USER="${GUI_USER}" GUI_PASSWORD="${GUI_PASSWORD}"
 
 # ── systemd service ───────────────────────────────────────────────────────────
 echo "=== Creating systemd service ==="
@@ -130,3 +156,11 @@ echo "  3. Start:      systemctl start proxmox-backup-gui"
 echo "  4. Open:       http://${LXC_ADDR}:${APP_PORT}"
 echo ""
 echo "  Logs: journalctl -u proxmox-backup-gui -f"
+echo ""
+echo "  Login credentials:"
+echo "    Username: ${GUI_USER}"
+if [ -n "${_GENERATED_PW:-}" ]; then
+    echo "    Password: ${GUI_PASSWORD}  ← SAVE THIS, it won't be shown again"
+else
+    echo "    Password: (as provided)"
+fi

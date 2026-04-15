@@ -8,12 +8,23 @@ Inspired by Backrest's operation model:
   - Status tracked: pending → running → ok | failed
   - SSE stream delivers log lines live; replays full log when op is done
 
+MQTT events (optional — requires mqtt_host in config):
+  proxmox/<hostname>/agent/status         → online/offline (LWT, retained)
+  proxmox/<hostname>/vm/<id>/backup/status   → idle/running/done/failed (retained)
+  proxmox/<hostname>/vm/<id>/backup/progress → {"pct":42,"speed_mbps":…,"eta_s":…}
+  proxmox/<hostname>/vm/<id>/backup/last_ok  → ISO timestamp (retained)
+  proxmox/<hostname>/ops/<op_id>/log      → individual log lines
+
+HA MQTT Discovery payloads published automatically per VM (lazy, on first op).
+
 Bind to 10.10.0.1:8099 so only LXC containers on vmbr0 can reach it.
 """
 from __future__ import annotations
 
 import json
+import logging
 import re
+import socket
 import subprocess
 import threading
 import time
@@ -32,6 +43,732 @@ VERSION = "0.1.0"
 _start_time = time.monotonic()
 
 app = Flask(__name__)
+log = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MQTT publisher (optional — only active when mqtt_host is configured)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MQTTPublisher:
+    """Thin paho-mqtt wrapper with LWT and HA Discovery support.
+
+    All publishes are fire-and-forget (QoS 0 for progress, QoS 1 for state).
+    Connection runs in a background thread via loop_start().
+    """
+
+    def __init__(self, host: str, port: int = 1883,
+                 user: str = "", password: str = "",
+                 hostname: str = "") -> None:
+        import paho.mqtt.client as mqtt
+
+        self._hostname = hostname or socket.gethostname()
+        self._base     = f"proxmox/{self._hostname}"
+        self._discovered: set[str] = set()  # vmids already announced to HA
+        self._lock = threading.Lock()
+
+        lwt_topic = f"{self._base}/agent/status"
+
+        self._client = mqtt.Client(client_id=f"pve-agent-{self._hostname}")
+        self._client.will_set(lwt_topic, "offline", retain=True, qos=1)
+
+        if user:
+            self._client.username_pw_set(user, password)
+
+        self._client.on_connect    = self._on_connect
+        self._client.on_disconnect = self._on_disconnect
+
+        try:
+            self._client.connect_async(host, port, keepalive=60)
+            self._client.loop_start()
+        except Exception as exc:
+            log.warning("MQTT connect_async failed: %s", exc)
+
+    # ── internal callbacks ────────────────────────────────────────────────────
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            log.info("MQTT connected — publishing online status")
+            client.publish(f"{self._base}/agent/status", "online",
+                           retain=True, qos=1)
+            # Subscribe to command topics
+            client.subscribe(f"{self._base}/cmd/+", qos=1)
+        else:
+            log.warning("MQTT connect failed rc=%s", rc)
+
+    def _on_message(self, client, userdata, msg):
+        cmd = msg.topic.split("/")[-1]
+        body: dict = {}
+        try:
+            body = json.loads(msg.payload) if msg.payload else {}
+        except Exception:
+            pass
+        if cmd == "rescan" and _poller:
+            log.info("MQTT cmd/rescan received — triggering immediate scan")
+            _poller.rescan_now()
+        elif cmd == "backup":
+            threading.Thread(target=self._handle_cmd_backup, args=(body,),
+                             daemon=True, name="mqtt-cmd-backup").start()
+        elif cmd == "restore":
+            threading.Thread(target=self._handle_cmd_restore, args=(body,),
+                             daemon=True, name="mqtt-cmd-restore").start()
+        elif cmd == "delete":
+            threading.Thread(target=self._handle_cmd_delete, args=(body,),
+                             daemon=True, name="mqtt-cmd-delete").start()
+        elif cmd == "delete-all":
+            threading.Thread(target=self._handle_cmd_delete_all, args=(body,),
+                             daemon=True, name="mqtt-cmd-delete-all").start()
+        elif cmd == "backup-restic":
+            threading.Thread(target=self._handle_cmd_backup_restic, args=(body,),
+                             daemon=True, name="mqtt-cmd-backup-restic").start()
+        elif cmd == "delete-restic":
+            threading.Thread(target=self._handle_cmd_delete_restic, args=(body,),
+                             daemon=True, name="mqtt-cmd-delete-restic").start()
+        elif cmd == "restore-datastore":
+            threading.Thread(target=self._handle_cmd_restore_datastore, args=(body,),
+                             daemon=True, name="mqtt-cmd-restore-datastore").start()
+
+    def _ack(self, corr_id: str, op_id: str) -> None:
+        """Publish job ACK so the browser can start polling the operation."""
+        self._client.publish(
+            f"{self._base}/job/{corr_id}/ack",
+            json.dumps({"op_id": op_id}), retain=True, qos=1,
+        )
+
+    def _node(self) -> str:
+        return _cfg.mqtt_hostname if _cfg and _cfg.mqtt_hostname else socket.gethostname()
+
+    def _handle_cmd_backup(self, body: dict) -> None:
+        vmid    = body.get("vmid")
+        vm_type = body.get("type", "vm")
+        btype   = body.get("btype", "pbs")
+        corr_id = body.get("corr_id", str(uuid.uuid4()))
+        run_restic_after = body.get("run_restic_after", False)
+        if not vmid or not _cfg:
+            return
+        node    = self._node()
+        storage = _cfg.pbs_storage_id
+        op      = _new_op("backup", vmid=str(vmid))
+        self._ack(corr_id, op.op_id)
+        log.info("MQTT cmd/backup: %s/%s corr_id=%s op=%s", vm_type, vmid, corr_id, op.op_id)
+
+        def _do(op: Operation):
+            pve = PVEClient(_host())
+            total = 2 if (run_restic_after and _cfg and _cfg.restic_repo) else 2
+            op.append_log(f"Step 1/{total} — Starting PBS backup: {vm_type}/{vmid}")
+            upid = pve.backup_vm(int(vmid), vm_type, storage, node)
+            op.append_log(f"Task: {upid}")
+            op.append_log(f"Step 2/{total} — Waiting for completion…")
+            ok = pve.wait_for_task(node, upid, op.append_log)
+            if not ok:
+                raise RuntimeError("PBS backup task failed")
+            op.append_log("Backup complete.")
+            if run_restic_after and _cfg and _cfg.restic_repo:
+                res = LocalResticClient(_cfg)
+                op.append_log("Starting restic cloud backup…")
+                def _prog_backup(pct, speed, eta):
+                    self.publish_progress(op.op_id, str(vmid), pct, speed, eta)
+                res.backup_datastore(_cfg.pbs_datastore_path, op.append_log, [],
+                                     progress_fn=_prog_backup)
+                op.append_log("Cloud backup complete.")
+
+        _run_in_background(op, _do)
+
+    def _handle_cmd_restore(self, body: dict) -> None:
+        vmid        = body.get("vmid")
+        vm_type     = body.get("type", "vm")
+        backup_time = body.get("backup_time")
+        corr_id     = body.get("corr_id", str(uuid.uuid4()))
+        run_backup_after = body.get("run_backup_after", False)
+        if not vmid or not backup_time or not _cfg:
+            return
+        node         = self._node()
+        storage_id   = _cfg.pbs_storage_id
+        pbs_ds       = _cfg.pbs_datastore
+        bt_iso       = datetime.fromtimestamp(int(backup_time), tz=timezone.utc).isoformat()
+        op           = _new_op("restore", vmid=str(vmid))
+        self._ack(corr_id, op.op_id)
+        log.info("MQTT cmd/restore: %s/%s ts=%s corr_id=%s", vm_type, vmid, backup_time, corr_id)
+
+        def _do(op: Operation):
+            pve = PVEClient(_host())
+            total = 3 if run_backup_after else 2
+            op.append_log(f"Step 1/{total} — Stopping {vm_type}/{vmid}…")
+            pve.stop_vm(int(vmid), vm_type, node)
+            op.append_log(f"Step 2/{total} — Restoring from PBS snapshot {bt_iso}…")
+            upid = pve.restore_vm(int(vmid), vm_type, bt_iso, storage_id, node, pbs_ds)
+            ok   = pve.wait_for_task(node, upid, op.append_log)
+            if not ok:
+                raise RuntimeError("Restore task failed")
+            op.append_log("Restore complete.")
+            pve.start_vm(int(vmid), vm_type, node)
+            op.append_log(f"Started {vm_type}/{vmid}.")
+
+        _run_in_background(op, _do)
+
+    def _handle_cmd_delete(self, body: dict) -> None:
+        vmid        = body.get("vmid")
+        vm_type     = body.get("type", "vm")
+        backup_time = body.get("backup_time")
+        scope       = body.get("scope", "pbs")   # 'pbs' | 'both' | 'cloud'
+        corr_id     = body.get("corr_id", str(uuid.uuid4()))
+        if not vmid or backup_time is None or not _cfg:
+            return
+        op = _new_op("delete", vmid=str(vmid))
+        self._ack(corr_id, op.op_id)
+        log.info("MQTT cmd/delete: %s/%s ts=%s scope=%s", vm_type, vmid, backup_time, scope)
+
+        def _do(op: Operation):
+            if scope in ("pbs", "both"):
+                pbs = PBSClient(_host())
+                op.append_log(f"Deleting PBS snapshot {vm_type}/{vmid} at {backup_time}…")
+                pbs.delete_snapshot(vm_type, str(vmid), int(backup_time))
+                op.append_log("PBS snapshot deleted.")
+
+        _run_in_background(op, _do)
+
+    def _handle_cmd_delete_all(self, body: dict) -> None:
+        vmid    = body.get("vmid")
+        vm_type = body.get("type", "vm")
+        corr_id = body.get("corr_id", str(uuid.uuid4()))
+        if not vmid or not _cfg:
+            return
+        op = _new_op("delete", vmid=str(vmid))
+        self._ack(corr_id, op.op_id)
+        log.info("MQTT cmd/delete-all: %s/%s", vm_type, vmid)
+
+        def _do(op: Operation):
+            pbs  = PBSClient(_host())
+            count = pbs.delete_all_snapshots_for_vm(vm_type, str(vmid), op.append_log)
+            op.append_log(f"Deleted {count} snapshot(s).")
+
+        _run_in_background(op, _do)
+
+    def _handle_cmd_backup_restic(self, body: dict) -> None:
+        corr_id = body.get("corr_id", str(uuid.uuid4()))
+        if not _cfg or not _cfg.restic_repo:
+            return
+        op = _new_op("backup", vmid=None)
+        self._ack(corr_id, op.op_id)
+        log.info("MQTT cmd/backup-restic corr_id=%s", corr_id)
+
+        def _do(op: Operation):
+            res = LocalResticClient(_cfg)
+            pbs = PBSClient(_host())
+            snaps_raw = pbs.get_snapshots()
+            pbs_snaps = [
+                (s.get("type", "vm"), s.get("vmid", "0"), s.get("backup_time", 0))
+                for group in snaps_raw for s in group.get("snapshots", [])
+            ]
+            def _prog_restic(pct, speed, eta):
+                self.publish_progress(op.op_id, None, pct, speed, eta)
+            res.backup_datastore(_cfg.pbs_datastore_path, op.append_log, pbs_snaps,
+                                 progress_fn=_prog_restic)
+
+        _run_in_background(op, _do, rescan_restic=True)
+
+    def _handle_cmd_delete_restic(self, body: dict) -> None:
+        restic_id = body.get("restic_id")
+        corr_id   = body.get("corr_id", str(uuid.uuid4()))
+        if not restic_id or not _cfg or not _cfg.restic_repo:
+            return
+        op = _new_op("delete", vmid=None)
+        self._ack(corr_id, op.op_id)
+        log.info("MQTT cmd/delete-restic id=%s", restic_id[:8])
+
+        def _do(op: Operation):
+            res = LocalResticClient(_cfg)
+            res.forget_snapshots([restic_id], op.append_log)
+
+        _run_in_background(op, _do, rescan_restic=True)
+
+    def _handle_cmd_restore_datastore(self, body: dict) -> None:
+        restic_id = body.get("restic_id")
+        corr_id   = body.get("corr_id", str(uuid.uuid4()))
+        if not restic_id or not _cfg or not _cfg.restic_repo:
+            return
+        op = _new_op("restore", vmid=None)
+        self._ack(corr_id, op.op_id)
+        log.info("MQTT cmd/restore-datastore id=%s", restic_id[:8])
+
+        def _do(op: Operation):
+            res = LocalResticClient(_cfg)
+            res.restore_datastore(restic_id, op.append_log)
+
+        _run_in_background(op, _do)
+
+    def setup_message_handler(self) -> None:
+        self._client.on_message = self._on_message
+
+    def _on_disconnect(self, client, userdata, rc):
+        if rc != 0:
+            log.warning("MQTT unexpected disconnect rc=%s — will auto-reconnect", rc)
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def publish_op_started(self, op_id: str, vmid: str | None) -> None:
+        if vmid:
+            self._ensure_discovery(vmid)
+            self._client.publish(f"{self._base}/vm/{vmid}/backup/status",
+                                 "running", retain=True, qos=1)
+        self._client.publish(f"{self._base}/ops/{op_id}/status",
+                             "running", qos=1)
+
+    def publish_op_done(self, op_id: str, vmid: str | None,
+                        ok: bool, finished_at: float) -> None:
+        status = "done" if ok else "failed"
+        if vmid:
+            self._client.publish(f"{self._base}/vm/{vmid}/backup/status",
+                                 status, retain=True, qos=1)
+            if ok:
+                ts = datetime.fromtimestamp(finished_at, tz=timezone.utc).isoformat()
+                self._client.publish(f"{self._base}/vm/{vmid}/backup/last_ok",
+                                     ts, retain=True, qos=1)
+        self._client.publish(f"{self._base}/ops/{op_id}/status", status, qos=1)
+
+    def publish_progress(self, op_id: str, vmid: str | None,
+                         pct: float, speed_mbps: float | None = None,
+                         eta_s: int | None = None) -> None:
+        payload = json.dumps({
+            "pct": round(pct, 1),
+            **({"speed_mbps": round(speed_mbps, 1)} if speed_mbps is not None else {}),
+            **({"eta_s": eta_s} if eta_s is not None else {}),
+        })
+        self._client.publish(f"{self._base}/ops/{op_id}/progress", payload, qos=0)
+        if vmid:
+            self._client.publish(f"{self._base}/vm/{vmid}/backup/progress",
+                                 payload, qos=0)
+
+    def publish_log(self, op_id: str, line: str) -> None:
+        self._client.publish(f"{self._base}/ops/{op_id}/log", line, qos=0)
+
+    def publish_vm_idle(self, vmid: str) -> None:
+        """Mark a VM's backup status as idle (e.g. after startup scan)."""
+        self._ensure_discovery(vmid)
+        self._client.publish(f"{self._base}/vm/{vmid}/backup/status",
+                             "idle", retain=True, qos=1)
+
+    def shutdown(self) -> None:
+        try:
+            self._client.publish(f"{self._base}/agent/status", "offline",
+                                 retain=True, qos=1)
+            time.sleep(0.2)  # let the publish flush
+        finally:
+            self._client.loop_stop()
+            self._client.disconnect()
+
+    # ── HA MQTT Discovery ─────────────────────────────────────────────────────
+
+    def _ensure_discovery(self, vmid: str) -> None:
+        """Publish HA Discovery payloads for a vmid once per session."""
+        with self._lock:
+            if vmid in self._discovered:
+                return
+            self._discovered.add(vmid)
+
+        hn  = self._hostname
+        dev = {"identifiers": [f"proxmox_{hn}"], "name": f"Proxmox {hn}",
+               "manufacturer": "Proxmox"}
+
+        def _pub(component: str, obj_id: str, cfg: dict) -> None:
+            topic = f"homeassistant/{component}/proxmox_{hn}_{obj_id}/config"
+            self._client.publish(topic, json.dumps(cfg), retain=True, qos=1)
+
+        _pub("sensor", f"vm{vmid}_backup_status", {
+            "name": f"VM {vmid} Backup Status",
+            "state_topic": f"{self._base}/vm/{vmid}/backup/status",
+            "unique_id": f"proxmox_{hn}_vm{vmid}_backup_status",
+            "icon": "mdi:backup-restore",
+            "device": dev,
+        })
+        _pub("sensor", f"vm{vmid}_backup_last_ok", {
+            "name": f"VM {vmid} Last Backup",
+            "state_topic": f"{self._base}/vm/{vmid}/backup/last_ok",
+            "device_class": "timestamp",
+            "unique_id": f"proxmox_{hn}_vm{vmid}_backup_last_ok",
+            "device": dev,
+        })
+        _pub("sensor", f"vm{vmid}_backup_progress", {
+            "name": f"VM {vmid} Backup Progress",
+            "state_topic": f"{self._base}/vm/{vmid}/backup/progress",
+            "value_template": "{{ value_json.pct }}",
+            "unit_of_measurement": "%",
+            "unique_id": f"proxmox_{hn}_vm{vmid}_backup_progress",
+            "icon": "mdi:progress-upload",
+            "device": dev,
+        })
+
+    def publish_agent_discovery(self) -> None:
+        """Publish agent-level HA Discovery (online/offline binary sensor)."""
+        hn  = self._hostname
+        dev = {"identifiers": [f"proxmox_{hn}"], "name": f"Proxmox {hn}",
+               "manufacturer": "Proxmox"}
+        topic = f"homeassistant/binary_sensor/proxmox_{hn}_agent/config"
+        self._client.publish(topic, json.dumps({
+            "name": f"Proxmox {hn} Agent",
+            "state_topic": f"{self._base}/agent/status",
+            "payload_on": "online",
+            "payload_off": "offline",
+            "unique_id": f"proxmox_{hn}_agent_status",
+            "device_class": "connectivity",
+            "device": dev,
+        }), retain=True, qos=1)
+
+
+# Module-level publisher — None when MQTT is not configured
+_mqtt: MQTTPublisher | None = None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# State poller — maintains current VM/PBS/restic state, publishes diffs
+# ─────────────────────────────────────────────────────────────────────────────
+
+class StatePoller:
+    """Background poller that keeps MQTT broker state up to date.
+
+    Topics published (all retained):
+      proxmox/<host>/vm/<id>/meta    → {vmid, name, type, status, os, ...}
+      proxmox/<host>/vm/<id>/pbs     → {snapshots: [...]}
+      proxmox/<host>/vm/<id>/restic  → {snapshots: [...]}
+      proxmox/<host>/vms/index       → ["100", "101", ...]
+      proxmox/<host>/state/ready     → {"ts": ..., "pbs_ok": bool}
+      proxmox/<host>/storage         → {local_used, local_total, dedup_factor, ...}
+      proxmox/<host>/info            → {pbs: "3.x", restic: "0.16"}
+      proxmox/<host>/schedules       → {pbs_jobs, pbs_running, restic_next, ...}
+    """
+
+    PVE_PBS_INTERVAL      = 60    # seconds — VM list, snapshots, local storage
+    RESTIC_INTERVAL       = 300   # seconds — cloud snapshot listing (expensive)
+    CLOUD_STORAGE_INTERVAL = 60   # seconds — cloud quota/usage (just 2 rclone calls)
+    INFO_INTERVAL         = 3600  # seconds — version strings (rarely change)
+    SCHEDULES_INTERVAL    = 120   # seconds — next scheduled backup
+
+    def __init__(self, cfg: "AgentConfig", mqtt: MQTTPublisher) -> None:
+        self._cfg   = cfg
+        self._mqtt  = mqtt
+        self._base  = mqtt._base
+        self._stop  = threading.Event()
+        self._hashes: dict[str, str] = {}  # topic_suffix → last published payload
+        self._hash_lock = threading.Lock()
+        # Keep latest restic state so PBS poll can cross-reference
+        self._restic_snaps: list[dict] = []
+        self._restic_lock  = threading.Lock()
+        # Last known local PBS storage stats — merged with cloud stats in storage topic
+        self._local_storage: dict = {}
+        self._storage_lock  = threading.Lock()
+
+    def start(self) -> None:
+        # Reset running-flags on startup so stale retained "restic_running/pbs_running: true"
+        # can never persist across agent restarts.
+        self._pub_if_changed("schedules", {
+            "pbs_jobs": [], "pbs_running": False,
+            "restic_next": None, "restic_running": False,
+            "pbs_retention": [], "restic_retention": {},
+        })
+
+        # Pre-populate cloud stats so _scan_storage() has real values from the first run.
+        # This is just 2 rclone calls — fast enough to do synchronously before threads start.
+        if self._cfg and self._cfg.restic_repo:
+            try:
+                stats = LocalResticClient(self._cfg).get_stats()
+                self._update_cloud_storage(
+                    stats.get("cloud_used", 0),
+                    stats.get("cloud_total"),
+                    stats.get("cloud_quota_used"),
+                )
+                log.info("Cloud storage pre-scan done: used=%.2fGB", stats.get("cloud_used", 0))
+            except Exception as exc:
+                log.warning("Cloud storage pre-scan failed: %s", exc)
+        threading.Thread(target=self._loop_pve_pbs,       daemon=True, name="poller-pve-pbs").start()
+        threading.Thread(target=self._loop_restic,         daemon=True, name="poller-restic").start()
+        threading.Thread(target=self._loop_cloud_storage,  daemon=True, name="poller-cloud-storage").start()
+        threading.Thread(target=self._loop_info,           daemon=True, name="poller-info").start()
+        threading.Thread(target=self._loop_schedules,      daemon=True, name="poller-schedules").start()
+        log.info("StatePoller started (pve/pbs %ds, restic %ds, cloud-storage %ds, info %ds, schedules %ds)",
+                 self.PVE_PBS_INTERVAL, self.RESTIC_INTERVAL, self.CLOUD_STORAGE_INTERVAL,
+                 self.INFO_INTERVAL, self.SCHEDULES_INTERVAL)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def rescan_now(self) -> None:
+        """Trigger an immediate PVE+PBS+storage rescan."""
+        threading.Thread(target=self._scan_pve_pbs, daemon=True, name="rescan-now").start()
+
+    def rescan_storage_now(self) -> None:
+        """Trigger immediate storage-only rescan (e.g. after delete)."""
+        threading.Thread(target=self._scan_storage, daemon=True, name="rescan-storage").start()
+
+    # ── background loops ──────────────────────────────────────────────────────
+
+    def _loop_pve_pbs(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._scan_pve_pbs()
+            except Exception as exc:
+                log.warning("PVE/PBS poll error: %s", exc)
+            self._stop.wait(self.PVE_PBS_INTERVAL)
+
+    def _loop_restic(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._scan_restic()
+            except Exception as exc:
+                log.warning("Restic poll error: %s", exc)
+            self._stop.wait(self.RESTIC_INTERVAL)
+
+    def _loop_cloud_storage(self) -> None:
+        cfg = self._cfg
+        if not cfg or not cfg.restic_repo:
+            return   # no cloud configured — skip entirely
+        while not self._stop.is_set():
+            try:
+                stats = LocalResticClient(cfg).get_stats()
+                self._update_cloud_storage(
+                    stats.get("cloud_used", 0),
+                    stats.get("cloud_total"),
+                    stats.get("cloud_quota_used"),
+                )
+            except Exception as exc:
+                log.warning("Cloud storage poll error: %s", exc)
+            self._stop.wait(self.CLOUD_STORAGE_INTERVAL)
+
+    def _loop_info(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._scan_info()
+            except Exception as exc:
+                log.warning("Info poll error: %s", exc)
+            self._stop.wait(self.INFO_INTERVAL)
+
+    def _loop_schedules(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._scan_schedules()
+            except Exception as exc:
+                log.warning("Schedules poll error: %s", exc)
+            self._stop.wait(self.SCHEDULES_INTERVAL)
+
+    # ── scan implementations ──────────────────────────────────────────────────
+
+    def _scan_pve_pbs(self) -> None:
+        cfg = self._cfg
+
+        # ── PVE: get all VMs/LXCs ────────────────────────────────────────────
+        pve_meta: dict = {}
+        pve_ok = True
+        try:
+            pve = PVEClient(_host())
+            pve_meta = pve.get_vms_and_lxcs()
+        except Exception as exc:
+            log.warning("PVE fetch failed: %s", exc)
+            pve_ok = False
+
+        # ── PBS: get all snapshot groups ─────────────────────────────────────
+        pbs_groups: dict[str, list] = {}  # vmid_str → [snap, ...]
+        pbs_ok = True
+        try:
+            pbs = PBSClient(_host())
+            for group in pbs.get_snapshots():
+                vid = str(group.get("pve_id", ""))
+                if vid:
+                    pbs_groups[vid] = group.get("snapshots", [])
+        except Exception as exc:
+            log.warning("PBS fetch failed: %s", exc)
+            pbs_ok = False
+
+        # ── cross-reference restic coverage ──────────────────────────────────
+        with self._restic_lock:
+            restic_snaps = list(self._restic_snaps)
+        restic_by_vm_pbstime = _build_restic_index(restic_snaps)
+
+        # ── build per-VM state and publish diffs ──────────────────────────────
+        all_vmids = (set(str(k) for k in pve_meta) | set(pbs_groups))
+
+        for vmid in all_vmids:
+            vid_int = int(vmid) if vmid.isdigit() else vmid
+            meta = pve_meta.get(vid_int, pve_meta.get(vmid, {}))
+
+            # meta topic
+            self._pub_if_changed(f"vm/{vmid}/meta", {
+                "vmid":     vmid,
+                "name":     meta.get("name", f"vm-{vmid}"),
+                "type":     meta.get("type", "vm"),
+                "status":   meta.get("status", "unknown"),
+                "os":       meta.get("os", "linux"),
+                "template": meta.get("template", False),
+                "in_pve":   vid_int in pve_meta or vmid in pve_meta,
+            })
+
+            # annotate PBS snapshots with cloud coverage
+            raw_snaps = pbs_groups.get(vmid, [])
+            vm_restic  = restic_by_vm_pbstime.get(vmid, {})
+            annotated  = []
+            for snap in raw_snaps:
+                bt = snap.get("backup_time")
+                rs = vm_restic.get(bt)
+                annotated.append({
+                    **snap,
+                    "cloud":           rs is not None,
+                    "restic_id":       rs["id"]       if rs else None,
+                    "restic_short_id": rs["short_id"] if rs else None,
+                })
+            annotated.sort(key=lambda s: s.get("backup_time", 0), reverse=True)
+
+            self._pub_if_changed(f"vm/{vmid}/pbs", {"snapshots": annotated})
+
+            # Publish restic snapshots for this VM with covers annotated by local presence
+            pbs_times = {s.get("backup_time") for s in raw_snaps}
+            vm_restic_snaps = [
+                {
+                    **s,
+                    "covers": [
+                        {**c, "local": c.get("pbs_time") in pbs_times}
+                        for c in s.get("covers", [])
+                        if c.get("vmid") == (int(vmid) if vmid.isdigit() else vmid)
+                    ],
+                }
+                for s in restic_snaps
+                if any(
+                    c.get("vmid") == (int(vmid) if vmid.isdigit() else vmid)
+                    for c in s.get("covers", [])
+                )
+            ]
+            if vm_restic_snaps:
+                self._pub_if_changed(f"vm/{vmid}/restic", {"snapshots": vm_restic_snaps})
+
+            # HA Discovery + per-VM backup status (idle unless job running)
+            self._mqtt._ensure_discovery(vmid)
+
+        # publish index (sorted list of known vmids)
+        self._pub_if_changed("vms/index", sorted(all_vmids))
+        # publish overall state
+        self._pub_if_changed("state/ready", {
+            "ts": time.time(), "pve_ok": pve_ok, "pbs_ok": pbs_ok,
+        })
+        # Storage stats change whenever snapshots change — scan in same cycle
+        self._scan_storage()
+
+    def _scan_storage(self) -> None:
+        """Fetch local PBS storage stats and publish.
+        Cloud stats are updated separately by _scan_restic() since querying
+        restic/rclone is slow and cloud usage changes independently of our backups.
+        """
+        try:
+            pbs   = PBSClient(_host())
+            local = pbs.get_storage_info()  # {local_used, local_total, dedup_factor}
+            with self._storage_lock:
+                self._local_storage.update(local)   # preserve existing cloud keys
+                data = dict(self._local_storage)
+                data.setdefault("cloud_used", 0)
+                data.setdefault("cloud_total", None)
+                data.setdefault("cloud_quota_used", None)
+            self._pub_if_changed("storage", data)
+        except Exception as exc:
+            log.warning("Storage scan failed: %s", exc)
+
+    def _update_cloud_storage(self, cloud_used: float,
+                              cloud_total: float | None,
+                              cloud_quota_used: float | None) -> None:
+        """Merge cloud stats into the storage topic (called from _scan_restic)."""
+        with self._storage_lock:
+            self._local_storage["cloud_used"]       = cloud_used
+            self._local_storage["cloud_total"]      = cloud_total
+            self._local_storage["cloud_quota_used"] = cloud_quota_used
+            data = dict(self._local_storage)
+        self._pub_if_changed("storage", data)
+
+    def _scan_info(self) -> None:
+        """Fetch version strings and publish retained. Rarely changes."""
+        try:
+            pbs  = PBSClient(_host())
+            info = pbs.get_versions()                # {"pbs": "x.y.z"}
+            cfg  = self._cfg
+            if cfg and cfg.restic_repo:
+                info["restic"] = LocalResticClient(cfg).get_version()
+            else:
+                info["restic"] = None
+            self._pub_if_changed("info", info)
+        except Exception as exc:
+            log.warning("Info scan failed: %s", exc)
+
+    def _scan_schedules(self) -> None:
+        """Fetch PVE backup schedules + restic schedule and publish retained."""
+        result: dict = {
+            "pbs_jobs":        [],
+            "pbs_running":     False,
+            "restic_next":     None,
+            "restic_running":  False,
+            "pbs_retention":   [],
+            "restic_retention": {},
+        }
+        try:
+            pve = PVEClient(_host())
+            result["pbs_jobs"]    = pve.get_backup_schedules()
+            result["pbs_running"] = pve.is_backup_running()
+        except Exception as exc:
+            log.warning("Schedule PVE fetch failed: %s", exc)
+        cfg = self._cfg
+        if cfg and cfg.restic_repo:
+            try:
+                res = LocalResticClient(cfg)
+                result["restic_next"]      = res.get_next_run()
+                result["restic_running"]   = res.is_running()
+                result["restic_retention"] = res.get_retention()
+                prune_jobs                 = res.get_pbs_prune_jobs()
+                result["pbs_retention"]    = [
+                    j for j in prune_jobs if j.get("store") == (cfg.pbs_datastore or "")
+                ]
+            except Exception as exc:
+                log.warning("Schedule restic fetch failed: %s", exc)
+        self._pub_if_changed("schedules", result)
+
+    def _scan_restic(self) -> None:
+        cfg = self._cfg
+        if not cfg or not cfg.restic_repo:
+            return
+        try:
+            res   = LocalResticClient(cfg)
+            snaps = res.get_snapshots_flat()
+        except Exception as exc:
+            log.warning("Restic scan failed: %s", exc)
+            return
+
+        with self._restic_lock:
+            self._restic_snaps = snaps
+
+        # Trigger a PBS re-scan — _scan_pve_pbs publishes vm/<id>/restic with
+        # proper local-annotation (whether each PBS snapshot still exists in PBS).
+        self.rescan_now()
+
+    # ── helpers ───────────────────────────────────────────────────────────────
+
+    def _pub_if_changed(self, topic_suffix: str,
+                        data: dict | list) -> None:
+        payload = json.dumps(data, separators=(",", ":"), sort_keys=True)
+        with self._hash_lock:
+            if self._hashes.get(topic_suffix) == payload:
+                return
+            self._hashes[topic_suffix] = payload
+        full = f"{self._base}/{topic_suffix}"
+        self._mqtt._client.publish(full, payload, retain=True, qos=1)
+        log.debug("MQTT publish %s (%d B)", full, len(payload))
+
+
+def _build_restic_index(snaps: list[dict]) -> dict[str, dict[int, dict]]:
+    """Return {vmid_str: {pbs_time: newest_restic_snap}} from flat restic list."""
+    idx: dict[str, dict[int, dict]] = {}
+    for s in snaps:           # list is newest-first
+        for cov in s.get("covers", []):
+            vid = str(cov.get("vmid", ""))
+            pt  = cov.get("pbs_time")
+            if vid and pt is not None:
+                idx.setdefault(vid, {}).setdefault(pt, s)
+    return idx
+
+
+# Module-level poller — None when MQTT is not configured
+_poller: StatePoller | None = None
 
 
 @app.before_request
@@ -65,6 +802,12 @@ class AgentConfig:
     verify_ssl: bool = False
     restic_env: dict = field(default_factory=dict)
     agent_token: str = ""        # if set, all requests must present "Authorization: Bearer <token>"
+    # MQTT (all optional — omit mqtt_host to disable)
+    mqtt_host: str = ""
+    mqtt_port: int = 1883
+    mqtt_user: str = ""
+    mqtt_password: str = ""
+    mqtt_hostname: str = ""      # MQTT topic prefix override (defaults to socket.gethostname())
 
     def to_host_config(self):
         """Return a HostConfig-compatible object for existing clients."""
@@ -186,15 +929,26 @@ class LocalResticClient:
         return None
 
     def is_running(self) -> bool:
-        """Return True if a restic process is currently running."""
+        """Return True if a restic *backup* is currently running (not just listing)."""
         try:
             result = subprocess.run(
-                ["pgrep", "-x", "restic"],
+                ["pgrep", "-f", "restic backup"],
                 capture_output=True, timeout=5,
             )
             return result.returncode == 0
         except Exception:
             return False
+
+    def get_version(self) -> str:
+        """Return installed restic version string, e.g. '0.16.2'."""
+        try:
+            out = subprocess.run(
+                ["restic", "version"], capture_output=True, text=True, timeout=10,
+            ).stdout
+            m = re.search(r"restic\s+([\d.]+)", out)
+            return m.group(1) if m else "unknown"
+        except Exception:
+            return "unknown"
 
     def get_retention(self) -> dict:
         """Read RESTIC_RETENTION_KEEP_* settings from config.env."""
@@ -234,6 +988,150 @@ class LocalResticClient:
         except Exception:
             return []
 
+    def get_stats(self) -> dict:
+        """Return cloud storage usage via rclone (same repo as restic uses).
+        Runs directly on the PVE host — no SSH needed.
+        Returns {cloud_used, cloud_total?, cloud_quota_used?} in GB.
+        """
+        result: dict = {"cloud_used": 0, "cloud_total": None, "cloud_quota_used": None}
+        repo = self._env.get("RESTIC_REPOSITORY", "")
+        if not repo or ":" not in repo:
+            return result
+        # rclone remote is everything up to the first path separator after the remote name
+        # e.g. "rclone:gdrive:/backups" → remote path = "gdrive:/backups"
+        repo_path = ":".join(repo.split(":")[1:])
+        # Extract just the remote name (e.g. "gdrive") for quota check
+        remote_name = repo_path.split(":")[0] if ":" in repo_path else repo_path.split("/")[0]
+        try:
+            out = subprocess.run(
+                ["rclone", "size", repo_path, "--json"],
+                capture_output=True, text=True, timeout=60, env=self._full_env,
+            ).stdout
+            size_data = json.loads(out)
+            result["cloud_used"] = round(size_data.get("bytes", 0) / 1024**3, 1)
+        except Exception:
+            pass
+        try:
+            out = subprocess.run(
+                ["rclone", "about", f"{remote_name}:", "--json"],
+                capture_output=True, text=True, timeout=20, env=self._full_env,
+            ).stdout
+            about = json.loads(out)
+            total = about.get("total", 0)
+            used  = about.get("used",  0)
+            other = about.get("other", 0)
+            if total:
+                result["cloud_total"]      = round(total / 1024**3, 1)
+                result["cloud_quota_used"] = round((used + other) / 1024**3, 1)
+        except Exception:
+            pass
+        return result
+
+    def forget_snapshots(self, snapshot_ids: list[str], log_fn) -> None:
+        """Forget specific restic snapshots and prune unreferenced data."""
+        if not snapshot_ids:
+            log_fn("No restic snapshots to forget.")
+            return
+        log_fn(f"Forgetting restic snapshot(s): {', '.join(s[:8] for s in snapshot_ids)}…")
+        proc = subprocess.Popen(
+            ["restic", "forget", "--prune", "--verbose", "--json"] + snapshot_ids,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, env=self._full_env,
+        )
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                log_fn(line)
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"restic forget failed (rc={proc.returncode})")
+        log_fn("Forget + prune complete.")
+
+    def backup_datastore(self, datastore_path: str, log_fn,
+                         pbs_snapshots: list = None,
+                         progress_fn=None) -> None:
+        """Back up the PBS datastore directory to the restic repo.
+
+        progress_fn(pct, speed_mbps, eta_s) is called with parsed restic progress.
+        """
+        log_fn("Stopping PBS…")
+        subprocess.run(["systemctl", "stop", "proxmox-backup", "proxmox-backup-proxy"],
+                       env=self._full_env, timeout=30)
+        try:
+            cmd = ["restic", "backup", datastore_path, "--no-lock", "--json"]
+            if pbs_snapshots:
+                for btype, vmid, btime in pbs_snapshots:
+                    cmd += ["--tag", f"{btype}-{vmid}-{btime}"]
+            log_fn(f"Running restic backup of {datastore_path}…")
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, env=self._full_env)
+            last_pct = -1
+            for line in proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                try:
+                    d = json.loads(line)
+                    mtype = d.get("message_type", "")
+                    if mtype == "status":
+                        pct       = round(d.get("percent_done", 0) * 100)
+                        speed     = d.get("current_files", 0)
+                        bytes_done = d.get("bytes_done", 0)
+                        total_bytes = d.get("total_bytes", 0)
+                        eta_s     = d.get("seconds_remaining")
+                        mb_done   = bytes_done / 1e6
+                        mb_total  = total_bytes / 1e6
+                        secs      = d.get("seconds_elapsed", 0)
+                        mbps      = (mb_done / secs) if secs > 0 else 0
+                        eta_str   = f" ETA {int(eta_s)}s" if eta_s else ""
+                        # Log only on meaningful progress jumps
+                        if pct != last_pct and (pct % 10 == 0 or pct >= 99):
+                            log_fn(f"  {pct}% — {mb_done:.0f}/{mb_total:.0f} MB @ {mbps:.1f} MB/s{eta_str}")
+                            last_pct = pct
+                        if progress_fn:
+                            progress_fn(pct, round(mbps, 1), eta_s)
+                    elif mtype == "summary":
+                        files = d.get("files_new", 0) + d.get("files_changed", 0)
+                        added = d.get("data_added_packed", d.get("data_added", 0)) / 1e6
+                        log_fn(f"  Done — {files} file(s) changed, {added:.1f} MB added")
+                    else:
+                        log_fn(line)
+                except (json.JSONDecodeError, KeyError):
+                    log_fn(line)
+            proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"restic backup failed (rc={proc.returncode})")
+            log_fn("Restic backup complete.")
+        finally:
+            log_fn("Starting PBS…")
+            subprocess.run(["systemctl", "start", "proxmox-backup", "proxmox-backup-proxy"],
+                           env=self._full_env, timeout=30)
+
+    def restore_datastore(self, snapshot_id: str, log_fn) -> None:
+        """Restore a restic snapshot to the PBS datastore path."""
+        log_fn("Stopping PBS…")
+        subprocess.run(["systemctl", "stop", "proxmox-backup", "proxmox-backup-proxy"],
+                       env=self._full_env, timeout=30)
+        try:
+            log_fn(f"Restoring restic snapshot {snapshot_id[:8]}…")
+            proc = subprocess.Popen(
+                ["restic", "restore", snapshot_id, "--target", "/", "--no-lock", "--verbose"],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, env=self._full_env,
+            )
+            for line in proc.stdout:
+                line = line.rstrip()
+                if line:
+                    log_fn(line)
+            proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError(f"restic restore failed (rc={proc.returncode})")
+            log_fn("Restore complete.")
+        finally:
+            log_fn("Starting PBS…")
+            subprocess.run(["systemctl", "start", "proxmox-backup", "proxmox-backup-proxy"],
+                           env=self._full_env, timeout=30)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Operation store  (in-memory, Backrest-inspired)
@@ -247,9 +1145,14 @@ class Operation:
     log: list[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     finished_at: float | None = None
+    vmid: str | None = None         # associated VM/LXC id (for MQTT per-VM topics)
 
     def append_log(self, line: str) -> None:
         self.log.append(line)
+        if _mqtt:
+            _mqtt.publish_log(self.op_id, line)
+            # Parse restic JSON progress lines
+            _try_publish_restic_progress(self.op_id, self.vmid, line)
 
     def to_dict(self, *, full=True) -> dict:
         d = {
@@ -269,8 +1172,8 @@ _operations: dict[str, Operation] = {}
 _ops_lock = threading.Lock()
 
 
-def _new_op(op_type: str) -> Operation:
-    op = Operation(op_id=str(uuid.uuid4()), type=op_type)
+def _new_op(op_type: str, vmid: str | None = None) -> Operation:
+    op = Operation(op_id=str(uuid.uuid4()), type=op_type, vmid=vmid)
     with _ops_lock:
         _operations[op.op_id] = op
     return op
@@ -285,10 +1188,32 @@ def _get_op(op_id: str) -> Operation | None:
 # Background task runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_in_background(op: Operation, fn) -> None:
-    """Execute fn(op) in a daemon thread; set status on finish."""
+def _try_publish_restic_progress(op_id: str, vmid: str | None, line: str) -> None:
+    """If line is a restic --json status event, publish MQTT progress."""
+    if not _mqtt or not line.startswith("{"):
+        return
+    try:
+        d = json.loads(line)
+        if d.get("message_type") == "status":
+            pct      = d.get("percent_done", 0) * 100
+            bps      = d.get("bytes_per_second")
+            eta_s    = d.get("seconds_remaining")
+            speed    = bps / 1_048_576 if bps else None  # bytes/s → MB/s
+            _mqtt.publish_progress(op_id, vmid, pct, speed, eta_s)
+    except (json.JSONDecodeError, KeyError):
+        pass
+
+
+def _run_in_background(op: Operation, fn, rescan_restic: bool = False) -> None:
+    """Execute fn(op) in a daemon thread; set status on finish.
+
+    rescan_restic=True: after completion, refresh _restic_snaps before publishing
+    (use this for restic backup ops so new cloud snapshots appear immediately).
+    """
     def _worker():
         op.status = "running"
+        if _mqtt:
+            _mqtt.publish_op_started(op.op_id, op.vmid)
         try:
             fn(op)
             op.status = "ok"
@@ -297,6 +1222,18 @@ def _run_in_background(op: Operation, fn) -> None:
             op.status = "failed"
         finally:
             op.finished_at = time.time()
+            if _mqtt:
+                _mqtt.publish_op_done(op.op_id, op.vmid,
+                                      ok=(op.status == "ok"),
+                                      finished_at=op.finished_at)
+            # Re-scan immediately so updated snapshot list + storage are published.
+            # For restic ops: refresh _restic_snaps first so new cloud snapshots
+            # are visible; _scan_restic() calls rescan_now() internally.
+            if _poller:
+                if rescan_restic:
+                    _poller._scan_restic()   # updates cache → triggers rescan_now()
+                elif op.type in ("backup", "restore", "delete"):
+                    _poller.rescan_now()
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
@@ -658,7 +1595,7 @@ def op_backup():
     if storage is None:
         return jsonify({"error": "storage required"}), 400
 
-    op = _new_op("backup")
+    op = _new_op("backup", vmid=str(vmid))
 
     def _do(op: Operation):
         pve = PVEClient(_host())
@@ -691,7 +1628,7 @@ def op_restore():
     if missing:
         return jsonify({"error": f"Missing fields: {', '.join(missing)}"}), 400
 
-    op = _new_op("restore")
+    op = _new_op("restore", vmid=str(vmid))
 
     def _do(op: Operation):
         pve = PVEClient(_host())
@@ -765,10 +1702,40 @@ def _load_config(path: str = "/etc/pve-agent/config.json") -> AgentConfig:
 
 
 if __name__ == "__main__":
+    import atexit
     import os
     import sys
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
     cfg_path = sys.argv[1] if len(sys.argv) > 1 else "/etc/pve-agent/config.json"
     _cfg = _load_config(cfg_path)
+
+    # Start MQTT publisher if configured
+    if _cfg.mqtt_host:
+        _mqtt = MQTTPublisher(
+            host=_cfg.mqtt_host,
+            port=_cfg.mqtt_port,
+            user=_cfg.mqtt_user,
+            password=_cfg.mqtt_password,
+            hostname=_cfg.mqtt_hostname,
+        )
+        _mqtt.setup_message_handler()
+        _poller = StatePoller(_cfg, _mqtt)
+
+        def _on_mqtt_ready():
+            """Called 2s after startup — MQTT connection should be up."""
+            _mqtt.publish_agent_discovery()
+            _poller.start()
+
+        threading.Timer(2.0, _on_mqtt_ready).start()
+        atexit.register(_mqtt.shutdown)
+        atexit.register(_poller.stop)
+        log.info("MQTT publisher + StatePoller starting → %s:%s",
+                 _cfg.mqtt_host, _cfg.mqtt_port)
+    else:
+        log.info("MQTT not configured — running without event publishing")
+
     # Bind address: AGENT_BIND env overrides the default 10.10.0.1.
     # On a nested CI VM, vmbr0 is 10.10.0.1. On a real PVE host, use the
     # actual bridge IP (e.g. 192.168.0.200) or 0.0.0.0 for all interfaces.

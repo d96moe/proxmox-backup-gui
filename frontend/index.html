@@ -51,6 +51,18 @@
   .status-dot { width:7px; height:7px; border-radius:50%; background:var(--green); box-shadow:0 0 6px var(--green); animation:pulse 2s infinite; }
   .status-dot.error { background:var(--red); box-shadow:0 0 6px var(--red); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+  /* User button + dropdown */
+  .user-btn { display:flex; align-items:center; gap:7px; padding:5px 10px; border-radius:6px; border:1px solid var(--border2); background:transparent; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:11px; cursor:pointer; transition:all .15s; position:relative; }
+  .user-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .user-avatar { width:20px; height:20px; border-radius:4px; background:var(--accent); display:flex; align-items:center; justify-content:center; color:#fff; font-size:10px; font-weight:600; }
+  .user-menu { position:absolute; top:calc(100% + 6px); right:0; background:var(--surface); border:1px solid var(--border2); border-radius:8px; min-width:180px; box-shadow:0 8px 24px rgba(0,0,0,.4); z-index:200; display:none; overflow:hidden; }
+  .user-menu.open { display:block; }
+  .user-menu-header { padding:10px 14px 8px; border-bottom:1px solid var(--border); }
+  .user-menu-name { font-family:'IBM Plex Mono',monospace; font-size:12px; font-weight:500; color:var(--text); }
+  .user-menu-role { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); margin-top:2px; }
+  .user-menu-item { display:flex; align-items:center; gap:8px; padding:9px 14px; font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); cursor:pointer; transition:background .1s; border:none; background:none; width:100%; text-align:left; }
+  .user-menu-item:hover { background:var(--border); color:var(--text); }
+  .user-menu-item.danger:hover { background:color-mix(in srgb, var(--red) 12%, transparent); color:var(--red); }
 
   /* Layout */
   .layout { display:grid; grid-template-columns:220px 1fr; min-height:calc(100vh - 52px); min-width:820px; }
@@ -173,8 +185,8 @@
   .modal-header { padding:20px 24px 16px; border-bottom:1px solid var(--border); display:flex; align-items:flex-start; justify-content:space-between; }
   .modal-title { font-family:'IBM Plex Mono',monospace; font-size:15px; font-weight:500; color:var(--text); }
   .modal-subtitle { font-size:12px; color:var(--muted); margin-top:3px; font-family:'IBM Plex Mono',monospace; }
-  .modal-close { width:28px; height:28px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--muted); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:16px; transition:all .15s; }
-  .modal-close:hover { border-color:var(--border2); color:var(--text); }
+  .modal-close, .modal-close-btn { width:28px; height:28px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--muted); cursor:pointer; display:flex; align-items:center; justify-content:center; font-size:16px; transition:all .15s; }
+  .modal-close:hover, .modal-close-btn:hover { border-color:var(--border2); color:var(--text); }
   .modal-body { padding:20px 24px; }
   .modal-info-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:20px; }
   .modal-info-item { background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:12px; }
@@ -217,9 +229,11 @@
   .job-indicator-dot { width:6px; height:6px; border-radius:50%; background:var(--accent); animation:pulse 1s infinite; flex-shrink:0; }
 
   /* Footer */
-  .footer { position:fixed; bottom:0; left:0; right:0; height:30px; background:var(--surface); border-top:1px solid var(--border); display:flex; align-items:center; padding:0 20px; gap:24px; }
+  .footer { position:fixed; bottom:0; left:0; right:0; height:30px; background:var(--surface); border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; padding:0 20px; }
+  .footer-left { display:flex; align-items:center; gap:24px; }
   .footer-item { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); display:flex; align-items:center; gap:6px; }
   .footer-dot { width:5px; height:5px; border-radius:50%; }
+  .footer-sync { display:flex; align-items:center; gap:7px; font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); }
 
   /* Content loading overlay */
   .tab-content-wrap { position:relative; }
@@ -323,8 +337,20 @@
   </div>
   <div class="status-pill">
     <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme"></button>
-    <div class="status-dot" id="status-dot"></div>
-    <span id="sync-status">connecting…</span>
+    <div style="position:relative;">
+      <button class="user-btn" id="user-btn" onclick="toggleUserMenu()">
+        <div class="user-avatar" id="user-avatar">?</div>
+        <span id="user-label">—</span>
+      </button>
+      <div class="user-menu" id="user-menu">
+        <div class="user-menu-header">
+          <div class="user-menu-name" id="user-menu-name">—</div>
+          <div class="user-menu-role" id="user-menu-role">—</div>
+        </div>
+        <button class="user-menu-item" onclick="openChangePwModal(); closeUserMenu()">🔑 Change password</button>
+        <button class="user-menu-item danger" onclick="doLogout()">↩ Sign out</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -396,11 +422,47 @@
 </div>
 
 <div class="footer">
-  <div class="footer-item"><div class="footer-dot" style="background:var(--green)"></div><span id="footer-pbs">PBS —</span></div>
-  <div class="footer-item"><div class="footer-dot" style="background:var(--accent)"></div><span id="footer-restic">restic —</span></div>
+  <div class="footer-left">
+    <div class="footer-item"><div class="footer-dot" style="background:var(--green)"></div><span id="footer-pbs">PBS —</span></div>
+    <div class="footer-item"><div class="footer-dot" style="background:var(--accent)"></div><span id="footer-restic">restic —</span></div>
+  </div>
+  <div class="footer-sync">
+    <div class="status-dot" id="status-dot"></div>
+    <span id="sync-status">connecting…</span>
+  </div>
 </div>
 
 <!-- Restore Modal -->
+<!-- Change password modal -->
+<div class="modal-overlay" id="changepw-modal">
+  <div class="modal" style="max-width:380px">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">Change password</div>
+        <div class="modal-subtitle" id="changepw-username-label"></div>
+      </div>
+      <button class="modal-close-btn" onclick="closeChangePwModal()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:20px 24px">
+      <div id="changepw-error" style="display:none;padding:9px 12px;background:color-mix(in srgb,var(--red) 12%,transparent);border:1px solid color-mix(in srgb,var(--red) 30%,transparent);border-radius:6px;color:var(--red);font-family:'IBM Plex Mono',monospace;font-size:11px;margin-bottom:14px;"></div>
+      <div id="changepw-ok" style="display:none;padding:9px 12px;background:color-mix(in srgb,var(--green) 12%,transparent);border:1px solid color-mix(in srgb,var(--green) 30%,transparent);border-radius:6px;color:var(--green);font-family:'IBM Plex Mono',monospace;font-size:11px;margin-bottom:14px;">Password changed successfully.</div>
+      <div style="margin-bottom:12px">
+        <label style="display:block;font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:500;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px">Current password</label>
+        <input type="password" id="changepw-current" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border2);border-radius:6px;color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:12px;outline:none" autocomplete="current-password">
+      </div>
+      <div style="margin-bottom:12px">
+        <label style="display:block;font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:500;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px">New password</label>
+        <input type="password" id="changepw-new" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border2);border-radius:6px;color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:12px;outline:none" autocomplete="new-password">
+      </div>
+      <div style="margin-bottom:20px">
+        <label style="display:block;font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:500;color:var(--muted);letter-spacing:.1em;text-transform:uppercase;margin-bottom:5px">Confirm new password</label>
+        <input type="password" id="changepw-confirm" style="width:100%;padding:8px 10px;background:var(--bg);border:1px solid var(--border2);border-radius:6px;color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:12px;outline:none" autocomplete="new-password">
+      </div>
+      <button id="changepw-btn" onclick="submitChangePw()" style="width:100%;padding:9px;background:var(--accent);color:#fff;border:none;border-radius:6px;font-family:'IBM Plex Mono',monospace;font-size:12px;font-weight:500;cursor:pointer;transition:background .15s">Save password</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="modal">
   <div class="modal">
     <div class="modal-header">
@@ -605,6 +667,7 @@
   </div>
 </div>
 
+<script src="mqtt.min.js"></script>
 <script>
 // ─────────────────────────────────────────────
 // Config — point this at your Flask instance
@@ -649,6 +712,11 @@ async function init() {
   }
 
   renderHostNav();
+
+  // Start MQTT bus first so isEnabled() is set before selectHost() calls loadData().
+  // This prevents the REST fallback from firing when MQTT is configured.
+  await MQTTBus.start();
+
   if (hosts.length > 0) {
     selectHost(hosts[0].id);
   }
@@ -692,12 +760,9 @@ function refreshData() {
   if (!currentHost) return;
   const signal = _abortController?.signal;
   loadData(signal);
-  loadStorage(signal);
-  loadSchedules(signal);
-  // Always invalidate cloud cache so switching to Cloud tab reloads fresh data
-  _cloudSnapshots = null;
+  // storage/info/schedules arrive via MQTT — no REST needed
   if (_activeTab === 'cloud') {
-    loadCloudSnapshots(signal);
+    renderCloudFromDS();
   }
   _jobFromCloud = false;
 }
@@ -714,8 +779,12 @@ function selectHost(id) {
   });
   const host = hosts.find(h => h.id === id);
   document.getElementById('hostname-label').textContent = host?.label ?? id;
+  // Clear MQTT DataStore so stale VM cards from the previous host don't persist
+  MQTTBus.clearStore();
   // Clear stale content immediately
-  document.getElementById('content').innerHTML = '<div class="state-msg">Loading…</div>';
+  document.getElementById('content').innerHTML = MQTTBus.isEnabled()
+    ? '<div class="state-msg">Connecting…</div>'
+    : '<div class="state-msg">Loading…</div>';
   document.getElementById('page-subtitle').textContent = '—';
   document.getElementById('local-usage').textContent = '— GB';
   document.getElementById('cloud-usage').textContent = '— GB';
@@ -723,119 +792,31 @@ function selectHost(id) {
   document.getElementById('cloud-bar').style.width = '0%';
   document.getElementById('pbs-dedup').textContent = '—';
   _schedules = null;
-  _cloudSnapshots = null;
   _activeTab = 'backups';
   document.getElementById('tab-backups').classList.add('active');
   document.getElementById('tab-cloud').classList.remove('active');
   document.getElementById('tab-content-backups').style.display = '';
   document.getElementById('tab-content-cloud').style.display = 'none';
   loadData(_abortController.signal);
-  loadInfo(_abortController.signal);
-  loadStorage(_abortController.signal);
-  loadSchedules(_abortController.signal);
+  // storage / info / schedules come via MQTT retained messages on connect
 }
 
 // ─────────────────────────────────────────────
 // Data loading
 // ─────────────────────────────────────────────
-async function loadData(signal) {
-  if (!currentHost) return;
-  const host = currentHost;
-  const btn  = document.getElementById('refresh-btn');
-  const wrap = document.getElementById('tab-content-backups');
-  btn.disabled = true;
-  btn.textContent = '⟳ Loading…';
-  wrap.classList.add('loading');
-  setStatus('loading', 'syncing…');
-
-  try {
-    const res = await fetch(`${API_BASE}/api/host/${host}/items`, { signal });
-    if (res.status === 503) {
-      const msg = await res.text();
-      const detail = msg.replace(/^[^:]*:\s*/,'').replace(/^503[^:]*:\s*/,'');
-      document.getElementById('content').innerHTML =
-        `<div class="state-msg offline"><span class="offline-icon">⏸</span>PBS offline<div class="offline-sub">${detail}</div></div>`;
-      setStatus('error', 'PBS offline');
-      return;
-    }
-    if (!res.ok) throw new Error(await res.text());
-    const data = await res.json();
-    if (currentHost !== host) return;
-    wrap.classList.remove('loading');
-    renderData(data);
-    setStatus('ok', `last sync just now`);
-  } catch (err) {
-    if (err.name === 'AbortError') return;
-    if (currentHost !== host) return;
-    document.getElementById('content').innerHTML =
-      `<div class="state-msg error">Error: ${err.message}</div>`;
-    setStatus('error', 'sync failed');
-  } finally {
-    if (currentHost === host) {
-      btn.disabled = false;
-      btn.textContent = '⟳ Refresh';
-      wrap.classList.remove('loading');
-    }
-  }
+function loadData() {
+  // MQTT-only: trigger an agent rescan and let retained messages drive rendering.
+  // REST fallback removed — agent is the single source of truth via MQTT.
+  if (currentHost) MQTTBus.rescan(currentHost);
 }
 
-async function loadStorage(signal) {
-  if (!currentHost) return;
-  const host = currentHost;
-  try {
-    const res = await fetch(`${API_BASE}/api/host/${host}/storage`, { signal });
-    if (!res.ok) return;
-    if (currentHost !== host) return;
-    const s = await res.json();
-    const localPct = s.local_total > 0 ? Math.round(s.local_used / s.local_total * 100) : 0;
-    document.getElementById('local-usage').textContent = `${s.local_used} / ${s.local_total} GB`;
-    document.getElementById('local-bar').style.width = localPct + '%';
-    document.getElementById('pbs-dedup').textContent = s.dedup_factor != null ? `${s.dedup_factor}×` : '—';
-    if (s.cloud_total) {
-      const cloudPct = Math.min(Math.round(s.cloud_quota_used / s.cloud_total * 100), 100);
-      document.getElementById('cloud-usage').textContent =
-        `${s.cloud_quota_used} / ${s.cloud_total} GB`;
-      document.getElementById('cloud-bar').style.width = cloudPct + '%';
-    } else {
-      document.getElementById('cloud-usage').textContent = `${s.cloud_used} GB used`;
-      document.getElementById('cloud-bar').style.width =
-        Math.min(Math.round(s.cloud_used / 1000 * 100), 100) + '%';
-    }
-    if (s.cloud_used > 0) {
-      document.getElementById('cloud-backup-size').textContent = `${s.cloud_used} GB`;
-    }
-  } catch (err) { if (err.name !== 'AbortError') {} }
-}
-
-async function loadInfo(signal) {
-  if (!currentHost) return;
-  const host = currentHost;
-  try {
-    const res = await fetch(`${API_BASE}/api/host/${host}/info`, { signal });
-    if (!res.ok) return;
-    if (currentHost !== host) return;
-    const info = await res.json();
-    document.getElementById('footer-pbs').textContent = `PBS ${info.pbs ?? '—'}`;
-    document.getElementById('footer-restic').textContent = `restic ${info.restic ?? '—'}`;
-  } catch (_) {}
-}
+// loadStorage and loadInfo are replaced by MQTT topics proxmox/<host>/storage and /info.
+// _applyStorage() and _applyInfo() are called by MQTTBus._onMessage.
 
 // ─────────────────────────────────────────────
-// Schedules
+// Schedules — data arrives via MQTT proxmox/<host>/schedules (retained)
 // ─────────────────────────────────────────────
 let _schedules = null;
-
-async function loadSchedules(signal) {
-  if (!currentHost) return;
-  const host = currentHost;
-  try {
-    const res = await fetch(`${API_BASE}/api/host/${host}/schedules`, { signal });
-    if (!res.ok) return;
-    if (currentHost !== host) return;
-    _schedules = await res.json();
-    renderSchedules();
-  } catch (err) { if (err.name !== 'AbortError') {} }
-}
 
 function renderSchedules() {
   const section = document.getElementById('schedules-section');
@@ -1015,7 +996,7 @@ function renderCard(item) {
   const snapshotRows = snapCount === 0
     ? `<div class="no-backups">No backups found</div>`
     : item.snapshots.map(s => `
-        <div class="snapshot-row">
+        <div class="snapshot-row" data-backup-time="${s.backup_time}">
           <div class="snap-row-top">
             <div><div class="snap-date">${s.date}</div><div class="snap-age">${s.age}${s.restic_short_id ? ` · <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted)">${s.restic_short_id}</span>` : ''}</div></div>
             <div class="snap-size">${s.size}</div>
@@ -1194,16 +1175,10 @@ async function confirmRestore() {
   const { vmid, type, backupTime, resticId, source } = _modalState;
   const runBackupAfter = document.getElementById('modal-backup-after').checked;
   closeModal();
-  const body = { vmid, type, backup_time: backupTime, source,
-                 restic_id: resticId, run_backup_after: runBackupAfter };
-  const res = await fetch(`${API_BASE}/api/host/${currentHost}/restore`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) { alert(_apiError(res, await res.text())); return; }
-  const { job_id } = await res.json();
-  openJobModal('Restore', job_id, vmid);
+
+  MQTTBus.triggerAction('restore',
+    { vmid, type, backup_time: backupTime, source, restic_id: resticId, run_backup_after: runBackupAfter },
+    'Restore', vmid);
 }
 
 // ─────────────────────────────────────────────
@@ -1236,40 +1211,18 @@ function _apiError(res, text) {
 }
 
 async function confirmBackup() {
-  const { vmid, type, name } = _backupModalState;
+  const { vmid, type } = _backupModalState;
   const btype = document.querySelector('#backup-modal-options .source-opt.selected')?.dataset.btype ?? 'pbs';
+  const run_restic_after = btype === 'pbs+restic';
+  const title = run_restic_after ? 'PBS + Cloud Backup' : 'PBS Backup';
   closeBackupModal();
 
-  if (btype === 'pbs+restic') {
-    const res = await fetch(`${API_BASE}/api/host/${currentHost}/backup/pbs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vmid, type, run_restic_after: true }),
-    });
-    if (!res.ok) { alert(_apiError(res, await res.text())); return; }
-    const { job_id } = await res.json();
-    openJobModal('PBS + Cloud Backup', job_id, vmid);
-  } else {
-    const res = await fetch(`${API_BASE}/api/host/${currentHost}/backup/pbs`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vmid, type }),
-    });
-    if (!res.ok) { alert(_apiError(res, await res.text())); return; }
-    const { job_id } = await res.json();
-    openJobModal('PBS Backup', job_id, vmid);
-  }
+  MQTTBus.triggerAction('backup', { vmid, type, btype, run_restic_after }, title, vmid);
 }
 
-async function triggerResticBackup(vmid, name) {
+function triggerResticBackup(vmid, name) {
   if (!confirm(`Run restic cloud backup now?\n\nThis backs up the full PBS datastore. PBS will be briefly stopped.`)) return;
-  const res = await fetch(`${API_BASE}/api/host/${currentHost}/backup/restic`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-  });
-  if (!res.ok) { alert(_apiError(res, await res.text())); return; }
-  const { job_id } = await res.json();
-  openJobModal('Cloud Backup', job_id, vmid);
+  MQTTBus.triggerAction('backup-restic', {}, 'Cloud Backup', vmid ?? null);
 }
 
 // ─────────────────────────────────────────────
@@ -1392,8 +1345,8 @@ async function _pollJob(jobId, vmid) {
             if (fill) fill.style.width = pct + '%';
             if (label) label.textContent = `Step ${cur}/${total} — ` + line.replace(/^Step\s+\d+\/\d+\s+[—\-]\s*/, '').split('(')[0].trim();
           }
-          // Drive progress bar from "[X% — ...files, MB (Xs elapsed)]" (restic backup JSON)
-          const mPct = line.match(/^\[(\d+)%\s+[—\-]/);
+          // Drive progress bar from "  42% — MB/MB @ MB/s ETA Xs" (formatted restic JSON)
+          const mPct = line.match(/^\s+(\d+)%\s+[—\-]/);
           if (mPct) {
             const pct = parseInt(mPct[1]);
             const fill = document.getElementById('job-progress-fill');
@@ -1401,7 +1354,7 @@ async function _pollJob(jobId, vmid) {
             const track = fill && fill.closest('.job-progress-bar-track');
             if (track) track.classList.remove('indeterminate');
             if (fill) fill.style.width = pct + '%';
-            if (label) label.textContent = line.replace(/^\[/, '').replace(/\]$/, '');
+            if (label) label.textContent = line.trim();
           }
           // Update label for heartbeat lines "[Xs elapsed]" without touching the bar
           const mElapsed = line.match(/^\[(\d+)s elapsed\]$/);
@@ -1546,30 +1499,13 @@ function closeDeleteModal() {
   document.getElementById('delete-modal').classList.remove('open');
 }
 
-async function confirmDelete() {
+function confirmDelete() {
   const { vmid, type, backupTime, resticId, hasLocal, hasCloud, scope } = _deleteState;
   closeDeleteModal();
-
-  let endpoint, body;
-  if (!hasLocal && hasCloud) {
-    endpoint = 'delete/cloud';
-    body = { vmid, type, backup_time: backupTime, restic_id: resticId };
-  } else if (scope === 'both') {
-    endpoint = 'delete/both';
-    body = { vmid, type, backup_time: backupTime, restic_id: resticId };
-  } else {
-    endpoint = 'delete/pbs';
-    body = { vmid, type, backup_time: backupTime };
-  }
-
-  const res = await fetch(`${API_BASE}/api/host/${currentHost}/${endpoint}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) { alert(_apiError(res, await res.text())); return; }
-  const { job_id } = await res.json();
-  openJobModal('Delete snapshot', job_id, vmid);
+  MQTTBus.triggerAction('delete',
+    { vmid, type, backup_time: backupTime, restic_id: resticId,
+      scope: (!hasLocal && hasCloud) ? 'cloud' : scope },
+    'Delete snapshot', vmid);
 }
 
 // ─────────────────────────────────────────────
@@ -1599,24 +1535,16 @@ function closeDeleteAllModal() {
   document.getElementById('delete-all-modal').classList.remove('open');
 }
 
-async function confirmDeleteAll() {
+function confirmDeleteAll() {
   const { vmid, type } = _deleteAllState;
   closeDeleteAllModal();
-  const res = await fetch(`${API_BASE}/api/host/${currentHost}/delete/pbs/all`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ vmid, type }),
-  });
-  if (!res.ok) { alert(_apiError(res, await res.text())); return; }
-  const { job_id } = await res.json();
-  openJobModal('Delete all local snapshots', job_id, vmid);
+  MQTTBus.triggerAction('delete-all', { vmid, type }, 'Delete all local snapshots', vmid);
 }
 
 // ─────────────────────────────────────────────
 // Tabs
 // ─────────────────────────────────────────────
 let _activeTab = 'backups';
-let _cloudSnapshots = null;  // cached cloud snapshot data
 let _jobFromCloud = false;   // true if last job was started from cloud tab
 
 function switchTab(tab) {
@@ -1625,16 +1553,14 @@ function switchTab(tab) {
   document.getElementById('tab-cloud').classList.toggle('active', tab === 'cloud');
   document.getElementById('tab-content-backups').style.display = tab === 'backups' ? '' : 'none';
   document.getElementById('tab-content-cloud').style.display   = tab === 'cloud'   ? '' : 'none';
-  if (tab === 'cloud' && !_cloudSnapshots) loadCloudSnapshots();
+  if (tab === 'cloud') renderCloudFromDS();
 }
 
 function refreshCurrentTab() {
-  loadStorage();
-  loadInfo();
-  loadSchedules();
+  // storage / info / schedules come via MQTT — trigger rescan for fresh data
+  if (MQTTBus.isEnabled()) MQTTBus.rescan();
   if (_activeTab === 'cloud') {
-    _cloudSnapshots = null;
-    loadCloudSnapshots();
+    renderCloudFromDS();
   } else {
     loadData();
   }
@@ -1643,47 +1569,25 @@ function refreshCurrentTab() {
 // ─────────────────────────────────────────────
 // Cloud snapshots — data loading + rendering
 // ─────────────────────────────────────────────
-async function loadCloudSnapshots(signal) {
-  if (!currentHost) return;
-  const host = currentHost;
-  const wrap = document.getElementById('tab-content-cloud');
-  wrap.classList.add('loading');
-  document.getElementById('cloud-content').innerHTML = '<div class="state-msg">Loading…</div>';
-  try {
-    const res = await fetch(`${API_BASE}/api/host/${host}/restic/snapshots`, { signal });
-    if (!res.ok) {
-      if (res.status === 404) {
-        document.getElementById('cloud-content').innerHTML =
-          '<div class="state-msg">Restic not configured for this host.</div>';
-        return;
-      }
-      if (res.status === 503) {
-        const body = await res.json().catch(() => ({}));
-        const msg = body.message || 'Restic is busy.';
-        document.getElementById('cloud-content').innerHTML =
-          `<div class="state-msg" style="color:var(--accent)">
-            <div style="font-size:18px;margin-bottom:8px">⟳ Restic backup in progress</div>
-            <div style="font-size:12px;color:var(--muted)">${msg}</div>
-            <div style="font-size:12px;color:var(--muted);margin-top:6px">Cloud snapshot data will be available when the backup completes.</div>
-          </div>`;
-        // Auto-retry every 30s while busy
-        setTimeout(() => { if (currentHost === host) loadCloudSnapshots(); }, 30000);
-        return;
-      }
-      throw new Error(await res.text());
-    }
-    if (currentHost !== host) return;
-    const body = await res.json();
-    const busy = body.restic_busy || false;
-    _cloudSnapshots = body.snaps ?? body;
-    renderCloudSnapshots(_cloudSnapshots, busy);
-  } catch (err) {
-    if (err.name === 'AbortError') return;
-    document.getElementById('cloud-content').innerHTML =
-      `<div class="state-msg error">Error: ${err.message}</div>`;
-  } finally {
-    if (currentHost === host) wrap.classList.remove('loading');
-  }
+function renderCloudFromDS() {
+  // Aggregate unique restic snapshots from DataStore, deduplicated by restic id
+  const ds   = MQTTBus.getDS();
+  const seen = new Map();
+  Object.values(ds).forEach(d => {
+    (d.restic?.snapshots || []).forEach(s => {
+      if (!seen.has(s.id)) seen.set(s.id, s);
+    });
+  });
+  const snaps = Array.from(seen.values())
+    .sort((a, b) => (b.ts || 0) - (a.ts || 0))
+    .map(s => ({
+      ...s,
+      date: s.ts ? new Date(s.ts * 1000).toISOString().slice(0, 16).replace('T', ' ') : '—',
+      age:  s.ts ? relAge(s.ts) : '—',
+      size: s.size_bytes ? (s.size_bytes / 1e9).toFixed(1) + ' GB' : '—',
+    }));
+  const busy = _schedules?.restic_running || false;
+  renderCloudSnapshots(snaps, busy);
 }
 
 function renderCloudSnapshots(snaps, busy = false) {
@@ -1794,18 +1698,11 @@ function closeDeleteResticModal() {
   document.getElementById('delete-restic-modal').classList.remove('open');
 }
 
-async function confirmDeleteRestic() {
+function confirmDeleteRestic() {
   const snap = _deleteResticState;
   closeDeleteResticModal();
   _jobFromCloud = true;
-  const res = await fetch(`${API_BASE}/api/host/${currentHost}/delete/restic`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ restic_id: snap.id }),
-  });
-  if (!res.ok) { alert(_apiError(res, await res.text())); return; }
-  const { job_id } = await res.json();
-  openJobModal('Delete cloud snapshot', job_id, null);
+  MQTTBus.triggerAction('delete-restic', { restic_id: snap.id }, 'Delete cloud snapshot', null);
 }
 
 // ─────────────────────────────────────────────
@@ -1843,18 +1740,11 @@ function closeRestoreDatastoreModal() {
   document.getElementById('restore-datastore-modal').classList.remove('open');
 }
 
-async function confirmRestoreDatastore() {
+function confirmRestoreDatastore() {
   const snap = _restoreDatastoreState;
   closeRestoreDatastoreModal();
   _jobFromCloud = true;
-  const res = await fetch(`${API_BASE}/api/host/${currentHost}/restore/datastore`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ restic_id: snap.id }),
-  });
-  if (!res.ok) { alert(_apiError(res, await res.text())); return; }
-  const { job_id } = await res.json();
-  openJobModal('Restore PBS datastore', job_id, null);
+  MQTTBus.triggerAction('restore-datastore', { restic_id: snap.id }, 'Restore PBS datastore', null);
 }
 
 // ─────────────────────────────────────────────
@@ -1872,8 +1762,464 @@ function toggleTheme() {
 _applyTheme(localStorage.getItem('theme') || 'dark');
 
 // ─────────────────────────────────────────────
+// User menu
+// ─────────────────────────────────────────────
+let _currentUser = null;
+
+async function loadCurrentUser() {
+  try {
+    const res = await fetch('/api/auth/me');
+    if (res.status === 401) { window.location.href = '/login'; return; }
+    if (!res.ok) return;
+    _currentUser = await res.json();
+    const initials = _currentUser.username.slice(0, 2).toUpperCase();
+    document.getElementById('user-avatar').textContent = initials;
+    document.getElementById('user-label').textContent = _currentUser.username;
+    document.getElementById('user-menu-name').textContent = _currentUser.username;
+    document.getElementById('user-menu-role').textContent = _currentUser.role;
+    document.getElementById('changepw-username-label').textContent = _currentUser.username;
+  } catch (e) { /* ignore */ }
+}
+
+function toggleUserMenu() {
+  document.getElementById('user-menu').classList.toggle('open');
+}
+function closeUserMenu() {
+  document.getElementById('user-menu').classList.remove('open');
+}
+document.addEventListener('click', e => {
+  const btn = document.getElementById('user-btn');
+  if (!btn.contains(e.target)) closeUserMenu();
+});
+
+async function doLogout() {
+  closeUserMenu();
+  await fetch('/api/auth/logout', { method: 'POST' });
+  window.location.href = '/login';
+}
+
+// ─────────────────────────────────────────────
+// Change password modal
+// ─────────────────────────────────────────────
+function openChangePwModal() {
+  document.getElementById('changepw-current').value = '';
+  document.getElementById('changepw-new').value = '';
+  document.getElementById('changepw-confirm').value = '';
+  document.getElementById('changepw-error').style.display = 'none';
+  document.getElementById('changepw-ok').style.display = 'none';
+  document.getElementById('changepw-modal').classList.add('open');
+  setTimeout(() => document.getElementById('changepw-current').focus(), 50);
+}
+function closeChangePwModal() {
+  document.getElementById('changepw-modal').classList.remove('open');
+}
+
+async function submitChangePw() {
+  const errEl = document.getElementById('changepw-error');
+  const okEl  = document.getElementById('changepw-ok');
+  const btn   = document.getElementById('changepw-btn');
+  errEl.style.display = 'none';
+  okEl.style.display  = 'none';
+
+  const current = document.getElementById('changepw-current').value;
+  const nw      = document.getElementById('changepw-new').value;
+  const confirm = document.getElementById('changepw-confirm').value;
+
+  if (nw !== confirm) {
+    errEl.textContent = 'New passwords do not match';
+    errEl.style.display = 'block';
+    return;
+  }
+  if (nw.length < 8) {
+    errEl.textContent = 'New password must be at least 8 characters';
+    errEl.style.display = 'block';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  try {
+    const res = await fetch('/api/auth/change-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ current_password: current, new_password: nw }),
+    });
+    if (res.ok) {
+      okEl.style.display = 'block';
+      document.getElementById('changepw-current').value = '';
+      document.getElementById('changepw-new').value = '';
+      document.getElementById('changepw-confirm').value = '';
+      setTimeout(closeChangePwModal, 1500);
+    } else {
+      const data = await res.json().catch(() => ({}));
+      errEl.textContent = data.error || 'Failed to change password';
+      errEl.style.display = 'block';
+    }
+  } catch (e) {
+    errEl.textContent = 'Network error';
+    errEl.style.display = 'block';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Save password';
+}
+
+// ─────────────────────────────────────────────
+// Global 401 → redirect to login
+// ─────────────────────────────────────────────
+// MQTT bus — stateful, data-driven
+//
+// Agent publishes retained state per VM:
+//   proxmox/<host>/vm/<id>/meta    → VM metadata
+//   proxmox/<host>/vm/<id>/pbs     → PBS snapshots (annotated with cloud)
+//   proxmox/<host>/vm/<id>/restic  → restic snapshots
+//   proxmox/<host>/vms/index       → ["100","101",…]
+//   proxmox/<host>/state/ready     → {ts, pbs_ok}
+//   proxmox/<host>/agent/status    → online/offline
+//   proxmox/<host>/vm/<id>/backup/progress → live job progress
+//
+// On connect, broker delivers all retained messages immediately → full UI
+// render in < 200ms without any explicit REST fetch.
+// ─────────────────────────────────────────────
+const MQTTBus = (() => {
+  let _client  = null;
+  let _prefix      = 'proxmox';
+  let _enabled     = false;
+  let _agentHostname = null;  // learned from first inbound MQTT message (parts[1])
+
+  // ── DataStore: accumulates per-VM state from retained MQTT messages ────────
+  // _ds[vmid] = { meta: {...}, pbs: {snapshots:[...]}, restic: {snapshots:[...]} }
+  const _ds = {};
+
+  function _human_age(ts) {
+    const secs = Math.floor(Date.now() / 1000) - ts;
+    if (secs < 0)     return '0m';
+    const m = Math.floor(secs / 60);
+    const h = Math.floor(m / 60);
+    const d = Math.floor(h / 24);
+    if (d)  return h % 24 ? `${d}d ${h % 24}h` : `${d}d`;
+    if (h)  return m % 60 ? `${h}h ${m % 60}m` : `${h}h`;
+    return `${m}m`;
+  }
+
+  function _buildItem(vmid) {
+    const d   = _ds[vmid] || {};
+    const meta = d.meta  || {};
+    const pbs  = d.pbs   || {};
+    const res  = d.restic || {};
+
+    // Annotate PBS snaps with age (computed client-side)
+    const snaps = (pbs.snapshots || []).map(s => ({
+      ...s,
+      age: s.backup_time ? _human_age(s.backup_time) : '—',
+    }));
+
+    return {
+      id:          isNaN(vmid) ? vmid : parseInt(vmid),
+      name:        meta.name    || `vm-${vmid}`,
+      type:        meta.type    || 'vm',
+      os:          meta.os      || 'linux',
+      status:      meta.status  || 'unknown',
+      template:    meta.template || false,
+      in_pve:      meta.in_pve  !== false,
+      snapshots:   snaps,
+      restic_snaps: res.snapshots || [],
+    };
+  }
+
+  function _upsertCard(vmid) {
+    if (!currentHost) return;
+    const item = _buildItem(vmid);
+    const cardId = `vm-card-${vmid}`;
+    const existing = document.getElementById(cardId);
+    // Wrap renderCard output with id so we can find it later
+    const html = renderCard(item).replace(
+      '<div class="vm-card">',
+      `<div class="vm-card" id="${cardId}" data-vmid="${vmid}">`
+    );
+
+    if (existing) {
+      const wasOpen = existing.querySelector('.snapshots.open') !== null;
+      existing.outerHTML = html;
+      if (wasOpen) {
+        const newCard = document.getElementById(cardId);
+        newCard?.querySelector('.snapshots')?.classList.add('open');
+        newCard?.querySelector('.expand-btn')?.classList.add('open');
+      }
+    } else {
+      // Add to correct section grid
+      const section = item.type === 'lxc' ? 'lxc-grid' : 'vm-grid';
+      let grid = document.getElementById(section);
+      if (!grid) {
+        // Section doesn't exist yet — create it
+        const content = document.getElementById('content');
+        if (content?.querySelector('.state-msg')) content.innerHTML = '';
+        const sectionTitle = item.type === 'lxc' ? 'Containers' : 'Virtual Machines';
+        const sectionEl = document.createElement('div');
+        sectionEl.innerHTML = `
+          <div class="section-header">
+            <span class="section-title">${sectionTitle}</span>
+            <div class="section-line"></div>
+            <span class="section-count" id="${section}-count">0</span>
+          </div>
+          <div class="vm-grid" id="${section}"></div>`;
+        content?.appendChild(sectionEl);
+        grid = document.getElementById(section);
+      }
+      grid?.insertAdjacentHTML('beforeend', html);
+      // Update count badge
+      const count = document.getElementById(`${section}-count`);
+      if (count) count.textContent = grid.children.length;
+    }
+    // Re-apply active job indicators
+    Object.entries(_activeJobs).forEach(([jVmid, entry]) => {
+      if (String(jVmid) === String(vmid)) _setJobIndicator(parseInt(vmid), true, entry.title);
+    });
+  }
+
+  function _onMessage(topic, payload) {
+    const msg   = payload.toString();
+    const parts = topic.split('/');
+    // Learn the agent's MQTT hostname from the first inbound message (parts[1]).
+    // This is used when publishing commands so they reach the right topic.
+    if (parts[1]) _agentHostname = parts[1];
+    // proxmox/<host>/agent/status
+    if (parts[2] === 'agent' && parts[3] === 'status') {
+      setStatus(msg === 'online' ? 'ok' : 'error',
+                msg === 'online' ? 'live' : 'agent offline');
+      return;
+    }
+    // proxmox/<host>/state/ready
+    if (parts[2] === 'state' && parts[3] === 'ready') {
+      try {
+        const d = JSON.parse(msg);
+        if (!d.pbs_ok) setStatus('error', 'PBS offline');
+        else            setStatus('ok', 'live');
+      } catch (_) {}
+      return;
+    }
+    // proxmox/<host>/vms/index — list of all known VMIDs for this host.
+    // When the list is empty the agent has no VMs/containers: show empty state.
+    if (parts[2] === 'vms' && parts[3] === 'index') {
+      try {
+        const vmids = JSON.parse(msg);
+        if (vmids.length === 0) {
+          const content = document.getElementById('content');
+          if (content?.querySelector('.state-msg')) {
+            content.innerHTML = '<div class="state-msg">No VMs or containers found.</div>';
+          }
+          _updateSubtitle();
+        }
+      } catch (_) {}
+      return;
+    }
+    // proxmox/<host>/vm/<vmid>/meta|pbs|restic
+    if (parts[2] === 'vm' && parts.length === 5) {
+      const vmid = parts[3];
+      const type = parts[4];
+      if (!_ds[vmid]) _ds[vmid] = {};
+      try {
+        _ds[vmid][type] = JSON.parse(msg);
+      } catch (_) { return; }
+      _upsertCard(vmid);
+      _updateSubtitle();
+      // If cloud tab is visible, restic data update should re-render it immediately
+      if (type === 'restic' && _activeTab === 'cloud') renderCloudFromDS();
+      return;
+    }
+    // proxmox/<host>/vm/<vmid>/backup/progress  (live job)
+    if (parts[2] === 'vm' && parts[4] === 'backup' && parts[5] === 'progress') {
+      try {
+        const d   = JSON.parse(msg);
+        const pct = d.pct ?? 0;
+        const vmid = parts[3];
+        const badge = document.getElementById(`vm-job-${vmid}`);
+        if (badge && badge.style.display !== 'none') {
+          let txt = `⟳ ${pct.toFixed(0)}%`;
+          if (d.speed_mbps) txt += ` ${d.speed_mbps.toFixed(0)}MB/s`;
+          badge.textContent = txt;
+        }
+      } catch (_) {}
+      return;
+    }
+    // proxmox/<host>/storage — sidebar meters
+    if (parts[2] === 'storage' && parts.length === 3) {
+      try { _applyStorage(JSON.parse(msg)); } catch (_) {}
+      return;
+    }
+    // proxmox/<host>/info — footer version strings
+    if (parts[2] === 'info' && parts.length === 3) {
+      try { _applyInfo(JSON.parse(msg)); } catch (_) {}
+      return;
+    }
+    // proxmox/<host>/schedules — sidebar schedule section
+    if (parts[2] === 'schedules' && parts.length === 3) {
+      try {
+        _schedules = JSON.parse(msg);
+        renderSchedules();
+      } catch (_) {}
+      return;
+    }
+    // proxmox/<host>/job/<corr_id>/ack — MQTT-triggered action started
+    if (parts[2] === 'job' && parts[4] === 'ack') {
+      try {
+        const corr_id = parts[3];
+        const { op_id } = JSON.parse(msg);
+        const pending = _pendingJobs[corr_id];
+        if (pending && op_id) {
+          delete _pendingJobs[corr_id];
+          openJobModal(pending.title, op_id, pending.vmid);
+        }
+      } catch (_) {}
+      return;
+    }
+  }
+
+  function _applyStorage(s) {
+    const localPct = s.local_total > 0 ? Math.round(s.local_used / s.local_total * 100) : 0;
+    document.getElementById('local-usage').textContent = `${s.local_used} / ${s.local_total} GB`;
+    document.getElementById('local-bar').style.width  = localPct + '%';
+    document.getElementById('pbs-dedup').textContent  = s.dedup_factor != null ? `${s.dedup_factor}×` : '—';
+    if (s.cloud_total) {
+      const cloudPct = Math.min(Math.round(s.cloud_quota_used / s.cloud_total * 100), 100);
+      document.getElementById('cloud-usage').textContent = `${s.cloud_quota_used} / ${s.cloud_total} GB`;
+      document.getElementById('cloud-bar').style.width   = cloudPct + '%';
+    } else {
+      document.getElementById('cloud-usage').textContent = s.cloud_used > 0 ? `${s.cloud_used} GB used` : '—';
+    }
+    if (s.cloud_used > 0) {
+      const el = document.getElementById('cloud-backup-size');
+      if (el) el.textContent = `${s.cloud_used} GB`;
+    }
+  }
+
+  function _applyInfo(info) {
+    const pbs    = document.getElementById('footer-pbs');
+    const restic = document.getElementById('footer-restic');
+    if (pbs)    pbs.textContent    = `PBS ${info.pbs ?? '—'}`;
+    if (restic) restic.textContent = `restic ${info.restic ?? '—'}`;
+  }
+
+  function _updateSubtitle() {
+    const vmCount  = Object.values(_ds).filter(d => d.meta?.type !== 'lxc').length;
+    const lxcCount = Object.values(_ds).filter(d => d.meta?.type === 'lxc').length;
+    document.getElementById('page-subtitle').textContent =
+      `${vmCount} VM${vmCount !== 1 ? 's' : ''} · ${lxcCount} LXC${lxcCount !== 1 ? 's' : ''}`;
+  }
+
+  function _fmtEta(s) {
+    if (s < 60)   return `${s}s`;
+    if (s < 3600) return `${Math.round(s / 60)}m`;
+    return `${Math.floor(s / 3600)}h${Math.round((s % 3600) / 60)}m`;
+  }
+
+  async function start() {
+    let cfg;
+    try {
+      const r = await fetch('/api/mqtt-config');
+      cfg = await r.json();
+    } catch (_) { return; }
+
+    if (!cfg.enabled) {
+      console.debug('MQTT not configured — using REST polling');
+      return;
+    }
+    _prefix  = cfg.topic_prefix || 'proxmox';
+    _enabled = true;
+
+    const opts = {
+      clientId:    `pbgui-${Math.random().toString(16).slice(2)}`,
+      reconnectPeriod: 3000,
+    };
+    if (cfg.username) { opts.username = cfg.username; opts.password = cfg.password; }
+
+    _client = mqtt.connect(cfg.ws_url, opts);
+
+    _client.on('connect', () => {
+      console.info('MQTT connected →', cfg.ws_url);
+      setStatus('ok', 'live');
+      // Clear any REST-rendered cards so MQTT retained messages build the list
+      // with proper vm-card-{vmid} IDs (prevents duplicates after REST pre-render).
+      // Retained messages arrive in the same event loop batch — flash is <100ms.
+      Object.keys(_ds).forEach(k => delete _ds[k]);
+      if (currentHost) {
+        document.getElementById('content').innerHTML = '<div class="state-msg">Connecting…</div>';
+        document.getElementById('page-subtitle').textContent = '—';
+      }
+      // Subscribe to all agent state topics (wildcards)
+      _client.subscribe(`${_prefix}/+/agent/status`);
+      _client.subscribe(`${_prefix}/+/state/ready`);
+      _client.subscribe(`${_prefix}/+/vms/index`);
+      _client.subscribe(`${_prefix}/+/vm/+/meta`);
+      _client.subscribe(`${_prefix}/+/vm/+/pbs`);
+      _client.subscribe(`${_prefix}/+/vm/+/restic`);
+      _client.subscribe(`${_prefix}/+/vm/+/backup/progress`);
+      _client.subscribe(`${_prefix}/+/storage`);
+      _client.subscribe(`${_prefix}/+/info`);
+      _client.subscribe(`${_prefix}/+/schedules`);
+      _client.subscribe(`${_prefix}/+/job/+/ack`);
+      // Broker delivers all retained messages immediately → UI populates
+    });
+
+    _client.on('message',   (t, p) => _onMessage(t, p));
+    _client.on('error',     e      => console.warn('MQTT error', e));
+    _client.on('reconnect', ()     => setStatus('error', 'reconnecting…'));
+    _client.on('offline',   ()     => setStatus('error', 'MQTT offline'));
+  }
+
+  function _cmdHostname() {
+    // Use the agent's actual MQTT hostname (learned from inbound messages).
+    // Falls back to currentHost if not yet known.
+    return _agentHostname || currentHost;
+  }
+
+  function rescan(host) {
+    if (!_client || !_enabled) return false;
+    if (!_cmdHostname()) return false;
+    _client.publish(`${_prefix}/${_cmdHostname()}/cmd/rescan`, '{}', { qos: 1 });
+    setStatus('loading', 'rescanning…');
+    return true;
+  }
+
+  // ── MQTT action triggers (replaces REST POSTs) ────────────────────────────
+  // _pendingJobs[corr_id] = {title, vmid} — resolved when job/<corr_id>/ack arrives
+  const _pendingJobs = {};
+
+  function publishCmd(cmd, payload) {
+    if (!_client || !_enabled || !_cmdHostname()) return false;
+    _client.publish(`${_prefix}/${_cmdHostname()}/cmd/${cmd}`,
+                    JSON.stringify(payload), { qos: 1 });
+    return true;
+  }
+
+  function triggerAction(cmd, payload, title, vmid) {
+    if (!_enabled) return false;
+    const corr_id = Math.random().toString(36).slice(2) + Date.now().toString(36);
+    _pendingJobs[corr_id] = { title, vmid: vmid ?? null };
+    publishCmd(cmd, { ...payload, corr_id });
+    return true;
+  }
+
+  function isEnabled() { return _enabled; }
+  function clearStore() { Object.keys(_ds).forEach(k => delete _ds[k]); }
+  function getDS() { return _ds; }
+
+  return { start, rescan, isEnabled, clearStore, getDS, triggerAction };
+})();
+
+// ─────────────────────────────────────────────
+const _origFetch = window.fetch;
+window.fetch = async function(...args) {
+  const res = await _origFetch(...args);
+  if (res.status === 401 && !args[0]?.toString().includes('/api/auth/')) {
+    window.location.href = '/login';
+  }
+  return res;
+};
+
+// ─────────────────────────────────────────────
 // Start
 // ─────────────────────────────────────────────
+loadCurrentUser();
 init();
 </script>
 </body>

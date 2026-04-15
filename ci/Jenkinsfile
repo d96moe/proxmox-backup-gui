@@ -45,7 +45,7 @@ pipeline {
             steps {
                 sh '''
                     mkdir -p test-results
-                    .venv/bin/pytest ci/tests/test_unit.py \
+                    .venv/bin/pytest ci/tests/test_unit.py ci/tests/test_auth.py \
                         -v --tb=short \
                         --junit-xml=test-results/unit.xml
                 '''

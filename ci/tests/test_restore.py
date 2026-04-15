@@ -18,6 +18,7 @@ Test categories:
 """
 from __future__ import annotations
 
+import http.cookiejar
 import json
 import os
 import time
@@ -26,11 +27,36 @@ import urllib.request
 import pytest
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "").rstrip("/")
+CI_ADMIN_PASSWORD = os.environ.get("CI_ADMIN_PASSWORD", "")
 
 pytestmark = pytest.mark.skipif(
     not BACKEND_URL,
     reason="BACKEND_URL not set — set BACKEND_URL=http://<ip>:5000 to run restore tests",
 )
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Authenticated HTTP session (cookie jar keeps the Flask session cookie)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_cookie_jar = http.cookiejar.CookieJar()
+_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_cookie_jar))
+_session_ready = False
+
+
+def _ensure_session() -> None:
+    global _session_ready
+    if _session_ready:
+        return
+    if not CI_ADMIN_PASSWORD:
+        return  # no auth configured — fall back to unauthenticated (local unit tests)
+    req = urllib.request.Request(
+        f"{BACKEND_URL}/api/auth/login",
+        data=json.dumps({"username": "admin", "password": CI_ADMIN_PASSWORD}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    _opener.open(req, timeout=10)
+    _session_ready = True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -38,17 +64,19 @@ pytestmark = pytest.mark.skipif(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get(path: str):
-    return json.loads(urllib.request.urlopen(f"{BACKEND_URL}{path}", timeout=60).read())
+    _ensure_session()
+    return json.loads(_opener.open(f"{BACKEND_URL}{path}", timeout=60).read())
 
 
 def _post(path: str, body: dict) -> dict:
+    _ensure_session()
     req = urllib.request.Request(
         f"{BACKEND_URL}{path}",
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    return json.loads(urllib.request.urlopen(req, timeout=60).read())
+    return json.loads(_opener.open(req, timeout=60).read())
 
 
 def _poll_job(job_id: str, timeout: int = 360) -> dict:
@@ -169,12 +197,32 @@ def real_page(browser):
               lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
     pg = ctx.new_page()
     pg._js_errors = []
+    pg._console_msgs = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
-    pg.goto("/")
-    pg.wait_for_function(
-        "() => document.getElementById('content').innerText !== 'Loading…'",
-        timeout=45000,  # agent /items includes one restic GDrive call — allow extra time
-    )
+    pg.on("console", lambda m: pg._console_msgs.append(f"[{m.type}] {m.text}"))
+    # Log in if CI credentials are configured
+    if CI_ADMIN_PASSWORD:
+        pg.goto("/login")
+        pg.fill("#username", "admin")
+        pg.fill("#password", CI_ADMIN_PASSWORD)
+        pg.click("#btn-login")
+        pg.wait_for_url("/", timeout=5000)
+    else:
+        pg.goto("/")
+    # Wait until at least one VM card is rendered — MQTT broker has delivered
+    # retained messages.
+    try:
+        pg.wait_for_function(
+            "() => document.querySelector('.vm-card') !== null",
+            timeout=45000,
+        )
+    except Exception as exc:
+        # Dump browser console for diagnosis before re-raising
+        console_dump = "\n  ".join(pg._console_msgs[-40:]) or "(none)"
+        page_text = pg.evaluate("() => document.body?.innerText?.slice(0,500) || ''")
+        raise type(exc)(
+            f"{exc}\n\nBrowser console (last 40):\n  {console_dump}\n\nPage text:\n  {page_text}"
+        ) from exc
     yield pg
     ctx.close()
 
@@ -1284,3 +1332,56 @@ def test_concurrent_cloud_delete_returns_409(host_id, items):
 
     # Let the first job finish to clean up restic lock
     _poll_job(resp1["job_id"], timeout=600)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GUI CORRECTNESS — no duplicates in backup view or cloud snapshot view
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_no_duplicate_vm_cards(real_page, host_id):
+    """Each VM/LXC must appear exactly once in the backup view.
+
+    Guards against MQTT upsert races where a retained message is replayed
+    and _upsertCard() creates a second card instead of updating the first.
+    """
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0",
+        timeout=15000,
+    )
+    cards = real_page.locator(".vm-card").all()
+    vmids = [c.get_attribute("data-vmid") for c in cards]
+    dupes = [v for v in set(vmids) if vmids.count(v) > 1]
+    assert not dupes, (
+        f"Duplicate VM cards in backup view for host {host_id}: {dupes}\n"
+        f"All vmids seen: {vmids}"
+    )
+
+
+def test_no_duplicate_snapshot_rows(real_page, host_id):
+    """Each snapshot row must appear exactly once per VM in the expanded view.
+
+    Guards against snapshot list being appended instead of replaced on MQTT
+    update, which would show the same snapshot twice.
+    """
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0",
+        timeout=15000,
+    )
+    # Expand all VM cards and check each for duplicate snapshot rows
+    cards = real_page.locator(".vm-card").all()
+    for card in cards:
+        vmid = card.get_attribute("data-vmid")
+        expand = card.locator(".expand-btn")
+        if expand.count() > 0:
+            expand.first.click()
+        rows = card.locator(".snapshot-row").all()
+        backup_times = [r.get_attribute("data-backup-time") for r in rows]
+        backup_times = [t for t in backup_times if t]  # skip None
+        dupes = [t for t in set(backup_times) if backup_times.count(t) > 1]
+        assert not dupes, (
+            f"Duplicate snapshot rows for vmid {vmid} on host {host_id}: {dupes}"
+        )

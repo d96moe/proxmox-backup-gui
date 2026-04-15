@@ -1,7 +1,7 @@
 // =============================================================================
 // Proxmox Backup GUI — Integration pipeline
-// Trigger : Nightly (02:00) + manual "Build Now"
-// Runtime : ~12-18 min
+// Trigger : Nightly (~23:00) + manual "Build Now"
+// Runtime : ~12-18 min (full suite); less when TEST_SUITE is narrowed
 //
 // Spins up a fresh clone of template 9092 (PVE + backup-gui LXC + minimal PBS),
 // pushes latest code, seeds backup data (PBS + cloud via real Google Drive),
@@ -15,7 +15,14 @@ pipeline {
 
     parameters {
         string(name: 'BRANCH', defaultValue: 'main',
-               description: 'Branch to test (e.g. main, feature/backup-restore)')
+               description: 'Branch to test (e.g. main, feature/gui-settings)')
+        choice(name: 'TEST_SUITE',
+               choices: ['all', 'frontend', 'restore', 'self_restore'],
+               description: 'Which test file(s) to run — "all" runs the full suite')
+        string(name: 'TEST_FILTER', defaultValue: '',
+               description: 'Optional pytest -k expression for extra filtering (e.g. "backup" or "restore and not cloud")')
+        booleanParam(name: 'FAIL_FAST', defaultValue: false,
+                     description: 'Stop on first failure/error (-x) — useful when iterating to find root cause')
     }
 
     options {
@@ -215,7 +222,7 @@ STEP_B
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "mkdir -p /tmp/gui-update/tests"
 
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
-                        backend/app.py backend/config.py \
+                        backend/app.py backend/auth.py backend/config.py \
                         backend/pbs_client.py backend/pve_client.py \
                         backend/restic_client.py backend/jobs.py \
                         backend/agent_client.py backend/pve_agent.py \
@@ -223,7 +230,8 @@ STEP_B
                         root@${VM_IP}:/tmp/gui-update/
 
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
-                        frontend/index.html \
+                        frontend/index.html frontend/login.html \
+                        frontend/mqtt.min.js \
                         root@${VM_IP}:/tmp/gui-update/
 
                     # Push latest test files to VM (so we always run the current test suite)
@@ -231,6 +239,11 @@ STEP_B
                         ci/tests/test_frontend.py ci/tests/test_restore.py \
                         ci/tests/test_self_restore.py ci/tests/conftest.py \
                         root@${VM_IP}:/tmp/gui-update/tests/
+
+                    # Push ci_api.py helper (avoids JSON quoting hell in seed stage)
+                    scp ${SSH_OPTS} -i ${SSH_KEY} \
+                        ci/ci_api.py \
+                        root@${VM_IP}:/tmp/gui-update/
 
                     # ── Deploy agent to PVE host (runs directly on VM, not in LXC) ──
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'DEPLOY_AGENT'
@@ -248,7 +261,7 @@ cp /tmp/gui-update/config.py      ${AGENT_DIR}/config.py
 if [ ! -x ${AGENT_DIR}/venv/bin/python ]; then
     python3 -m venv ${AGENT_DIR}/venv
 fi
-${AGENT_DIR}/venv/bin/pip install --quiet flask requests
+${AGENT_DIR}/venv/bin/pip install --quiet flask requests paho-mqtt
 
 # Read PVE and PBS credentials from the template-configured hosts.json in LXC 300.
 # The template bakes in the real PVE root password and PBS token — reuse them
@@ -298,6 +311,9 @@ cfg = {
     'restic_env':         restic_env,
     'verify_ssl':         False,
     'agent_token':        c['pbs_password'],
+    'mqtt_host':          'localhost',
+    'mqtt_port':          1883,
+    'mqtt_hostname':      'gui-ci',
 }
 open('/etc/pve-agent/config.json', 'w').write(json.dumps(cfg, indent=2))
 BUILDCFG
@@ -346,13 +362,25 @@ DEPLOY_AGENT
                         pct start 300 || true
                         echo "LXC 300 status: $(pct status 300)"
 
-                        for f in app.py config.py pbs_client.py pve_client.py restic_client.py jobs.py agent_client.py; do
+                        for f in app.py auth.py config.py pbs_client.py pve_client.py restic_client.py jobs.py agent_client.py; do
                             pct push 300 /tmp/gui-update/${f} /opt/proxmox-backup-gui/backend/${f}
                         done
                         pct push 300 /tmp/gui-update/requirements.txt \
                             /opt/proxmox-backup-gui/requirements.txt
                         pct push 300 /tmp/gui-update/index.html \
                             /opt/proxmox-backup-gui/frontend/index.html
+                        pct push 300 /tmp/gui-update/login.html \
+                            /opt/proxmox-backup-gui/frontend/login.html
+                        pct push 300 /tmp/gui-update/mqtt.min.js \
+                            /opt/proxmox-backup-gui/frontend/mqtt.min.js
+                        pct push 300 /tmp/gui-update/ci_api.py \
+                            /tmp/ci_api.py
+
+                        # Install any new Python deps into the venv (e.g. flask-login added after template was created)
+                        pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/pip install --quiet -r /opt/proxmox-backup-gui/requirements.txt
+
+                        # Ensure curl is available (needed for authenticated CI API calls)
+                        pct exec 300 -- bash -c "command -v curl >/dev/null || apt-get install -y -q curl"
 
                         # Wire up agent_url + agent_token in hosts.json so the Flask
                         # backend can authenticate to the agent. The token matches
@@ -365,9 +393,39 @@ h[0]['agent_token'] = h[0].get('pbs_password', '')
 open('/opt/proxmox-backup-gui/backend/hosts.json','w').write(json.dumps(h))
 print('hosts.json: agent_url and agent_token configured')
 "
+                        # Create CI admin user with known password (overwrites any existing users.json)
+                        pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 -c "
+import json, sys
+sys.path.insert(0, '/opt/proxmox-backup-gui/backend')
+from werkzeug.security import generate_password_hash
+users = [{'username': 'admin', 'password_hash': generate_password_hash('proxmox-ci-2024'), 'role': 'admin'}]
+open('/opt/proxmox-backup-gui/backend/users.json', 'w').write(json.dumps(users))
+print('CI admin user created')
+"
+                        # The service file was created on the template VM (192.168.0.249).
+                        # After cloning, the CI VM runs at 192.168.0.250 — patch the
+                        # MQTT_WS_URL so the browser connects to this clone's Mosquitto,
+                        # not the template's. The agent publishes to localhost:1883 on
+                        # this VM; the browser must connect to the same broker.
+                        pct exec 300 -- sed -i \
+                            "s|MQTT_WS_URL=.*|MQTT_WS_URL=ws://192.168.0.250:9001|" \
+                            /etc/systemd/system/proxmox-backup-gui.service
+                        pct exec 300 -- systemctl daemon-reload
                         pct exec 300 -- systemctl restart proxmox-backup-gui
-                        sleep 3
-                        pct exec 300 -- systemctl is-active proxmox-backup-gui
+                        # Poll until active (MQTT connect can take >3s on cold start)
+                        for i in $(seq 1 20); do
+                            STATUS=$(pct exec 300 -- systemctl is-active proxmox-backup-gui 2>/dev/null || true)
+                            [ "$STATUS" = "active" ] && break
+                            echo "  waiting for proxmox-backup-gui... ($i/20) [$STATUS]"
+                            sleep 3
+                        done
+                        # Final check — dump journal on failure so we can diagnose
+                        if ! pct exec 300 -- systemctl is-active proxmox-backup-gui; then
+                            echo "=== proxmox-backup-gui journal (last 50 lines) ==="
+                            pct exec 300 -- journalctl -u proxmox-backup-gui -n 50 --no-pager || true
+                            echo "=== end journal ==="
+                            exit 1
+                        fi
 
                         # Update test files and frontend in CI working dir
                         # (mock server in test_frontend.py reads frontend/index.html
@@ -384,6 +442,8 @@ print('hosts.json: agent_url and agent_token configured')
                             /opt/ci/proxmox-backup-gui/tests/conftest.py
                         cp /tmp/gui-update/index.html \
                             /opt/ci/proxmox-backup-gui/frontend/index.html
+                        cp /tmp/gui-update/mqtt.min.js \
+                            /opt/ci/proxmox-backup-gui/frontend/mqtt.min.js
 EOF
                 '''
             }
@@ -422,19 +482,21 @@ PURGE_STALE_PBS
                     # Tests restore ct/301 to avoid self-restore deadlock (app runs in ct/300).
                     echo "Triggering PBS backup of LXC 301..."
                     JOB=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
+                        "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py backup 301 ct")
                     JOB_ID=$(echo "${JOB}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup job: ${JOB_ID}"
+                    [ -z "${JOB_ID}" ] && { echo "ERROR: no job_id returned — backup API call failed. Response: ${JOB}"; exit 1; }
 
                     # Poll until PBS backup done (max 5 min)
                     for i in $(seq 1 60); do
                         sleep 5
                         STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "pct exec 300 -- python3 -c \\"import urllib.request; print(urllib.request.urlopen('http://localhost:5000/api/job/${JOB_ID}',timeout=5).read().decode())\\"" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                            "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py job ${JOB_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
                         echo "  PBS backup status: ${STATUS}"
                         [ "${STATUS}" = "done" ] && { echo "PBS backup complete"; break; }
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup failed"; exit 1; }
                     done
+                    [ "${STATUS}" != "done" ] && { echo "ERROR: PBS backup timed out (60×5s)"; exit 1; }
 
                     # Step 2: Restic backup of PBS datastore to Google Drive.
                     # Tagged ct-301 so restic_client.py maps it to LXC 301.
@@ -516,18 +578,20 @@ WAITPBS
                     # Step 3: PBS backup #2 (T2) — exists at time of R2, will become local+cloud.
                     echo "Triggering PBS backup #2 (T2)..."
                     JOB3=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
+                        "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py backup 301 ct")
                     JOB3_ID=$(echo "${JOB3}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup #2 job: ${JOB3_ID}"
+                    [ -z "${JOB3_ID}" ] && { echo "ERROR: no job_id for PBS backup #2. Response: ${JOB3}"; exit 1; }
 
                     for i in $(seq 1 60); do
                         sleep 5
                         STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "pct exec 300 -- python3 -c \\"import urllib.request; print(urllib.request.urlopen('http://localhost:5000/api/job/${JOB3_ID}',timeout=5).read().decode())\\"" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                            "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py job ${JOB3_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
                         echo "  PBS backup #2 status: ${STATUS}"
                         [ "${STATUS}" = "done" ] && { echo "PBS backup #2 complete"; break; }
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #2 failed"; exit 1; }
                     done
+                    [ "${STATUS}" != "done" ] && { echo "ERROR: PBS backup #2 timed out (60×5s)"; exit 1; }
 
                     # Step 3b: Restic backup R2 — covers BOTH T1 and T2.
                     # This creates the multi-restic scenario: T1 is covered by R1 *and* R2.
@@ -571,18 +635,20 @@ WAITPBS2
                     # so T3 has no restic coverage). Provides the local-only test scenario.
                     echo "Triggering PBS backup #3 (T3, local-only)..."
                     JOB3C=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "pct exec 300 -- python3 -c \\"import urllib.request,json; req=urllib.request.Request('http://localhost:5000/api/host/ci/backup/pbs',data=json.dumps({'vmid':301,'type':'ct'}).encode(),headers={'Content-Type':'application/json'},method='POST'); print(urllib.request.urlopen(req,timeout=10).read().decode())\\"")
+                        "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py backup 301 ct")
                     JOB3C_ID=$(echo "${JOB3C}" | grep -o '"job_id":"[^"]*"' | cut -d'"' -f4)
                     echo "PBS backup #3 job: ${JOB3C_ID}"
+                    [ -z "${JOB3C_ID}" ] && { echo "ERROR: no job_id for PBS backup #3. Response: ${JOB3C}"; exit 1; }
 
                     for i in $(seq 1 60); do
                         sleep 5
                         STATUS=$(ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                            "pct exec 300 -- python3 -c \\"import urllib.request; print(urllib.request.urlopen('http://localhost:5000/api/job/${JOB3C_ID}',timeout=5).read().decode())\\"" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
+                            "pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 /tmp/ci_api.py job ${JOB3C_ID}" | grep -o '"status":"[^"]*"' | cut -d'"' -f4)
                         echo "  PBS backup #3 status: ${STATUS}"
                         [ "${STATUS}" = "done" ] && { echo "PBS backup #3 complete"; break; }
                         [ "${STATUS}" = "error" ] && { echo "ERROR: PBS backup #3 failed"; exit 1; }
                     done
+                    [ "${STATUS}" != "done" ] && { echo "ERROR: PBS backup #3 timed out (60×5s)"; exit 1; }
 
                     # Step 3d: Create a ghost PBS snapshot for ct/399 — a vmid that does
                     # not exist in PVE. This produces an in_pve=False item in the GUI,
@@ -758,12 +824,37 @@ PYEOF
 
         stage('Integration tests') {
             steps {
+                script {
+                    // Resolve which test files and optional -k filter to pass to pytest.
+                    // These become positional args to "bash -s" so they are available
+                    // inside the single-quoted heredoc on the remote host as $1 / $2.
+                    def suiteMap = [
+                        all:          'tests/',
+                        frontend:     'tests/test_frontend.py',
+                        restore:      'tests/test_restore.py',
+                        self_restore: 'tests/test_self_restore.py',
+                    ]
+                    env.PYTEST_FILES  = suiteMap.get(params.TEST_SUITE, 'tests/')
+                    // Use sentinel NONE so empty filter doesn't collapse bash -s arg positions
+                    env.PYTEST_FILTER = params.TEST_FILTER ?: 'NONE'
+                    env.PYTEST_FAILFAST = params.FAIL_FAST ? 'true' : 'false'
+                    echo "TEST_SUITE=${params.TEST_SUITE}  →  ${env.PYTEST_FILES}"
+                    if (env.PYTEST_FILTER) echo "TEST_FILTER: -k '${env.PYTEST_FILTER}'"
+                    if (params.FAIL_FAST) echo "FAIL_FAST: enabled (-x)"
+                }
                 sh '''
                     VM_IP=$(cat vm_ip.txt)
 
                     # Run Playwright tests on the VM (it can reach LXC 10.10.0.100:5000)
-                    # Pass BACKEND_URL so tests hit real backend instead of mock
-                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} bash << 'EOF'
+                    # Pass BACKEND_URL so tests hit real backend instead of mock.
+                    # PYTEST_FILES, PYTEST_FILTER, PYTEST_FAILFAST forwarded as $1/$2/$3 via bash -s.
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        bash -s "${PYTEST_FILES}" "${PYTEST_FILTER}" "${PYTEST_FAILFAST}" << 'EOF'
+                        PYTEST_TARGET="$1"
+                        # $2 uses NONE sentinel to prevent Jenkins from collapsing empty args
+                        [ "$2" = "NONE" ] && PYTEST_FILTER_ARG="" || PYTEST_FILTER_ARG="$2"
+                        FAIL_FAST_FLAG="$3"
+
                         source /etc/profile.d/ci-venv.sh
                         mkdir -p /tmp/test-results
 
@@ -771,11 +862,11 @@ PYEOF
                         # If LXC 300 was accidentally stopped (e.g. prior restore), fail fast.
                         echo "Checking Flask backend health at http://10.10.0.100:5000..."
                         for i in $(seq 1 20); do
-                            curl -sf http://10.10.0.100:5000/api/hosts > /dev/null 2>&1 && { echo "Backend ready"; break; }
+                            curl -sf http://10.10.0.100:5000/health > /dev/null 2>&1 && { echo "Backend ready"; break; }
                             echo "  waiting... ($i/20)"
                             sleep 3
                         done
-                        curl -sf http://10.10.0.100:5000/api/hosts > /dev/null 2>&1 || {
+                        curl -sf http://10.10.0.100:5000/health > /dev/null 2>&1 || {
                             echo "ERROR: Flask backend not reachable at http://10.10.0.100:5000"
                             echo "LXC 300 status: $(pct status 300)"
                             pct exec 300 -- ss -tlnp 2>/dev/null | grep 5000 || echo "Nothing on port 5000"
@@ -783,8 +874,12 @@ PYEOF
                         }
 
                         # Diagnose restic/cloud coverage before tests run
+                        # Get session cookie for authenticated diagnostic calls
+                        curl -sc /tmp/diag-cookie.txt -s -X POST http://10.10.0.100:5000/api/auth/login \
+                            -H 'Content-Type: application/json' \
+                            -d '{"username":"admin","password":"proxmox-ci-2024"}' > /dev/null
                         echo "--- PRE-TEST RESTIC DIAGNOSTICS ---"
-                        curl -sf "http://10.10.0.100:5000/api/host/ci/items" 2>/dev/null | \
+                        curl -sb /tmp/diag-cookie.txt -sf "http://10.10.0.100:5000/api/host/ci/items" 2>/dev/null | \
                             python3 -c "
 import json,sys
 d=json.load(sys.stdin)
@@ -797,10 +892,14 @@ for item in d.get('lxcs',[]):
 " 2>/dev/null || echo "items endpoint failed"
                         echo "--- END DIAGNOSTICS ---"
 
+                        echo "Running: pytest ${PYTEST_TARGET} ${PYTEST_FILTER_ARG:+-k} ${PYTEST_FILTER_ARG}${FAIL_FAST_FLAG:+ -x}"
                         cd /opt/ci/proxmox-backup-gui
                         BACKEND_URL=http://10.10.0.100:5000 \
-                        pytest tests/ \
+                        CI_ADMIN_PASSWORD=proxmox-ci-2024 \
+                        pytest ${PYTEST_TARGET} \
                             -v --tb=short \
+                            ${PYTEST_FILTER_ARG:+-k "${PYTEST_FILTER_ARG}"} \
+                            $( [ "${FAIL_FAST_FLAG}" = "true" ] && echo "-x" ) \
                             --junit-xml=/tmp/test-results/integration.xml \
                             2>&1 | tee /tmp/test-results/integration.log
 EOF

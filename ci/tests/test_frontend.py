@@ -187,6 +187,22 @@ class MockHandler(BaseHTTPRequestHandler):
             if path == f"/api/host/{host_id}/info":
                 return self._json(INFO.get(host_id, INFO["home"]))
 
+        if path == "/api/mqtt-config":
+            # Return enabled MQTT config pointing at a mock broker.
+            # The browser-side mqtt.connect() is intercepted by the MQTT mock
+            # script injected by the page fixture, so the URL is never used.
+            return self._json({
+                "enabled": True,
+                "ws_url": "ws://127.0.0.1:19883/mqtt",
+                "topic_prefix": "proxmox",
+            })
+
+        if path == "/api/auth/me":
+            return self._json({"username": "admin", "role": "admin"})
+
+        if path == "/api/jobs/active":
+            return self._json([])
+
         if path.startswith("/api/job/"):
             if cfg.job_status_code != 200:
                 return self._error(cfg.job_status_code)
@@ -237,13 +253,198 @@ class MockHandler(BaseHTTPRequestHandler):
 # Fixtures
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _mqtt_retained_messages(host_id: str) -> list[dict]:
+    """Build the list of MQTT retained messages the agent would publish for host_id.
+    Used by the browser-side MQTT mock to simulate a connected broker."""
+    data = ITEMS.get(host_id, ITEMS["home"])
+    storage = STORAGE.get(host_id, {"local_used": 0, "local_total": 100, "cloud_used": 0})
+    prefix = f"proxmox/{host_id}"
+    msgs = []
+
+    # Agent online + ready
+    msgs.append({"topic": f"{prefix}/agent/status",
+                 "payload": json.dumps({"status": "online"})})
+    msgs.append({"topic": f"{prefix}/state/ready",
+                 "payload": json.dumps({"ts": 1700000000, "pve_ok": True, "pbs_ok": True})})
+
+    # Storage
+    msgs.append({"topic": f"{prefix}/storage",
+                 "payload": json.dumps({**storage,
+                                        "cloud_total": storage.get("cloud_total"),
+                                        "cloud_quota_used": storage.get("cloud_quota_used"),
+                                        "dedup_factor": storage.get("dedup_factor")})})
+
+    # Schedules (idle)
+    msgs.append({"topic": f"{prefix}/schedules",
+                 "payload": json.dumps({"pbs_jobs": [], "pbs_running": False,
+                                        "restic_next": None, "restic_running": False,
+                                        "pbs_retention": [], "restic_retention": {}})})
+
+    # Info
+    info = INFO.get(host_id, {"pbs": "4.1.4", "pve": "9.0.0", "restic": "0.18.0"})
+    msgs.append({"topic": f"{prefix}/info", "payload": json.dumps(info)})
+
+    # Per-VM messages
+    all_items = data.get("vms", []) + data.get("lxcs", [])
+    vmids = [str(item["id"]) for item in all_items]
+    msgs.append({"topic": f"{prefix}/vms/index",
+                 "payload": json.dumps(sorted(vmids))})
+
+    for item in all_items:
+        vmid = str(item["id"])
+        msgs.append({"topic": f"{prefix}/vm/{vmid}/meta",
+                     "payload": json.dumps({
+                         "vmid": vmid,
+                         "name": item.get("name", f"vm-{vmid}"),
+                         "type": item.get("type", "vm"),
+                         "status": item.get("status", "running"),
+                         "os": item.get("os", "linux"),
+                         "template": item.get("template", False),
+                         "in_pve": item.get("in_pve", True),
+                     })})
+        msgs.append({"topic": f"{prefix}/vm/{vmid}/pbs",
+                     "payload": json.dumps({"snapshots": item.get("snapshots", [])})})
+
+    return msgs
+
+
+def _mqtt_mock_script(host_ids: list[str]) -> str:
+    """Return JS to inject before page load via add_init_script().
+
+    Defines window.mqtt as non-writable/non-configurable so that any later
+    CDN load of mqtt.min.js cannot overwrite it.  The fake connect() returns
+    a client that:
+      1. Fires 'connect' after 5 ms
+      2. On first subscribe, delivers retained messages for ALL configured hosts
+         so every host's data is in the DataStore from the start.
+    """
+    all_msgs = {}
+    for hid in host_ids:
+        all_msgs[hid] = _mqtt_retained_messages(hid)
+
+    return f"""
+(function() {{
+  const _retainedByHost = {json.dumps(all_msgs)};
+
+  function _deliverForHost(hostId, handlers) {{
+    const msgs = _retainedByHost[hostId] || [];
+    msgs.forEach(function(m) {{
+      if (handlers.message) handlers.message(m.topic, m.payload);
+    }});
+  }}
+
+  function _activeHostId() {{
+    // Read the currently active host from the sidebar nav element.
+    const el = document.querySelector('.host-item.active');
+    return el ? el.id.replace('nav-', '') : null;
+  }}
+
+  function _mockConnect(url, opts) {{
+    const handlers = {{}};
+    let _subscribed = false;
+    const client = {{
+      on: function(ev, fn) {{ handlers[ev] = fn; return this; }},
+      subscribe: function(pattern, o, cb) {{
+        // On first subscribe deliver retained messages for the active host.
+        if (!_subscribed) {{
+          _subscribed = true;
+          setTimeout(function() {{
+            const host = _activeHostId() || Object.keys(_retainedByHost)[0];
+            _deliverForHost(host, handlers);
+          }}, 30);
+        }}
+        if (typeof o === 'function') o(null, []);
+        else if (typeof cb === 'function') cb(null, []);
+        return this;
+      }},
+      publish: function(t, p, o, cb) {{
+        // On any rescan command re-deliver retained messages for the currently
+        // active host — correct even mid-switch because we read the DOM.
+        if (t.indexOf('/cmd/rescan') !== -1) {{
+          window._rescanCount++;
+          var host = _activeHostId();
+          if (host) {{
+            setTimeout(function() {{ _deliverForHost(host, handlers); }}, 30);
+          }}
+        }}
+        // On any action command (backup/restore/delete/…), reply with a job ack
+        // so the frontend can open the job progress modal.
+        // Topic format: {{prefix}}/{{host}}/cmd/{{action}}
+        var cmdMatch = t.match(/^([^/]+)[/]([^/]+)[/]cmd[/](?!rescan)(.+)$/);
+        if (cmdMatch) {{
+          var _prefix = cmdMatch[1];
+          var _host   = cmdMatch[2];
+          try {{
+            var _pl = JSON.parse(p);
+            var _corr_id = _pl.corr_id;
+            if (_corr_id) {{
+              setTimeout(function() {{
+                if (handlers.message) {{
+                  handlers.message(
+                    _prefix + '/' + _host + '/job/' + _corr_id + '/ack',
+                    JSON.stringify({{ op_id: 'mock-job-1' }})
+                  );
+                }}
+              }}, 20);
+            }}
+          }} catch(_) {{}}
+        }}
+        if (typeof o === 'function') o(null);
+        else if (typeof cb === 'function') cb(null);
+        return this;
+      }},
+      end: function() {{}},
+      connected: true,
+    }};
+    setTimeout(function() {{ if (handlers.connect) handlers.connect(); }}, 5);
+    return client;
+  }}
+
+  // Rescan command counter — readable via page.evaluate("window._rescanCount")
+  window._rescanCount = 0;
+
+  // Lock window.mqtt so that a later CDN mqtt.min.js load cannot overwrite it.
+  Object.defineProperty(window, 'mqtt', {{
+    configurable: false,
+    writable: false,
+    value: {{ connect: _mockConnect }},
+  }});
+}})();
+"""
+
+
+_MQTT_STUB_JS = """\
+// Minimal mqtt.js stub — replaced by the MQTT mock script injected via add_init_script.
+// Defines window.mqtt so the real CDN load can be skipped entirely in CI.
+window.mqtt = {
+  connect: function(url, opts) {
+    var handlers = {};
+    var client = {
+      on: function(ev, fn) { handlers[ev] = fn; return this; },
+      subscribe: function(t, o, cb) { return this; },
+      publish: function(t, p, o, cb) { return this; },
+      end: function() {},
+      connected: false,
+    };
+    return client;
+  }
+};
+"""
+
+
 def _block_fonts(ctx):
-    """Route Google Fonts requests to empty responses so goto(wait_until='load')
-    never hangs on CI where outbound connections to googleapis.com are firewalled."""
+    """Route Google Fonts and CDN requests to local stubs so tests never need
+    outbound connections to googleapis.com / unpkg.com (firewalled in CI)."""
     ctx.route("**fonts.googleapis.com**",
               lambda r: r.fulfill(status=200, content_type="text/css", body=""))
     ctx.route("**fonts.gstatic.com**",
               lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
+    # Serve a minimal mqtt.js stub so the CDN load never blocks.
+    # Our add_init_script mock wraps mqtt.connect() before this stub loads,
+    # but this ensures mqtt.min.js requests never fail with a network error.
+    ctx.route("**unpkg.com**mqtt**",
+              lambda r: r.fulfill(status=200, content_type="application/javascript",
+                                  body=_MQTT_STUB_JS))
 
 
 @pytest.fixture(scope="session")
@@ -277,13 +478,17 @@ def page(browser, mock_server):
     """Fresh page, loaded and ready (home host rendered)."""
     ctx = browser.new_context(base_url=mock_server)
     _block_fonts(ctx)
+    # Inject MQTT mock BEFORE the page script runs so mqtt.connect() is intercepted.
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
     pg = ctx.new_page()
     # Capture JS console errors so tests can assert on them
     pg._js_errors: list[str] = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
     pg.goto("/")
+    # Wait for actual home VM data — not just absence of loading text, which can
+    # fire early on empty string before MQTT delivers the first message.
     pg.wait_for_function(
-        "() => document.getElementById('content').innerText !== 'Loading…'",
+        "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
     )
     yield pg
@@ -295,6 +500,7 @@ def blank_page(browser, mock_server):
     """Page that has NOT loaded yet — lets tests control timing."""
     ctx = browser.new_context(base_url=mock_server)
     _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
     pg = ctx.new_page()
     pg._js_errors: list[str] = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -387,6 +593,50 @@ def test_deploy_no_lxcs_section_reference(mock_server):
     assert "lxcs-section" not in html, \
         "Old broken getElementById('lxcs-section') still present in served HTML!"
 
+def test_deploy_mqtt_bus_present(mock_server):
+    """MQTTBus closure must be in served HTML — it is the entire MQTT backbone."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "MQTTBus" in html, \
+        "MQTTBus not found — MQTT data pipeline not deployed"
+
+def test_deploy_render_cloud_from_ds_present(mock_server):
+    """renderCloudFromDS must be in served HTML — replaces REST for cloud tab."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "renderCloudFromDS" in html, \
+        "renderCloudFromDS() missing — cloud snapshots tab will never render"
+
+def test_deploy_agent_hostname_tracking_present(mock_server):
+    """_agentHostname must be in served HTML.
+    Without it backup/rescan commands go to the wrong MQTT topic."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    assert "_agentHostname" in html, \
+        "_agentHostname missing — backup commands will publish to wrong topic"
+
+def test_deploy_loaddata_is_mqtt_only(mock_server):
+    """loadData() must be pure MQTT — no fetch('/api/host/...') REST calls."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    idx = html.find("function loadData")
+    assert idx != -1, "loadData() not found in served HTML"
+    snippet = html[idx:idx + 300]
+    assert "/api/host" not in snippet, \
+        "loadData() still contains REST call to /api/host — should be pure MQTT"
+
+def test_deploy_progress_regex_matches_new_format(mock_server):
+    """_pollJob progress regex must match '  42% —' (space-prefixed, not '[42%').
+    Wrong regex = progress bar never moves during restic backup."""
+    import urllib.request
+    html = urllib.request.urlopen(mock_server + "/").read().decode()
+    # New pattern must be present
+    assert r"^\s+(\d+)%\s+" in html, \
+        "Updated progress regex not found — progress bar will not update during backup"
+    # Old broken pattern must be gone
+    assert r"^\[(\d+)%\s+" not in html, \
+        "Old broken '[X%' progress regex still present"
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # DOM — required elements exist, no JS errors thrown during page lifecycle
@@ -429,6 +679,7 @@ def test_happy_initial_load(page: Page):
     assert page.locator("#hostname-label").inner_text() == "Home"
 
 def test_happy_shows_both_vms_and_lxcs(page: Page):
+    wait_content(page, "home-vm")
     assert "home-vm" in content_text(page)
     assert "home-lxc" in content_text(page)
 
@@ -481,20 +732,17 @@ def test_happy_refresh_reloads(page: Page):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_error_items_500_shows_error_not_loading(blank_page):
-    """If /items returns 500, UI must show error message — not stay frozen on Loading…"""
-    cfg.items_status = 500
+    """MQTT-only frontend: data arrives via MQTT (not REST), page must render VM data.
+    REST /items status has no effect since loadData() is pure MQTT."""
     pg, server = blank_page
     pg.goto(server)
-    # Must NOT stay on Loading… indefinitely
+    # MQTT mock delivers home data → wait for the VM card to appear
     pg.wait_for_function(
-        "() => !document.getElementById('content').innerText.includes('Loading') || "
-        "      document.getElementById('content').innerText.includes('Error')",
-        timeout=8000,
+        "() => document.getElementById('content').innerText.includes('home-vm')",
+        timeout=10000,
     )
     text = content_text(pg)
-    assert "Loading" not in text, f"Still showing Loading… after backend 500: {text!r}"
-    assert "Error" in text or "error" in text.lower(), \
-        f"Expected error message after 500, got: {text!r}"
+    assert "home-vm" in text, f"Expected VM data after MQTT connect, got: {text!r}"
 
 def test_error_hosts_500_shows_cannot_reach(blank_page):
     """If /api/hosts fails, page shows 'Cannot reach' message."""
@@ -549,13 +797,12 @@ def test_race_rapid_switch_shows_final_host(page: Page):
     assert "cabin-vm" not in text, f"Stale cabin data leaked: {text!r}"
 
 def test_race_switch_clears_content_immediately(page: Page):
-    """Content element must show Loading… synchronously on host click,
-    before any fetch response arrives."""
-    cfg.items_delay = 2.0  # slow all /items
+    """Content element must clear old host data synchronously on host click.
+    With MQTT frontend shows 'Connecting…' (was 'Loading…' for REST)."""
     page.evaluate("document.getElementById('nav-cabin').click()")
-    # Immediately after click (same JS tick), content should be Loading…
+    # Immediately after click (same JS tick), content must not still show home data
     text = content_text(page)
-    assert "Loading" in text or "cabin" in text, \
+    assert "Loading" in text or "Connecting" in text or "cabin" in text, \
         f"Content not cleared immediately on host switch: {text!r}"
 
 def test_race_storage_no_crosscontamination(page: Page):
@@ -585,17 +832,19 @@ def test_edge_empty_host_no_crash(browser, mock_server):
     try:
         ctx = browser.new_context(base_url=mock_server)
         _block_fonts(ctx)
+        ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
         pg.goto("/")
         pg.wait_for_function(
-            "() => document.getElementById('content').innerText !== 'Loading…'",
+            "() => document.getElementById('content').innerText.includes('home-vm')",
             timeout=10000,
         )
         pg.click("#nav-empty")
+        # After MQTT delivers vms/index=[] the frontend shows "No VMs or containers found."
         pg.wait_for_function(
-            "() => !document.getElementById('content').innerText.includes('Loading')",
+            "() => document.getElementById('content').innerText.includes('No VMs')",
             timeout=10000,
         )
         assert pg._js_errors == [], f"JS errors on empty host: {pg._js_errors}"
@@ -610,12 +859,13 @@ def test_edge_lxc_only_shows_containers(browser, mock_server):
     try:
         ctx = browser.new_context(base_url=mock_server)
         _block_fonts(ctx)
+        ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
         pg.goto("/")
         pg.wait_for_function(
-            "() => document.getElementById('content').innerText !== 'Loading…'",
+            "() => document.getElementById('content').innerText.includes('home-vm')",
             timeout=10000,
         )
         pg.click("#nav-lxc-only")
@@ -653,6 +903,10 @@ async def _async_open_page(browser, base_url: str):
                     lambda r: r.fulfill(status=200, content_type="text/css", body=""))
     await ctx.route("**fonts.gstatic.com**",
                     lambda r: r.fulfill(status=200, content_type="font/woff2", body=b""))
+    await ctx.route("**unpkg.com**mqtt**",
+                    lambda r: r.fulfill(status=200, content_type="application/javascript",
+                                        body=_MQTT_STUB_JS))
+    await ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
     pg = await ctx.new_page()
     pg._js_errors = []
     pg._ctx = ctx
@@ -946,19 +1200,21 @@ def test_job_refresh_btn_enabled_after_done_and_close(page: Page):
 
 def test_job_triggers_data_refresh_on_done(page: Page):
     """JS calls refreshData() automatically when job status becomes 'done'.
-    Verified by counting /items requests before and after job completion."""
+    Verified by counting MQTT rescan commands sent (MQTT-only frontend publishes
+    a rescan cmd instead of fetching /items via REST)."""
     cfg.job_status = "done"
     cfg.job_logs = ["Backup complete."]
-    count_before = cfg.items_request_count
+    rescan_before = page.evaluate("window._rescanCount || 0")
     page.evaluate("openJobModal('Test', 'mock-job-1')")
     page.wait_for_function(
         "() => !document.getElementById('job-close-btn').disabled",
         timeout=6000,
     )
-    # Give the async refreshData() fetch a moment to fire
+    # Give the async refreshData() a moment to publish the rescan command
     page.wait_for_timeout(600)
-    assert cfg.items_request_count > count_before, \
-        "loadData() was not called after job done — refreshData() may be broken"
+    rescan_after = page.evaluate("window._rescanCount || 0")
+    assert rescan_after > rescan_before, \
+        "No MQTT rescan command sent after job done — refreshData() may be broken"
 
 def test_job_modal_reopen_works_correctly(page: Page):
     """Open → close → open again: second modal must poll and complete without stale state."""
@@ -1008,12 +1264,14 @@ def snap_test_page(browser, mock_server):
     HOSTS.append({"id": "snap-test", "label": "Snap Test"})
     ctx = browser.new_context(base_url=mock_server)
     _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys()) + ["snap-test"]))
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
     pg.goto("/")
     pg.wait_for_function(
-        "() => document.getElementById('content').innerText !== 'Loading…'", timeout=10000)
+        "() => document.getElementById('content').innerText.includes('home-vm')",
+        timeout=10000)
     pg.click("#nav-snap-test")
     pg.wait_for_function(
         "() => document.getElementById('content').innerText.includes('both-snap-vm')",
@@ -1450,12 +1708,13 @@ def vp_page(browser, mock_server):
     """1280x800 page — standard laptop viewport, home host loaded."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 1280, "height": 800})
     _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
     pg.goto("/")
     pg.wait_for_function(
-        "() => document.getElementById('content').innerText !== 'Loading\u2026'",
+        "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
     )
     yield pg
@@ -1469,12 +1728,13 @@ def vp_snap_page(browser, mock_server):
     HOSTS.append({"id": "snap-test", "label": "Snap Test"})
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 1280, "height": 800})
     _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys()) + ["snap-test"]))
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
     pg.goto("/")
     pg.wait_for_function(
-        "() => document.getElementById('content').innerText !== 'Loading\u2026'",
+        "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
     )
     pg.click("#nav-snap-test")
@@ -1728,12 +1988,13 @@ def test_layout_narrow_no_js_errors(browser, mock_server):
     """At 768x1024 the page must load without JS errors."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
     _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
     pg.goto("/")
     pg.wait_for_function(
-        "() => document.getElementById('content').innerText !== 'Loading\u2026'",
+        "() => document.getElementById('content').innerText.includes('home-vm')",
         timeout=10000,
     )
     assert pg._js_errors == [], f"JS errors at 768px viewport: {pg._js_errors}"
@@ -1744,6 +2005,7 @@ def test_layout_narrow_vm_cards_rendered(browser, mock_server):
     """VM cards must render at 768px — no blank content."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
     _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1761,6 +2023,7 @@ def test_layout_narrow_backup_modal_opens(browser, mock_server):
     """Backup modal must open without JS errors at 768px."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
     _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1781,6 +2044,7 @@ def test_layout_narrow_restore_modal_opens(browser, mock_server):
     """Restore modal must open without JS errors at 768px."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 768, "height": 1024})
     _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
@@ -1945,16 +2209,23 @@ def test_dedup_shows_dash_when_not_available(browser, mock_server):
     try:
         ctx = browser.new_context(base_url=mock_server)
         _block_fonts(ctx)
+        ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys()) + ["no-cloud"]))
         pg = ctx.new_page()
         pg._js_errors = []
         pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
         pg.goto("/")
         pg.wait_for_function(
-            "() => document.getElementById('content').innerText !== 'Loading\u2026'",
+            "() => document.getElementById('content').innerText !== 'Loading\u2026' "
+            "&& document.getElementById('content').innerText !== 'Connecting\u2026'",
             timeout=10000,
         )
         pg.click("#nav-no-cloud")
-        pg.wait_for_timeout(1000)
+        # Wait for storage MQTT message to be processed (dedup updates from '—' default)
+        pg.wait_for_timeout(500)
+        pg.wait_for_function(
+            "() => document.getElementById('pbs-dedup').innerText !== ''",
+            timeout=5000,
+        )
         dedup_text = pg.locator("#pbs-dedup").inner_text()
         assert dedup_text == "—", f"Expected '—' when dedup_factor absent, got: {dedup_text!r}"
         assert pg._js_errors == []
@@ -1980,6 +2251,7 @@ def mobile_page(browser, mock_server):
     """390x844 viewport — iPhone-sized portrait screen, home host loaded."""
     ctx = browser.new_context(base_url=mock_server, viewport={"width": 390, "height": 844})
     _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys())))
     pg = ctx.new_page()
     pg._js_errors = []
     pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))

@@ -90,13 +90,9 @@ def mock_host():
     )
 
 
-@pytest.fixture
-def flask_client():
-    _app._cache.clear()
-    with _app.app.test_client() as c:
-        yield c
-    _app._cache.clear()
 
+# flask_client is now defined in conftest.py (logged in as admin)
+# to keep all endpoint tests working after auth was added.
 
 @contextmanager
 def _mock_clients(mock_host, pbs_snaps, pve_meta, restic_by_vm, untagged=None):
