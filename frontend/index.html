@@ -1994,9 +1994,11 @@ const MQTTBus = (() => {
   function _onMessage(topic, payload) {
     const msg   = payload.toString();
     const parts = topic.split('/');
-    // Learn the agent's MQTT hostname from the first inbound message (parts[1]).
-    // This is used when publishing commands so they reach the right topic.
-    if (parts[1]) _agentHostname = parts[1];
+    // Only process messages from the currently selected host.
+    // Messages from other hosts (home vs cabin) must not mix into _ds.
+    const msgHost = parts[1];
+    if (msgHost) _agentHostname = msgHost;
+    if (currentHost && msgHost && msgHost !== currentHost) return;
     // proxmox/<host>/agent/status
     if (parts[2] === 'agent' && parts[3] === 'status') {
       setStatus(msg === 'online' ? 'ok' : 'error',
@@ -2189,8 +2191,9 @@ const MQTTBus = (() => {
 
   function rescan(host) {
     if (!_client || !_enabled) return false;
-    if (!_cmdHostname()) return false;
-    _client.publish(`${_prefix}/${_cmdHostname()}/cmd/rescan`, '{}', { qos: 1 });
+    const target = host || _cmdHostname();
+    if (!target) return false;
+    _client.publish(`${_prefix}/${target}/cmd/rescan`, '{}', { qos: 1 });
     setStatus('loading', 'rescanning…');
     return true;
   }
@@ -2200,8 +2203,9 @@ const MQTTBus = (() => {
   const _pendingJobs = {};
 
   function publishCmd(cmd, payload) {
-    if (!_client || !_enabled || !_cmdHostname()) return false;
-    _client.publish(`${_prefix}/${_cmdHostname()}/cmd/${cmd}`,
+    const target = currentHost || _cmdHostname();
+    if (!_client || !_enabled || !target) return false;
+    _client.publish(`${_prefix}/${target}/cmd/${cmd}`,
                     JSON.stringify(payload), { qos: 1 });
     return true;
   }
