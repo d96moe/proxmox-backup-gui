@@ -261,7 +261,7 @@ cp /tmp/gui-update/config.py      ${AGENT_DIR}/config.py
 if [ ! -x ${AGENT_DIR}/venv/bin/python ]; then
     python3 -m venv ${AGENT_DIR}/venv
 fi
-${AGENT_DIR}/venv/bin/pip install --quiet flask requests
+${AGENT_DIR}/venv/bin/pip install --quiet flask requests paho-mqtt
 
 # Read PVE and PBS credentials from the template-configured hosts.json in LXC 300.
 # The template bakes in the real PVE root password and PBS token — reuse them
