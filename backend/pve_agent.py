@@ -271,7 +271,7 @@ class MQTTPublisher:
             pbs = PBSClient(_host())
             snaps_raw = pbs.get_snapshots()
             pbs_snaps = [
-                (s.get("type", "vm"), s.get("vmid", "0"), s.get("backup_time", 0))
+                (group.get("backup_type", "vm"), str(group.get("pve_id", "0")), s.get("backup_time", 0))
                 for group in snaps_raw for s in group.get("snapshots", [])
             ]
             def _prog_restic(pct, speed, eta):
