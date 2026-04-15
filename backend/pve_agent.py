@@ -168,7 +168,8 @@ class MQTTPublisher:
                 op.append_log("Starting restic cloud backup…")
                 def _prog_backup(pct, speed, eta):
                     self.publish_progress(op.op_id, str(vmid), pct, speed, eta)
-                res.backup_datastore(_cfg.pbs_datastore_path, op.append_log, [],
+                pbs_snaps = _fetch_pbs_snaps(_host())
+                res.backup_datastore(_cfg.pbs_datastore_path, op.append_log, pbs_snaps,
                                      progress_fn=_prog_backup)
                 op.append_log("Cloud backup complete.")
 
@@ -268,12 +269,7 @@ class MQTTPublisher:
 
         def _do(op: Operation):
             res = LocalResticClient(_cfg)
-            pbs = PBSClient(_host())
-            snaps_raw = pbs.get_snapshots()
-            pbs_snaps = [
-                (group.get("backup_type", "vm"), str(group.get("pve_id", "0")), s.get("backup_time", 0))
-                for group in snaps_raw for s in group.get("snapshots", [])
-            ]
+            pbs_snaps = _fetch_pbs_snaps(_host())
             def _prog_restic(pct, speed, eta):
                 self.publish_progress(op.op_id, None, pct, speed, eta)
             res.backup_datastore(_cfg.pbs_datastore_path, op.append_log, pbs_snaps,
@@ -1229,6 +1225,23 @@ class Operation:
 
 _operations: dict[str, Operation] = {}
 _ops_lock = threading.Lock()
+
+
+def _fetch_pbs_snaps(host_cfg) -> list[tuple[str, str, int]]:
+    """Return (backup_type, vmid_str, backup_time) for every PBS snapshot.
+
+    Used to tag restic backups so _scan_restic can map each restic snapshot
+    back to the PBS backups it covers.
+    """
+    try:
+        pbs = PBSClient(host_cfg)
+        groups = pbs.get_snapshots()
+        return [
+            (group.get("backup_type", "vm"), str(group.get("pve_id", "0")), s.get("backup_time", 0))
+            for group in groups for s in group.get("snapshots", [])
+        ]
+    except Exception:
+        return []
 
 
 def _new_op(op_type: str, vmid: str | None = None) -> Operation:
