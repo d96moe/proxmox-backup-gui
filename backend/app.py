@@ -317,7 +317,12 @@ def mqtt_proxy(ws):
         except queue.Full:
             pass
 
-    client = paho_mqtt.Client(client_id=f"gui-ws-{id(ws)}", protocol=paho_mqtt.MQTTv311)
+    _cbv = getattr(paho_mqtt, "CallbackAPIVersion", None)
+    client = paho_mqtt.Client(
+        *([_cbv.VERSION1] if _cbv else []),
+        client_id=f"gui-ws-{id(ws)}",
+        protocol=paho_mqtt.MQTTv311,
+    )
     client.on_connect = _on_connect
     client.on_message = _on_message
     client.connect(_MQTT_HOST, _MQTT_PORT, keepalive=30)
