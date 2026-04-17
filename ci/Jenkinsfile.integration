@@ -29,6 +29,7 @@ pipeline {
         timeout(time: 75, unit: 'MINUTES')
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '10'))
+        ansiColor('xterm')
     }
 
     triggers {
@@ -919,7 +920,7 @@ for item in d.get('lxcs',[]):
                         BACKEND_URL=http://10.10.0.100:5000 \
                         CI_ADMIN_PASSWORD=proxmox-ci-2024 \
                         pytest ${PYTEST_TARGET} \
-                            -v --tb=short \
+                            -v --tb=short --color=yes \
                             ${PYTEST_FILTER_ARG:+-k "${PYTEST_FILTER_ARG}"} \
                             $( [ "${FAIL_FAST_FLAG}" = "true" ] && echo "-x" ) \
                             --junit-xml=/tmp/test-results/integration.xml \
