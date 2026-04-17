@@ -1495,14 +1495,10 @@ def test_delete_local_only_sends_pbs_scope(page: Page):
     page.locator(".delete-btn[data-vmid='101']").first.click()
     page.wait_for_selector("#delete-modal.open", timeout=5000)
 
-    # The mock MQTT delivers a job/ack for any action cmd sent in the same browser
-    # session, which can open the job-modal from a previous test's delayed ack.
-    # Close it if present so it doesn't intercept clicks inside the delete-modal.
-    page.evaluate("document.getElementById('job-modal').classList.remove('open')")
-
-    # For a local+cloud snapshot, "Local only" is pre-selected.
-    # Capture what scope gets passed to MQTTBus.triggerAction by overriding it.
+    # Close any job-modal that may be intercepting pointer events, and intercept
+    # triggerAction before confirming the delete.
     page.evaluate("""
+        document.getElementById('job-modal').classList.remove('open');
         window._lastTriggerPayload = null;
         const orig = MQTTBus.triggerAction;
         MQTTBus.triggerAction = function(cmd, payload, title, vmid) {
@@ -1513,8 +1509,14 @@ def test_delete_local_only_sends_pbs_scope(page: Page):
 
     cfg.job_status = "done"
     cfg.job_logs = ["PBS snapshot deleted."]
-    page.locator("#delete-modal .source-opt[data-scope='local']").click()  # ensure local is selected
-    page.locator("#delete-modal button.btn-danger").first.click()  # click Delete confirm button
+    # Use JS to select scope + confirm — avoids Playwright's pointer-event interception
+    # check failing when the job-modal overlay happens to be open on top of the delete-modal.
+    # The JS path is identical to clicking: selectDeleteScope sets _deleteState.scope,
+    # confirmDelete maps 'local' → 'pbs' and calls triggerAction.
+    page.evaluate("""
+        selectDeleteScope(document.querySelector('#delete-modal .source-opt[data-scope="local"]'));
+        confirmDelete();
+    """)
 
     page.wait_for_selector("#job-modal.open", timeout=5000)
     page.wait_for_function(

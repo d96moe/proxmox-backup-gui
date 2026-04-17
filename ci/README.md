@@ -134,6 +134,15 @@ Playwright + `requests` against the real Flask backend. Cover:
 | `VM_IP` | `Jenkinsfile.integration` env block | `192.168.0.250` | Free IP for the CI VM |
 | `BACKEND_URL` | `Jenkinsfile.integration` run-tests stage | `http://10.10.0.100:5000` | Flask URL inside CI VM |
 
+### mqtt_hostname alignment
+
+The pve-agent `config.json` key `mqtt_hostname` **must match** the `id` field in `hosts.json` on LXC 300. The pipeline writes both — if they diverge, the browser's WebSocket replay request (`proxmox/<host-id>`) won't match any retained MQTT topics (`proxmox/<mqtt_hostname>/...`), VM cards never render, and all `test_restore.py` UI tests will timeout.
+
+In `Jenkinsfile.integration`, the DEPLOY_AGENT block writes:
+```python
+'mqtt_hostname': 'ci',   # must match hosts[0].id in hosts.json on LXC 300
+```
+
 ### Template 9092
 
 The integration pipeline clones template 9092 for each build. Create it once by hand (or document your setup script here). The template must have:
