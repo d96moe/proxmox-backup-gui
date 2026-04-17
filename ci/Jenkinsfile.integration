@@ -415,7 +415,7 @@ print('CI admin user created')
                         pct exec 300 -- sed -i 's|Environment=MQTT_BROKER_HOST=.*|Environment=MQTT_BROKER_HOST=10.10.0.1|' /etc/systemd/system/proxmox-backup-gui.service
                         pct exec 300 -- bash -c 'grep -q MQTT_BROKER_HOST /etc/systemd/system/proxmox-backup-gui.service || sed -i "/ExecStart=/i Environment=MQTT_BROKER_HOST=10.10.0.1" /etc/systemd/system/proxmox-backup-gui.service'
                         echo "=== Service file Environment lines ==="
-                        pct exec 300 -- grep -i "Environment\|ExecStart" /etc/systemd/system/proxmox-backup-gui.service || true
+                        pct exec 300 -- grep -iE "Environment|ExecStart" /etc/systemd/system/proxmox-backup-gui.service || true
                         echo "=== Mosquitto on PVE host ==="
                         systemctl is-active mosquitto 2>/dev/null && echo "mosquitto: active" || echo "mosquitto: NOT active"
                         ss -tlnp 2>/dev/null | grep 1883 || echo "Nothing listening on :1883 (PVE host)"
