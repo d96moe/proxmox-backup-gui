@@ -346,7 +346,7 @@ SVCEOF
 # Ensure the CI config (listen on all interfaces, anonymous) is in place
 # and that the service is running — Mosquitto 2.x defaults to loopback-only.
 cat > /etc/mosquitto/conf.d/ci.conf << 'MQTTEOF'
-listener 1883
+listener 1883 0.0.0.0
 allow_anonymous true
 MQTTEOF
 systemctl enable mosquitto
@@ -931,8 +931,9 @@ for item in d.get('lxcs',[]):
                         cd /opt/ci/proxmox-backup-gui
                         BACKEND_URL=http://10.10.0.100:5000 \
                         CI_ADMIN_PASSWORD=proxmox-ci-2024 \
+                        PYTHONUNBUFFERED=1 FORCE_COLOR=1 \
                         pytest ${PYTEST_TARGET} \
-                            -v --tb=short --color=yes \
+                            -v --tb=short --color=yes --no-header \
                             ${PYTEST_FILTER_ARG:+-k "${PYTEST_FILTER_ARG}"} \
                             $( [ "${FAIL_FAST_FLAG}" = "true" ] && echo "-x" ) \
                             --junit-xml=/tmp/test-results/integration.xml \

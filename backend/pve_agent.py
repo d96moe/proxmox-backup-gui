@@ -759,7 +759,14 @@ class StatePoller:
             gone = prev - all_vmids
             self._known_vmids = set(all_vmids)
         for gvmid in gone:
-            for suffix in (f"vm/{gvmid}/meta", f"vm/{gvmid}/pbs", f"vm/{gvmid}/restic"):
+            for suffix in (
+                f"vm/{gvmid}/meta",
+                f"vm/{gvmid}/pbs",
+                f"vm/{gvmid}/restic",
+                f"vm/{gvmid}/backup/status",
+                f"vm/{gvmid}/backup/last_ok",
+                f"vm/{gvmid}/backup/progress",
+            ):
                 self._mqtt._client.publish(f"{self._base}/{suffix}", b"", retain=True, qos=1)
                 self._hashes.pop(suffix, None)
             log.info("Cleared retained MQTT topics for disappeared VMID %s", gvmid)

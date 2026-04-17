@@ -1490,25 +1490,15 @@ def test_delete_local_only_sends_pbs_scope(page: Page):
     """Confirming 'Local only' delete must publish scope:'pbs' to the agent.
     Bug: scope was sent as 'local' which the agent ignored — PBS snapshot not deleted,
     job completed instantly with no log output and 100% progress bar."""
-    # Expose published MQTT messages for inspection
-    page.evaluate("window._publishedCmds = []")
-    page.evaluate("""
-        const origPublish = window._mqttInject.__proto__;
-        // Intercept via redefining _mqttInject to also capture publishes
-        // Actually we need to hook into MQTTBus — override publish at mock level.
-        // The mock's _mockConnect already exposes connected client, but we can
-        // inject a publish interceptor via window.
-        window._capturePublish = true;
-        window._publishedCmds = [];
-    """)
-    # Rebuild mock with publish capture — easier to capture via event on window
-    # Instead: inspect the payload via a simpler approach.
-    # Reload and intercept publish before it goes to agent.
-
     # Expand and open delete modal
     expand_vm_card(page, 101)
     page.locator(".delete-btn[data-vmid='101']").first.click()
     page.wait_for_selector("#delete-modal.open", timeout=5000)
+
+    # The mock MQTT delivers a job/ack for any action cmd sent in the same browser
+    # session, which can open the job-modal from a previous test's delayed ack.
+    # Close it if present so it doesn't intercept clicks inside the delete-modal.
+    page.evaluate("document.getElementById('job-modal').classList.remove('open')")
 
     # For a local+cloud snapshot, "Local only" is pre-selected.
     # Capture what scope gets passed to MQTTBus.triggerAction by overriding it.

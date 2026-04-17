@@ -46,8 +46,9 @@ pipeline {
             steps {
                 sh '''
                     mkdir -p test-results
+                    PYTHONUNBUFFERED=1 FORCE_COLOR=1 \
                     .venv/bin/pytest ci/tests/test_unit.py ci/tests/test_auth.py \
-                        -v --tb=short --color=yes \
+                        -v --tb=short --color=yes --no-header \
                         --junit-xml=test-results/unit.xml
                 '''
             }
@@ -56,8 +57,9 @@ pipeline {
         stage('Mock tests') {
             steps {
                 sh '''
+                    PYTHONUNBUFFERED=1 FORCE_COLOR=1 \
                     .venv/bin/pytest ci/tests/test_frontend.py \
-                        -v --tb=short --color=yes \
+                        -v --tb=short --color=yes --no-header \
                         --junit-xml=test-results/frontend-mock.xml
                 '''
             }
