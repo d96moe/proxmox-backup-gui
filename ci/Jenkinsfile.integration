@@ -342,27 +342,16 @@ WantedBy=multi-user.target
 SVCEOF
 
 # ── Mosquitto (MQTT broker) ─────────────────────────────────────────────────
-# Template 9092 does not have Mosquitto installed. Install it and configure it
-# to listen on all interfaces so LXC 300 (10.10.0.100) can reach it at
-# 10.10.0.1:1883. Mosquitto 2.x defaults to loopback-only + no anonymous.
-if ! systemctl is-active mosquitto > /dev/null 2>&1; then
-    # Wait for any concurrent apt-get (e.g. cloud-init) to release the dpkg lock
-    for i in $(seq 1 20); do
-        fuser /var/lib/dpkg/lock-frontend > /dev/null 2>&1 || break
-        echo "  waiting for dpkg lock... ($i/20)"
-        sleep 3
-    done
-    apt-get install -y -q mosquitto
-    cat > /etc/mosquitto/conf.d/ci.conf << 'MQTTEOF'
+# Template 9092 must have Mosquitto pre-installed (see ci/README.md).
+# Ensure the CI config (listen on all interfaces, anonymous) is in place
+# and that the service is running — Mosquitto 2.x defaults to loopback-only.
+cat > /etc/mosquitto/conf.d/ci.conf << 'MQTTEOF'
 listener 1883
 allow_anonymous true
 MQTTEOF
-    systemctl enable mosquitto
-    systemctl start mosquitto
-    echo "Mosquitto installed and started"
-else
-    echo "Mosquitto already running"
-fi
+systemctl enable mosquitto
+systemctl restart mosquitto
+echo "Mosquitto configured and started"
 
 systemctl daemon-reload
 systemctl restart pve-agent || systemctl start pve-agent
