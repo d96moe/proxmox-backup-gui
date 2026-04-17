@@ -934,7 +934,7 @@ for item in d.get('lxcs',[]):
                         CI_ADMIN_PASSWORD=proxmox-ci-2024 \
                         PYTHONUNBUFFERED=1 FORCE_COLOR=1 \
                         pytest ${PYTEST_TARGET} \
-                            -v --tb=short --color=yes --no-header \
+                            -v --tb=short --no-header \
                             ${PYTEST_FILTER_ARG:+-k "${PYTEST_FILTER_ARG}"} \
                             $( [ "${FAIL_FAST_FLAG}" = "true" ] && echo "-x" ) \
                             --junit-xml=/tmp/test-results/integration.xml \
