@@ -341,6 +341,23 @@ RestartSec=5
 WantedBy=multi-user.target
 SVCEOF
 
+# ── Mosquitto (MQTT broker) ─────────────────────────────────────────────────
+# Template 9092 does not have Mosquitto installed. Install it and configure it
+# to listen on all interfaces so LXC 300 (10.10.0.100) can reach it at
+# 10.10.0.1:1883. Mosquitto 2.x defaults to loopback-only + no anonymous.
+if ! systemctl is-active mosquitto > /dev/null 2>&1; then
+    apt-get install -y -q mosquitto
+    cat > /etc/mosquitto/conf.d/ci.conf << 'MQTTEOF'
+listener 1883
+allow_anonymous true
+MQTTEOF
+    systemctl enable mosquitto
+    systemctl start mosquitto
+    echo "Mosquitto installed and started"
+else
+    echo "Mosquitto already running"
+fi
+
 systemctl daemon-reload
 systemctl restart pve-agent || systemctl start pve-agent
 
