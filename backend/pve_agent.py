@@ -159,6 +159,8 @@ class MQTTPublisher:
         )
 
     def _node(self) -> str:
+        if _cfg and _cfg.pve_node:
+            return _cfg.pve_node
         return _cfg.mqtt_hostname if _cfg and _cfg.mqtt_hostname else socket.gethostname()
 
     def _handle_cmd_backup(self, body: dict) -> None:
@@ -939,6 +941,7 @@ class AgentConfig:
     mqtt_user: str = ""
     mqtt_password: str = ""
     mqtt_hostname: str = ""      # MQTT topic prefix override (defaults to socket.gethostname())
+    pve_node: str = ""           # PVE node name for API calls (defaults to mqtt_hostname then socket.gethostname())
 
     def to_host_config(self):
         """Return a HostConfig-compatible object for existing clients."""

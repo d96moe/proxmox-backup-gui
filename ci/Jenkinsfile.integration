@@ -316,7 +316,8 @@ cfg = {
     'agent_token':        c['pbs_password'],
     'mqtt_host':          'localhost',
     'mqtt_port':          1883,
-    'mqtt_hostname':      'ci',
+    'mqtt_hostname':      'ci',       # must match hosts.json id → MQTT topic prefix
+    'pve_node':           'gui-ci',   # actual PVE node name (hostname of the CI VM)
 }
 open('/etc/pve-agent/config.json', 'w').write(json.dumps(cfg, indent=2))
 BUILDCFG

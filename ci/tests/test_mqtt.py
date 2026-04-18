@@ -1060,3 +1060,148 @@ class TestResticOnlyVmVisible:
                        if s.get("local")]
         assert not local_snaps, \
             f"Restic-only VM must have no local snapshots, got: {local_snaps}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ACK_RETAIN — job/ack must be published with retain=False
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestAckRetain:
+    """Root cause of job-modal opening on every new page load:
+    _ack() published with retain=True, so every browser session received all
+    accumulated ack messages from prior jobs and opened the job modal.
+    Fix: retain=False — ack is a one-shot signal, not persistent state."""
+
+    def test_ack_published_with_retain_false(self):
+        """_ack() must never publish with retain=True."""
+        client_mock = MagicMock()
+        mqtt_pub = ag.MQTTPublisher.__new__(ag.MQTTPublisher)
+        mqtt_pub._client = client_mock
+        mqtt_pub._base = "proxmox/home"
+
+        mqtt_pub._ack("corr123", "op456")
+
+        call_kwargs = client_mock.publish.call_args
+        assert call_kwargs is not None, "_ack() did not call client.publish"
+        # retain must be False (either as positional or keyword arg)
+        kwargs = call_kwargs.kwargs
+        args   = call_kwargs.args
+        retain = kwargs.get("retain", args[3] if len(args) > 3 else None)
+        assert retain is False, \
+            f"job/ack must be published with retain=False to avoid stale modal on reconnect, got retain={retain!r}"
+
+    def test_ack_topic_contains_corr_id(self):
+        """_ack() must publish to the job/<corr_id>/ack topic."""
+        client_mock = MagicMock()
+        mqtt_pub = ag.MQTTPublisher.__new__(ag.MQTTPublisher)
+        mqtt_pub._client = client_mock
+        mqtt_pub._base = "proxmox/home"
+
+        mqtt_pub._ack("myCorr", "myOp")
+
+        topic = client_mock.publish.call_args.args[0]
+        assert topic == "proxmox/home/job/myCorr/ack", \
+            f"Unexpected ack topic: {topic!r}"
+
+    def test_ack_payload_contains_op_id(self):
+        """_ack() payload must be JSON with op_id field."""
+        client_mock = MagicMock()
+        mqtt_pub = ag.MQTTPublisher.__new__(ag.MQTTPublisher)
+        mqtt_pub._client = client_mock
+        mqtt_pub._base = "proxmox/home"
+
+        mqtt_pub._ack("c1", "op999")
+
+        payload = json.loads(client_mock.publish.call_args.args[1])
+        assert payload.get("op_id") == "op999", \
+            f"ack payload must contain op_id, got: {payload!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STALE_VMID_CLEANUP — disappeared VMIDs must have retained topics cleared
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestStaleVmidCleanup:
+    """Root cause of ghost VMs in GUI after CI builds destroy cloned VMs:
+    The production pve-agent publishes retained topics for CI VMs while they
+    exist, but stale topics linger after the VM is destroyed if cleanup fails.
+    Fix: StatePoller detects gone VMIDs (prev - all_vmids) and publishes empty
+    retained payloads to clear them from the broker."""
+
+    def _run_scan(self, poller, pve_vms, pbs_groups_dict, restic_snaps=None):
+        """Run _scan_pve_pbs and return all publish() calls as list of (topic, payload, kwargs)."""
+        poller._restic_snaps = restic_snaps or []
+        # _bootstrap_vmids must be None (not a MagicMock) so the set-union in
+        # the cleanup path works correctly: set | MagicMock returns a MagicMock
+        # whose iteration yields nothing, silently skipping all cleanup.
+        poller._mqtt._bootstrap_vmids = None
+        calls = []
+
+        pbs_list = [
+            {"pve_id": int(vid), "snapshots": snaps}
+            for vid, snaps in pbs_groups_dict.items()
+        ]
+
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent._host", return_value=MagicMock()):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = pve_vms
+            pbs_cls.return_value.get_snapshots.return_value = pbs_list
+            poller._mqtt._client.publish.side_effect = (
+                lambda topic, payload=b"", **kw: calls.append((topic, payload, kw))
+            )
+            poller._scan_pve_pbs()
+
+        return calls
+
+    def _vm(self, vmid, name="ci-clone", type="vm", status="stopped"):
+        """Return a pve_meta-compatible dict entry (vmid→dict)."""
+        return {vmid: {"name": name, "type": type, "status": status,
+                       "os": "linux", "template": False}}
+
+    def test_disappeared_vmid_topics_cleared(self, agent_cfg):
+        """When a VMID present in the previous scan vanishes, all its retained
+        topics must be cleared by publishing empty payloads with retain=True."""
+        poller, _ = _make_poller(agent_cfg)
+        # First scan: VM 9100 is present
+        self._run_scan(poller, self._vm(9100), {"9100": []})
+        assert "9100" in poller._known_vmids, "9100 must be in known_vmids after first scan"
+
+        # Second scan: VM 9100 is gone (CI build destroyed the clone)
+        calls = self._run_scan(poller, {}, {})
+
+        cleared = [t for t, p, kw in calls if "9100" in t and p == b""]
+        assert cleared, \
+            "No retained topics were cleared for disappeared VMID 9100"
+        expected_suffixes = ["meta", "pbs", "restic", "backup/status",
+                             "backup/last_ok", "backup/progress"]
+        for suffix in expected_suffixes:
+            assert any(f"vm/9100/{suffix}" in t for t in cleared), \
+                f"vm/9100/{suffix} was not cleared after VMID disappeared"
+
+    def test_disappeared_vmid_cleared_with_retain_true(self, agent_cfg):
+        """Clearing a stale retained topic requires publishing with retain=True
+        and an empty payload — without retain=True the broker keeps the old message."""
+        poller, _ = _make_poller(agent_cfg)
+        self._run_scan(poller, self._vm(9101, name="ci-clone-2"), {"9101": []})
+
+        calls = self._run_scan(poller, {}, {})
+
+        for topic, payload, kw in calls:
+            if "9101" in topic and payload == b"":
+                assert kw.get("retain") is True, \
+                    f"Clearing {topic} must use retain=True, got {kw!r}"
+                return
+        pytest.fail("No clearing publish found for disappeared VMID 9101")
+
+    def test_active_vmids_not_cleared(self, agent_cfg):
+        """VMIDs still present in PVE must not have their topics cleared."""
+        poller, _ = _make_poller(agent_cfg)
+        pve_vm_101 = self._vm(101, name="vm-101", status="running")
+        self._run_scan(poller, pve_vm_101, {})
+
+        calls = self._run_scan(poller, pve_vm_101, {})
+
+        empty_for_101 = [t for t, p, kw in calls if "vm/101" in t and p == b""]
+        assert not empty_for_101, \
+            f"Active VMID 101 must not be cleared, but got: {empty_for_101}"
