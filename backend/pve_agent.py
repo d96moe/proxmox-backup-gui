@@ -155,7 +155,7 @@ class MQTTPublisher:
         """Publish job ACK so the browser can start polling the operation."""
         self._client.publish(
             f"{self._base}/job/{corr_id}/ack",
-            json.dumps({"op_id": op_id}), retain=True, qos=1,
+            json.dumps({"op_id": op_id}), retain=False, qos=1,
         )
 
     def _node(self) -> str:
