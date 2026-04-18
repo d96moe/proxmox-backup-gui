@@ -932,9 +932,9 @@ for item in d.get('lxcs',[]):
                         cd /opt/ci/proxmox-backup-gui
                         BACKEND_URL=http://10.10.0.100:5000 \
                         CI_ADMIN_PASSWORD=proxmox-ci-2024 \
-                        PYTHONUNBUFFERED=1 FORCE_COLOR=1 \
+                        PYTHONUNBUFFERED=1 \
                         pytest ${PYTEST_TARGET} \
-                            -v --tb=short --no-header \
+                            -v --tb=short --no-header --color=no \
                             ${PYTEST_FILTER_ARG:+-k "${PYTEST_FILTER_ARG}"} \
                             $( [ "${FAIL_FAST_FLAG}" = "true" ] && echo "-x" ) \
                             --junit-xml=/tmp/test-results/integration.xml \
