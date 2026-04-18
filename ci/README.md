@@ -87,7 +87,7 @@ Playwright tests against an in-process mock server. Cover:
 - **RACE** — rapid host switching, stale-data prevention, AbortController usage
 - **EDGE** — empty data, LXC-only, no cloud storage
 - **CONCURRENCY** — multiple simultaneous users from different browser contexts
-- **MQTT BUS** — host isolation (`_onMessage` filter drops messages from non-current hosts); `resubscribe()` on host switch delivers retained messages for the new host without JS errors
+- **MQTT BUS** — host isolation (`_onMessage` filter drops messages from non-current hosts); `resubscribe()` on host switch sends a `replay` request to `/mqtt-ws` so the Flask proxy re-delivers retained messages for the new host without JS errors
 - **SORT ORDER** — VM cards appear in ascending VMID order; LXC cards in ascending VMID order; VM section always before LXC section regardless of MQTT message arrival order
 
 ### Unit tests (`ci/tests/test_mqtt.py`)
@@ -133,6 +133,15 @@ Playwright + `requests` against the real Flask backend. Cover:
 | `PVE_HOST` | Both Jenkinsfiles | `192.168.0.200` | Your PVE host IP |
 | `VM_IP` | `Jenkinsfile.integration` env block | `192.168.0.250` | Free IP for the CI VM |
 | `BACKEND_URL` | `Jenkinsfile.integration` run-tests stage | `http://10.10.0.100:5000` | Flask URL inside CI VM |
+
+### mqtt_hostname alignment
+
+The pve-agent `config.json` key `mqtt_hostname` **must match** the `id` field in `hosts.json` on LXC 300. The pipeline writes both — if they diverge, the browser's WebSocket replay request (`proxmox/<host-id>`) won't match any retained MQTT topics (`proxmox/<mqtt_hostname>/...`), VM cards never render, and all `test_restore.py` UI tests will timeout.
+
+In `Jenkinsfile.integration`, the DEPLOY_AGENT block writes:
+```python
+'mqtt_hostname': 'ci',   # must match hosts[0].id in hosts.json on LXC 300
+```
 
 ### Template 9092
 

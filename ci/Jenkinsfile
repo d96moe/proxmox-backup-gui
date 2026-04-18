@@ -17,6 +17,7 @@ pipeline {
         timeout(time: 20, unit: 'MINUTES')
         disableConcurrentBuilds()
         buildDiscarder(logRotator(numToKeepStr: '20'))
+        ansiColor('xterm')
     }
 
     stages {
@@ -45,8 +46,9 @@ pipeline {
             steps {
                 sh '''
                     mkdir -p test-results
+                    PYTHONUNBUFFERED=1 \
                     .venv/bin/pytest ci/tests/test_unit.py ci/tests/test_auth.py \
-                        -v --tb=short \
+                        -v --tb=short --no-header --color=yes \
                         --junit-xml=test-results/unit.xml
                 '''
             }
@@ -55,8 +57,9 @@ pipeline {
         stage('Mock tests') {
             steps {
                 sh '''
+                    PYTHONUNBUFFERED=1 \
                     .venv/bin/pytest ci/tests/test_frontend.py \
-                        -v --tb=short \
+                        -v --tb=short --no-header --color=yes \
                         --junit-xml=test-results/frontend-mock.xml
                 '''
             }

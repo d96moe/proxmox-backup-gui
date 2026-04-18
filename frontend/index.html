@@ -667,7 +667,6 @@
   </div>
 </div>
 
-<script src="mqtt.min.js"></script>
 <script>
 // ─────────────────────────────────────────────
 // Config — point this at your Flask instance
@@ -1902,10 +1901,12 @@ async function submitChangePw() {
 // render in < 200ms without any explicit REST fetch.
 // ─────────────────────────────────────────────
 const MQTTBus = (() => {
-  let _client  = null;
+  let _ws          = null;
   let _prefix      = 'proxmox';
   let _enabled     = false;
   let _agentHostname = null;  // learned from first inbound MQTT message (parts[1])
+  let _pingTimer   = null;
+  let _reconnTimer = null;
 
   // ── DataStore: accumulates per-VM state from retained MQTT messages ────────
   // _ds[vmid] = { meta: {...}, pbs: {snapshots:[...]}, restic: {snapshots:[...]} }
@@ -2065,6 +2066,22 @@ const MQTTBus = (() => {
     if (parts[2] === 'vm' && parts.length === 5) {
       const vmid = parts[3];
       const type = parts[4];
+      // Empty payload = broker clearing the retained topic (VMID disappeared).
+      // Remove the card and all cached data for this VMID.
+      if (!msg) {
+        if (_ds[vmid]) { delete _ds[vmid]; }
+        const card = document.getElementById(`vm-card-${vmid}`);
+        if (card) {
+          const grid = card.parentElement;
+          card.remove();
+          const count = document.getElementById(`${grid.id}-count`);
+          if (count) count.textContent = grid.children.length;
+          if (grid.children.length === 0) grid.closest('[id$="-wrapper"]')?.remove();
+        }
+        _updateSubtitle();
+        if (_activeTab === 'cloud') renderCloudFromDS();
+        return;
+      }
       if (!_ds[vmid]) _ds[vmid] = {};
       try {
         _ds[vmid][type] = JSON.parse(msg);
@@ -2161,80 +2178,83 @@ const MQTTBus = (() => {
     return `${Math.floor(s / 3600)}h${Math.round((s % 3600) / 60)}m`;
   }
 
-  async function start() {
-    let cfg;
-    try {
-      const r = await fetch('/api/mqtt-config');
-      cfg = await r.json();
-    } catch (_) { return; }
-
-    if (!cfg.enabled) {
-      console.debug('MQTT not configured — using REST polling');
-      return;
-    }
-    _prefix  = cfg.topic_prefix || 'proxmox';
-    _enabled = true;
-
-    const opts = {
-      clientId:    `pbgui-${Math.random().toString(16).slice(2)}`,
-      reconnectPeriod: 3000,
-    };
-    if (cfg.username) { opts.username = cfg.username; opts.password = cfg.password; }
-
-    _client = mqtt.connect(cfg.ws_url, opts);
-
-    _client.on('connect', () => {
-      console.info('MQTT connected →', cfg.ws_url);
-      setStatus('ok', 'live');
-      // Clear any REST-rendered cards so MQTT retained messages build the list
-      // with proper vm-card-{vmid} IDs (prevents duplicates after REST pre-render).
-      // Retained messages arrive in the same event loop batch — flash is <100ms.
-      Object.keys(_ds).forEach(k => delete _ds[k]);
-      if (currentHost) {
-        document.getElementById('content').innerHTML = '<div class="state-msg">Connecting…</div>';
-        document.getElementById('page-subtitle').textContent = '—';
-      }
-      // Subscribe to all agent state topics (wildcards)
-      // Broker delivers all retained messages immediately → UI populates
-      _SUBS.map(s => `${_prefix}${s}`).forEach(t => _client.subscribe(t));
-    });
-
-    _client.on('message',   (t, p) => _onMessage(t, p));
-    _client.on('error',     e      => console.warn('MQTT error', e));
-    _client.on('reconnect', ()     => setStatus('error', 'reconnecting…'));
-    _client.on('offline',   ()     => setStatus('error', 'MQTT offline'));
-  }
-
   function _cmdHostname() {
     // Use the agent's actual MQTT hostname (learned from inbound messages).
     // Falls back to currentHost if not yet known.
     return _agentHostname || currentHost;
   }
 
-  // Unsubscribe then re-subscribe all wildcard topics so the broker re-delivers
-  // all retained messages for the newly selected host immediately.
-  const _SUBS = [
-    `/+/agent/status`, `/+/state/ready`, `/+/vms/index`,
-    `/+/vm/+/meta`, `/+/vm/+/pbs`, `/+/vm/+/restic`,
-    `/+/vm/+/backup/progress`, `/+/storage`, `/+/info`,
-    `/+/schedules`, `/+/job/+/ack`,
-  ];
+  function _clearTimers() {
+    clearInterval(_pingTimer);
+    clearTimeout(_reconnTimer);
+    _pingTimer = null;
+    _reconnTimer = null;
+  }
 
+  function _connect() {
+    _clearTimers();
+    if (_ws) { try { _ws.close(); } catch (_) {} _ws = null; }
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const ws = new WebSocket(`${proto}//${location.host}/mqtt-ws`);
+    _ws = ws;
+
+    ws.onopen = () => {
+      console.info('MQTT-WS connected');
+      _enabled = true;
+      setStatus('ok', 'live');
+      // Clear stale data so retained messages from replay build a fresh list.
+      Object.keys(_ds).forEach(k => delete _ds[k]);
+      if (currentHost) {
+        document.getElementById('content').innerHTML = '<div class="state-msg">Connecting…</div>';
+        document.getElementById('page-subtitle').textContent = '—';
+        // Ask the proxy to replay all retained messages for this host.
+        ws.send(JSON.stringify({ type: 'replay', prefix: `${_prefix}/${currentHost}` }));
+      }
+      // Keepalive: ping every 20 s
+      _pingTimer = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'ping' }));
+      }, 20000);
+    };
+
+    ws.onmessage = evt => {
+      let msg;
+      try { msg = JSON.parse(evt.data); } catch (_) { return; }
+      if (msg.type === 'ping') { ws.send(JSON.stringify({ type: 'pong' })); return; }
+      if (msg.type === 'pong') return;
+      if (msg.topic && msg.payload !== undefined) _onMessage(msg.topic, msg.payload);
+    };
+
+    ws.onerror = e => console.warn('MQTT-WS error', e);
+
+    ws.onclose = () => {
+      _clearTimers();
+      _enabled = false;
+      setStatus('error', 'reconnecting…');
+      _reconnTimer = setTimeout(_connect, 3000);
+    };
+  }
+
+  function start() {
+    _connect();
+  }
+
+  // Request the proxy to replay retained messages for the newly selected host.
+  // Called by the host-switcher after updating currentHost.
   function resubscribe() {
-    // Only resubscribe when already connected — on initial connect, on('connect')
-    // handles subscription; calling unsubscribe before connect corrupts packet order.
-    if (!_client || !_enabled || !_client.connected) return;
-    const topics = _SUBS.map(s => `${_prefix}${s}`);
-    _client.unsubscribe(topics, () => {
-      topics.forEach(t => _client.subscribe(t));
-    });
+    if (!_ws || _ws.readyState !== WebSocket.OPEN || !currentHost) return;
+    // Clear stale data so we don't keep cards from the previous host.
+    Object.keys(_ds).forEach(k => delete _ds[k]);
+    document.getElementById('content').innerHTML = '<div class="state-msg">Connecting…</div>';
+    document.getElementById('page-subtitle').textContent = '—';
+    _ws.send(JSON.stringify({ type: 'replay', prefix: `${_prefix}/${currentHost}` }));
   }
 
   function rescan(host) {
-    if (!_client || !_enabled) return false;
+    if (!_ws || !_enabled) return false;
     const target = host || _cmdHostname();
     if (!target) return false;
-    _client.publish(`${_prefix}/${target}/cmd/rescan`, '{}', { qos: 1 });
+    _ws.send(JSON.stringify({ topic: `${_prefix}/${target}/cmd/rescan`, payload: '{}' }));
     setStatus('loading', 'rescanning…');
     return true;
   }
@@ -2245,9 +2265,11 @@ const MQTTBus = (() => {
 
   function publishCmd(cmd, payload) {
     const target = currentHost || _cmdHostname();
-    if (!_client || !_enabled || !target) return false;
-    _client.publish(`${_prefix}/${target}/cmd/${cmd}`,
-                    JSON.stringify(payload), { qos: 1 });
+    if (!_ws || !_enabled || !target) return false;
+    _ws.send(JSON.stringify({
+      topic:   `${_prefix}/${target}/cmd/${cmd}`,
+      payload: JSON.stringify(payload),
+    }));
     return true;
   }
 

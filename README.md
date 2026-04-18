@@ -26,7 +26,7 @@ The GUI LXC talks to your PVE host over both the API and SSH. The following must
 
 | Requirement | Notes |
 |---|---|
-| **Mosquitto MQTT broker** | Installed in LXC 199 by `setup-lxc.sh`; listens on TCP :1883 (agents) and WebSocket :9001 (browser) |
+| **Mosquitto MQTT broker** | Installed in LXC 199 by `setup-lxc.sh`; listens on TCP :1883 (agents only — browser never connects directly) |
 | Flask + Python deps | Installed via pip into a venv |
 
 ### On each PVE host
@@ -60,7 +60,7 @@ Cloud backup, cloud restore, and ☁ sync are skipped gracefully if `restic_repo
 
 ## Architecture
 
-The GUI is **MQTT-driven**: the browser never polls the backend for VM/snapshot data. A lightweight agent (`pve_agent.py`) on each PVE host publishes retained MQTT messages to a Mosquitto broker co-located in LXC 199. The browser subscribes via WebSocket and renders the UI directly from those retained messages — full data in < 200 ms on page load, live updates as agents publish. There is no REST polling path for VM/snapshot data.
+The GUI is **MQTT-driven**: the browser never polls the backend for VM/snapshot data. A lightweight agent (`pve_agent.py`) on each PVE host publishes retained MQTT messages to a Mosquitto broker co-located in LXC 199. Flask proxies those messages to the browser over a WebSocket at `/mqtt-ws` — the browser connects to Flask only on one port, never to Mosquitto directly. Full data appears in < 200 ms on page load; live updates arrive as agents publish. There is no REST polling path for VM/snapshot data.
 
 ```
 PVE host (home, 192.168.0.200)
@@ -68,8 +68,8 @@ PVE host (home, 192.168.0.200)
                                    │
                                LXC 199
                           ┌────────┴────────┐
-                          │  Mosquitto :9001 │  ◄── browser (WebSocket)
-                          │  Flask :5000     │  ◄── browser (HTTP login + job API)
+                          │  Flask :5000     │  ◄── browser (HTTP + WebSocket /mqtt-ws)
+                          │  (MQTT proxy)    │
                           └─────────────────┘
 ```
 
@@ -195,6 +195,7 @@ The `id` field **must match** `mqtt_hostname` in the agent's `config.json` on ea
 | `GET /api/host/<id>/storage` | PBS and Google Drive storage usage (async) |
 | `GET /api/host/<id>/ha/sensors` | Flat sensor dict for Home Assistant |
 | `GET /api/host/<id>/info` | PBS and restic version info |
+| `WS  /mqtt-ws` | MQTT proxy WebSocket — browser subscribes here instead of directly to Mosquitto; requires session cookie (login required) |
 
 ## CI & Testing
 
