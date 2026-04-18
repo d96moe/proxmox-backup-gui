@@ -1131,10 +1131,10 @@ class TestStaleVmidCleanup:
     def _run_scan(self, poller, pve_vms, pbs_groups_dict, restic_snaps=None):
         """Run _scan_pve_pbs and return all publish() calls as list of (topic, payload, kwargs)."""
         poller._restic_snaps = restic_snaps or []
-        # _bootstrap_vmids must be None (not a MagicMock) so the set-union in
-        # the cleanup path works correctly: set | MagicMock returns a MagicMock
+        # _bootstrap_vmids must be a real set (not a MagicMock) so the set-union
+        # in the cleanup path works correctly: set | MagicMock returns a MagicMock
         # whose iteration yields nothing, silently skipping all cleanup.
-        poller._mqtt._bootstrap_vmids = None
+        poller._mqtt._bootstrap_vmids = set()
         calls = []
 
         pbs_list = [

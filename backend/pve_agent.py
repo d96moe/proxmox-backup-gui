@@ -78,9 +78,10 @@ class MQTTPublisher:
         self._client.on_connect    = self._on_connect
         self._client.on_disconnect = self._on_disconnect
         self._client.on_message    = self._on_message_bootstrap
-        # Populated from broker's retained vms/index on startup; used by StatePoller
-        # to detect and clear retained topics for VMIDs that no longer exist.
-        self._bootstrap_vmids: set[str] | None = None  # None = not yet received
+        # Populated on connect from ALL retained vm/+/meta topics in the broker.
+        # Covers stale VMIDs (e.g. destroyed CI clones) that were never recorded
+        # in vms/index. StatePoller uses this to clear topics for gone VMIDs.
+        self._bootstrap_vmids: set[str] = set()
 
         try:
             self._client.connect_async(host, port, keepalive=60)
@@ -97,26 +98,44 @@ class MQTTPublisher:
                            retain=True, qos=1)
             # Subscribe to command topics
             client.subscribe(f"{self._base}/cmd/+", qos=1)
-            # Subscribe to our own retained vms/index so we can seed _known_vmids
-            # with whatever VMIDs the previous agent instance published.  This lets
-            # StatePoller detect and clear stale retained topics across restarts.
+            # Subscribe to vm/+/meta to discover ALL VMIDs with retained topics —
+            # not just those in vms/index. Retained messages arrive immediately on
+            # subscribe; msg.retain=True distinguishes them from live publishes.
+            # This catches stale VMIDs (e.g. destroyed CI clones) that were never
+            # recorded in vms/index so StatePoller can clear them from the broker.
+            self._bootstrap_vmids = set()
+            client.subscribe(f"{self._base}/vm/+/meta", qos=0)
             client.subscribe(f"{self._base}/vms/index", qos=1)
         else:
             log.warning("MQTT connect failed rc=%s", rc)
 
     def _on_message_bootstrap(self, client, userdata, msg):
-        """Handle the retained vms/index message received on connect."""
-        if msg.topic == f"{self._base}/vms/index" and msg.payload:
+        """Collect VMIDs from retained broker messages on startup."""
+        topic  = msg.topic
+        base   = self._base
+        prefix = f"{base}/vm/"
+
+        # Collect any VMID that has a retained meta topic in the broker.
+        # msg.retain=True → stored retained message (may be stale).
+        # msg.retain=False → live publish from this or another agent (skip).
+        if msg.retain and topic.startswith(prefix) and topic.endswith("/meta") and msg.payload:
+            vmid = topic[len(prefix):-len("/meta")]
+            if vmid not in self._bootstrap_vmids:
+                self._bootstrap_vmids.add(vmid)
+                log.debug("Bootstrap: found retained VMID %s in broker", vmid)
+
+        # Also seed from vms/index (handles case where meta topics already cleared)
+        if topic == f"{base}/vms/index" and msg.payload:
             try:
                 vmids = json.loads(msg.payload)
-                self._bootstrap_vmids = set(str(v) for v in vmids)
-                log.debug("Bootstrap VMIDs from broker: %s", self._bootstrap_vmids)
+                self._bootstrap_vmids.update(str(v) for v in vmids)
+                log.debug("Bootstrap VMIDs from vms/index: %s", self._bootstrap_vmids)
             except Exception:
                 pass
-            # Hand off to normal command handler for subsequent messages
-            client.unsubscribe(f"{self._base}/vms/index")
+            client.unsubscribe(f"{base}/vms/index")
+
         # Forward command messages to the normal handler
-        if "/cmd/" in msg.topic:
+        if "/cmd/" in topic:
             self._on_message(client, userdata, msg)
 
     def _on_message(self, client, userdata, msg):
