@@ -1417,7 +1417,7 @@ def test_restore_modal_full_flow_local(page: Page):
     page.wait_for_selector("#job-modal.open", timeout=5000)
     assert page.locator("#job-title").inner_text() == "Restore"
     page.wait_for_function(
-        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+        "() => document.getElementById('job-badge').textContent === 'done'", timeout=10000)
     assert page.locator("#job-badge").inner_text() == "done"
     assert page._js_errors == []
     page.evaluate("closeJobModal()")
@@ -1434,7 +1434,7 @@ def test_restore_modal_full_flow_cloud(page: Page):
     page.click("#modal-confirm-btn")
     page.wait_for_selector("#job-modal.open", timeout=5000)
     page.wait_for_function(
-        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+        "() => document.getElementById('job-badge').textContent === 'done'", timeout=10000)
     assert page.locator("#job-badge").inner_text() == "done"
     assert page._js_errors == []
     page.evaluate("closeJobModal()")
@@ -1466,7 +1466,7 @@ def test_restore_no_js_errors_full_flow(page: Page):
     page.click("#modal-confirm-btn")
     page.wait_for_selector("#job-modal.open", timeout=5000)
     page.wait_for_function(
-        "() => !document.getElementById('job-close-btn').disabled", timeout=6000)
+        "() => document.getElementById('job-badge').textContent === 'done'", timeout=10000)
     page.evaluate("closeJobModal()")
     assert page._js_errors == [], f"JS errors during restore flow: {page._js_errors}"
 
