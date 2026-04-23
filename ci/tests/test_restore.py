@@ -1547,13 +1547,15 @@ def test_partial_pbs_snapshot_detected_by_agent(host_id, partial_snapshot):
 def test_partial_pbs_snapshot_shows_warning_in_ui(real_page, host_id, partial_snapshot):
     """Partial snapshot row must show the ⚠ warning icon in the real GUI."""
     _, vmid, _ = partial_snapshot
-    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    # Reload so the page opens a fresh WebSocket connection and receives the
+    # current state (including the partial snapshot created during fixture setup).
+    # Without reload, the page may have connected before the partial existed.
+    real_page.reload()
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=10000)
     real_page.click(f"#nav-{host_id}")
-    # Wait for the specific VM card AND its expand button — proves MQTT update arrived
     real_page.wait_for_selector(
         f".vm-card[data-vmid='{vmid}'] .expand-btn", timeout=20000)
     real_page.locator(f".vm-card[data-vmid='{vmid}'] .expand-btn").first.click()
-    # After expand, wait for the partial row to actually appear (not just count immediately)
     partial_row = real_page.locator(f".vm-card[data-vmid='{vmid}'] .snapshot-row--partial")
     partial_row.first.wait_for(timeout=10000)
     assert partial_row.count() > 0, "Partial snapshot row must have snapshot-row--partial CSS class"
