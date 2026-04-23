@@ -1396,27 +1396,67 @@ def test_no_duplicate_snapshot_rows(real_page, host_id):
 # ─────────────────────────────────────────────────────────────────────────────
 
 PBS_DATASTORE_PATH = "/mnt/ci-pbs"
-# Use an unlikely vmid so we don't collide with real CI VMs
-_PARTIAL_TEST_VMID = "9999"
-_PARTIAL_TEST_BACKUP_TIME = 1700099999  # fixed timestamp for deterministic cleanup
 
 
-def _make_partial_snapshot() -> str:
-    """Create a partial PBS snapshot directory (no index.json.blob). Returns path."""
-    snap_dir = os.path.join(
-        PBS_DATASTORE_PATH, "vm", _PARTIAL_TEST_VMID,
-        f"2023-11-15T22:33:19Z",
-    )
-    os.makedirs(snap_dir, exist_ok=True)
-    # A partial snapshot has some chunk files but NO index.json.blob
-    open(os.path.join(snap_dir, "vzdump.log.blob"), "w").close()
-    open(os.path.join(snap_dir, "qemu-server.conf.blob"), "w").close()
-    return snap_dir
+def _find_existing_snapshot_dir() -> tuple[str, str, str] | None:
+    """Find an existing PBS snapshot directory to clone.
+
+    Returns (backup_type, vmid, snap_dir_path) or None if datastore is empty.
+    Scans PBS_DATASTORE_PATH for any complete snapshot (has index.json.blob).
+    """
+    for btype in ("vm", "ct"):
+        type_dir = os.path.join(PBS_DATASTORE_PATH, btype)
+        if not os.path.isdir(type_dir):
+            continue
+        for vmid in os.listdir(type_dir):
+            vmid_dir = os.path.join(type_dir, vmid)
+            if not os.path.isdir(vmid_dir):
+                continue
+            for ts_dir in sorted(os.listdir(vmid_dir)):
+                snap_dir = os.path.join(vmid_dir, ts_dir)
+                if os.path.isfile(os.path.join(snap_dir, "index.json.blob")):
+                    return btype, vmid, snap_dir
+    return None
+
+
+def _make_partial_snapshot() -> tuple[str, str, str] | None:
+    """Clone an existing PBS snapshot and remove index.json.blob to simulate a
+    partial (failed mid-backup) snapshot.
+
+    Returns (backup_type, vmid, cloned_snap_dir) or None if no source found.
+    The cloned directory uses a timestamp 1 second before the source so it sorts
+    as an older entry and doesn't affect the real latest snapshot's position.
+    """
+    result = _find_existing_snapshot_dir()
+    if result is None:
+        return None
+    btype, vmid, src_dir = result
+    src_ts = os.path.basename(src_dir)  # e.g. "2024-04-22T02:00:01Z"
+
+    # Build a fake timestamp that sorts before the real one (subtract 1 day)
+    try:
+        from datetime import datetime, timedelta, timezone
+        dt = datetime.strptime(src_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        fake_dt = dt - timedelta(days=1)
+        fake_ts = fake_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception:
+        fake_ts = "2000-01-01T00:00:00Z"
+
+    clone_dir = os.path.join(PBS_DATASTORE_PATH, btype, vmid, fake_ts)
+    if os.path.exists(clone_dir):
+        shutil.rmtree(clone_dir)
+    shutil.copytree(src_dir, clone_dir)
+
+    # Remove index.json.blob → this is what makes it "partial"
+    manifest = os.path.join(clone_dir, "index.json.blob")
+    if os.path.exists(manifest):
+        os.remove(manifest)
+
+    return btype, vmid, clone_dir
 
 
 def _remove_partial_snapshot(snap_dir: str) -> None:
-    parent = os.path.dirname(snap_dir)
-    shutil.rmtree(parent, ignore_errors=True)
+    shutil.rmtree(snap_dir, ignore_errors=True)
 
 
 def _trigger_rescan(host_id: str) -> None:
@@ -1427,20 +1467,27 @@ def _trigger_rescan(host_id: str) -> None:
 
 @pytest.fixture
 def partial_snapshot(host_id):
-    """Create a partial PBS snapshot, yield, then clean up regardless of test outcome."""
-    snap_dir = _make_partial_snapshot()
+    """Clone an existing PBS snapshot, remove index.json.blob to make it partial.
+
+    Yields (backup_type, vmid, clone_dir). Cleans up on teardown.
+    Skips the test if no suitable source snapshot exists in the datastore.
+    """
+    result = _make_partial_snapshot()
+    if result is None:
+        pytest.skip("No complete PBS snapshot found to clone — datastore may be empty")
+    btype, vmid, clone_dir = result
     _trigger_rescan(host_id)
-    yield snap_dir
-    _remove_partial_snapshot(snap_dir)
+    yield btype, vmid, clone_dir
+    _remove_partial_snapshot(clone_dir)
     _trigger_rescan(host_id)
 
 
-def _find_partial_snap(host_id: str, vmid: str) -> dict | None:
+def _find_partial_snap_for_vm(host_id: str, vmid: str) -> dict | None:
     """Return the partial snapshot dict for vmid, or None if not found."""
     data = _items(host_id)
     for section in ("vms", "lxcs"):
         for item in data.get(section, []):
-            if str(item.get("id")) == vmid:
+            if str(item.get("id")) == str(vmid):
                 for snap in item.get("snapshots", []):
                     if snap.get("partial"):
                         return snap
@@ -1448,10 +1495,11 @@ def _find_partial_snap(host_id: str, vmid: str) -> dict | None:
 
 
 def test_partial_pbs_snapshot_detected_by_agent(host_id, partial_snapshot):
-    """Agent must flag a local PBS snapshot without index.json.blob as partial=True."""
-    snap = _find_partial_snap(host_id, _PARTIAL_TEST_VMID)
+    """Agent must flag a cloned PBS snapshot without index.json.blob as partial=True."""
+    _, vmid, _ = partial_snapshot
+    snap = _find_partial_snap_for_vm(host_id, vmid)
     assert snap is not None, (
-        f"Partial snapshot for vmid {_PARTIAL_TEST_VMID} not found in /items — "
+        f"Partial snapshot for vmid {vmid} not found in /items — "
         f"agent may not have rescanned yet or partial detection is broken"
     )
     assert snap.get("local") is True, "Partial snapshot should be local=True"
@@ -1460,14 +1508,13 @@ def test_partial_pbs_snapshot_detected_by_agent(host_id, partial_snapshot):
 
 def test_partial_pbs_snapshot_shows_warning_in_ui(real_page, host_id, partial_snapshot):
     """Partial snapshot row must show the ⚠ warning icon in the real GUI."""
+    _, vmid, _ = partial_snapshot
     real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
     real_page.click(f"#nav-{host_id}")
     real_page.wait_for_function(
         "() => document.querySelectorAll('.vm-card').length > 0", timeout=15000)
-    # Find the card for our test vmid
-    card = real_page.locator(f".vm-card[data-vmid='{_PARTIAL_TEST_VMID}']")
-    if card.count() == 0:
-        pytest.skip(f"VM card for vmid {_PARTIAL_TEST_VMID} not rendered — agent may not have picked up partial snapshot")
+    card = real_page.locator(f".vm-card[data-vmid='{vmid}']")
+    assert card.count() > 0, f"VM card for vmid {vmid} not rendered"
     expand = card.locator(".expand-btn")
     if expand.count() > 0:
         expand.first.click()
@@ -1479,15 +1526,14 @@ def test_partial_pbs_snapshot_shows_warning_in_ui(real_page, host_id, partial_sn
 
 def test_partial_snapshot_cleaned_up_after_removal(host_id, partial_snapshot):
     """After removing the partial snapshot directory, it must disappear from /items."""
-    # First confirm it's there
-    snap_before = _find_partial_snap(host_id, _PARTIAL_TEST_VMID)
+    _, vmid, clone_dir = partial_snapshot
+    snap_before = _find_partial_snap_for_vm(host_id, vmid)
     assert snap_before is not None, "Partial snapshot should be present before cleanup"
 
-    # Remove it and rescan (fixture teardown does this — simulate early here)
-    _remove_partial_snapshot(partial_snapshot)
+    _remove_partial_snapshot(clone_dir)
     _trigger_rescan(host_id)
 
-    snap_after = _find_partial_snap(host_id, _PARTIAL_TEST_VMID)
+    snap_after = _find_partial_snap_for_vm(host_id, vmid)
     assert snap_after is None, (
         "Partial snapshot must disappear from /items after directory is removed"
     )
