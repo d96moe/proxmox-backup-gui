@@ -49,6 +49,9 @@ class AgentClient:
     def health(self) -> dict:
         return self._get("/health")
 
+    def rescan(self) -> dict:
+        return self._post("/rescan", {})
+
     # ── VMs ──────────────────────────────────────────────────────────────────
 
     def get_vms(self) -> list[dict]:

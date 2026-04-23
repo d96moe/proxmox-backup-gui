@@ -539,6 +539,11 @@ class StatePoller:
         # Last known local PBS storage stats — merged with cloud stats in storage topic
         self._local_storage: dict = {}
         self._storage_lock  = threading.Lock()
+        # Persistent memory of partial PBS backup times per vmid.
+        # Accumulated (never cleared) so that after a partial is pruned locally it
+        # can still be flagged as partial in cloud-only entries.
+        self._partial_pbs_times: dict[str, set[int]] = {}
+        self._partial_lock = threading.Lock()
 
     def start(self) -> None:
         # Reset running-flags on startup so stale retained "restic_running/pbs_running: true"
@@ -704,10 +709,13 @@ class StatePoller:
             vm_restic  = restic_by_vm_pbstime.get(vmid, {})
             annotated  = []
             local_times: set[int] = set()
+            partial_times: set[int] = set()
             for snap in raw_snaps:
                 bt = snap.get("backup_time")
                 if bt is not None:
                     local_times.add(bt)
+                    if snap.get("partial"):
+                        partial_times.add(bt)
                 rs = vm_restic.get(bt)
                 annotated.append({
                     **snap,
@@ -716,6 +724,20 @@ class StatePoller:
                     "restic_id":       rs["id"]       if rs else None,
                     "restic_short_id": rs["short_id"] if rs else None,
                 })
+
+            # Maintain persistent partial-times memory so that after a partial is
+            # pruned from local PBS it can still be flagged in cloud-only entries.
+            # Also remove times that completed successfully (partial=False) so a
+            # backup that was in-progress during a scan is not permanently flagged.
+            completed_times = {
+                snap.get("backup_time") for snap in raw_snaps
+                if snap.get("backup_time") is not None and not snap.get("partial")
+            }
+            with self._partial_lock:
+                known = self._partial_pbs_times.setdefault(vmid, set())
+                known.update(partial_times)
+                known -= completed_times
+                all_partial_times = set(known)
 
             # Add cloud-only entries: restic covers a PBS time that no longer
             # exists locally (was pruned). These show as cloud-only in the UI.
@@ -730,6 +752,7 @@ class StatePoller:
                     "local":           False,
                     "cloud":           True,
                     "incremental":     True,
+                    "partial":         bt in all_partial_times,
                     "size":            "—",
                     "size_bytes":      0,
                     "restic_id":       rs["id"],
@@ -740,8 +763,9 @@ class StatePoller:
 
             self._pub_if_changed(f"vm/{vmid}/pbs", {"snapshots": annotated})
 
-            # Publish restic snapshots for this VM with covers annotated by local presence
+            # Publish restic snapshots for this VM with covers annotated by local presence.
             pbs_times = {s.get("backup_time") for s in raw_snaps}
+            vmid_int_cmp = int(vmid) if vmid.isdigit() else vmid
             vm_restic_snaps = [
                 {
                     **s,
@@ -749,11 +773,12 @@ class StatePoller:
                         {
                             **c,
                             "local":    c.get("pbs_time") in pbs_times,
+                            "partial":  c.get("pbs_time") in partial_times,
                             "pbs_date": datetime.fromtimestamp(c["pbs_time"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
                                         if c.get("pbs_time") else None,
                         }
                         for c in s.get("covers", [])
-                        if c.get("vmid") == (int(vmid) if vmid.isdigit() else vmid)
+                        if c.get("vmid") == vmid_int_cmp
                     ],
                 }
                 for s in restic_snaps
@@ -1430,6 +1455,13 @@ def health():
         "version": VERSION,
         "uptime":  time.monotonic() - _start_time,
     })
+
+
+@app.route("/rescan", methods=["POST"])
+def rescan():
+    if _poller:
+        _poller.rescan_now()
+    return jsonify({"status": "ok"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -777,6 +777,21 @@ def _get_items_via_agent(host: HostConfig, host_id: str):
     return jsonify(data)
 
 
+@app.post("/api/host/<host_id>/rescan")
+@login_required
+def trigger_rescan(host_id: str):
+    """Trigger an immediate PVE+PBS rescan on the agent. Used by integration tests."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if host.agent_url:
+        try:
+            AgentClient(host.agent_url, token=host.agent_token).rescan()
+        except Exception:
+            pass
+    return jsonify({"status": "ok"})
+
+
 @app.get("/api/host/<host_id>/schedules")
 @login_required
 def get_schedules(host_id: str):

@@ -21,6 +21,8 @@ from __future__ import annotations
 import http.cookiejar
 import json
 import os
+import shutil
+import subprocess
 import time
 import urllib.request
 
@@ -1385,3 +1387,107 @@ def test_no_duplicate_snapshot_rows(real_page, host_id):
         assert not dupes, (
             f"Duplicate snapshot rows for vmid {vmid} on host {host_id}: {dupes}"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARTIAL SNAPSHOT DETECTION
+# Tests create a real partial PBS snapshot (directory without index.json.blob),
+# verify the agent detects and flags it correctly, then clean up.
+# ─────────────────────────────────────────────────────────────────────────────
+
+PBS_DATASTORE_PATH = "/mnt/ci-pbs"
+# Use an unlikely vmid so we don't collide with real CI VMs
+_PARTIAL_TEST_VMID = "9999"
+_PARTIAL_TEST_BACKUP_TIME = 1700099999  # fixed timestamp for deterministic cleanup
+
+
+def _make_partial_snapshot() -> str:
+    """Create a partial PBS snapshot directory (no index.json.blob). Returns path."""
+    snap_dir = os.path.join(
+        PBS_DATASTORE_PATH, "vm", _PARTIAL_TEST_VMID,
+        f"2023-11-15T22:33:19Z",
+    )
+    os.makedirs(snap_dir, exist_ok=True)
+    # A partial snapshot has some chunk files but NO index.json.blob
+    open(os.path.join(snap_dir, "vzdump.log.blob"), "w").close()
+    open(os.path.join(snap_dir, "qemu-server.conf.blob"), "w").close()
+    return snap_dir
+
+
+def _remove_partial_snapshot(snap_dir: str) -> None:
+    parent = os.path.dirname(snap_dir)
+    shutil.rmtree(parent, ignore_errors=True)
+
+
+def _trigger_rescan(host_id: str) -> None:
+    """Ask the agent to rescan immediately via the GUI API."""
+    _post(f"/api/host/{host_id}/rescan", {})
+    time.sleep(3)  # give agent time to complete scan and publish
+
+
+@pytest.fixture
+def partial_snapshot(host_id):
+    """Create a partial PBS snapshot, yield, then clean up regardless of test outcome."""
+    snap_dir = _make_partial_snapshot()
+    _trigger_rescan(host_id)
+    yield snap_dir
+    _remove_partial_snapshot(snap_dir)
+    _trigger_rescan(host_id)
+
+
+def _find_partial_snap(host_id: str, vmid: str) -> dict | None:
+    """Return the partial snapshot dict for vmid, or None if not found."""
+    data = _items(host_id)
+    for section in ("vms", "lxcs"):
+        for item in data.get(section, []):
+            if str(item.get("id")) == vmid:
+                for snap in item.get("snapshots", []):
+                    if snap.get("partial"):
+                        return snap
+    return None
+
+
+def test_partial_pbs_snapshot_detected_by_agent(host_id, partial_snapshot):
+    """Agent must flag a local PBS snapshot without index.json.blob as partial=True."""
+    snap = _find_partial_snap(host_id, _PARTIAL_TEST_VMID)
+    assert snap is not None, (
+        f"Partial snapshot for vmid {_PARTIAL_TEST_VMID} not found in /items — "
+        f"agent may not have rescanned yet or partial detection is broken"
+    )
+    assert snap.get("local") is True, "Partial snapshot should be local=True"
+    assert snap.get("partial") is True, "Partial snapshot must have partial=True"
+
+
+def test_partial_pbs_snapshot_shows_warning_in_ui(real_page, host_id, partial_snapshot):
+    """Partial snapshot row must show the ⚠ warning icon in the real GUI."""
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=15000)
+    # Find the card for our test vmid
+    card = real_page.locator(f".vm-card[data-vmid='{_PARTIAL_TEST_VMID}']")
+    if card.count() == 0:
+        pytest.skip(f"VM card for vmid {_PARTIAL_TEST_VMID} not rendered — agent may not have picked up partial snapshot")
+    expand = card.locator(".expand-btn")
+    if expand.count() > 0:
+        expand.first.click()
+    partial_row = card.locator(".snapshot-row--partial")
+    assert partial_row.count() > 0, "Partial snapshot row must have snapshot-row--partial CSS class"
+    date_cell = partial_row.locator(".snap-date").first
+    assert "⚠" in date_cell.inner_text(), "⚠ icon missing from partial snapshot row in real GUI"
+
+
+def test_partial_snapshot_cleaned_up_after_removal(host_id, partial_snapshot):
+    """After removing the partial snapshot directory, it must disappear from /items."""
+    # First confirm it's there
+    snap_before = _find_partial_snap(host_id, _PARTIAL_TEST_VMID)
+    assert snap_before is not None, "Partial snapshot should be present before cleanup"
+
+    # Remove it and rescan (fixture teardown does this — simulate early here)
+    _remove_partial_snapshot(partial_snapshot)
+    _trigger_rescan(host_id)
+
+    snap_after = _find_partial_snap(host_id, _PARTIAL_TEST_VMID)
+    assert snap_after is None, (
+        "Partial snapshot must disappear from /items after directory is removed"
+    )

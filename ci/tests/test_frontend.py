@@ -104,6 +104,34 @@ ITEMS = {
     },
 }
 
+ITEMS["partial-test"] = {
+    "storage": {"local_used": 50, "local_total": 200, "cloud_used": 0},
+    "vms": [
+        # VM 601: local partial snapshot (failed mid-backup — no index.json.blob)
+        {"id": 601, "name": "partial-local-vm", "type": "vm", "os": "linux",
+         "status": "stopped", "template": False, "in_pve": True,
+         "snapshots": [{"backup_time": 1700003000, "date": "2023-11-14 22:50:00",
+                        "age": "2h ago", "local": True, "cloud": False, "partial": True,
+                        "incremental": True, "size": "0 B",
+                        "restic_id": None, "restic_short_id": None}]},
+        # VM 602: cloud-only partial (PBS pruned it, restic covered it while it was partial)
+        {"id": 602, "name": "partial-cloud-vm", "type": "vm", "os": "linux",
+         "status": "stopped", "template": False, "in_pve": True,
+         "snapshots": [{"backup_time": 1700004000, "date": "2023-11-14 23:06:40",
+                        "age": "3h ago", "local": False, "cloud": True, "partial": True,
+                        "incremental": True, "size": "—",
+                        "restic_id": "eee555fff666", "restic_short_id": "eee555ff"}]},
+        # VM 603: normal snapshot — control case, no warning expected
+        {"id": 603, "name": "normal-vm", "type": "vm", "os": "linux",
+         "status": "running", "template": False, "in_pve": True,
+         "snapshots": [{"backup_time": 1700005000, "date": "2023-11-14 23:23:20",
+                        "age": "1h ago", "local": True, "cloud": True, "partial": False,
+                        "incremental": True, "size": "1.5 GB",
+                        "restic_id": "ggg777hhh888", "restic_short_id": "ggg777hh"}]},
+    ],
+    "lxcs": [],
+}
+
 STORAGE = {
     "home":  {"local_used": 100, "local_total": 500, "cloud_used": 50,
               "cloud_total": 2000, "cloud_quota_used": 738, "dedup_factor": 4.2},
@@ -1683,6 +1711,102 @@ def test_sync_button_opens_job_modal(snap_test_page: Page):
     assert snap_test_page.locator("#job-badge").inner_text() == "done"
     assert snap_test_page._js_errors == []
     snap_test_page.evaluate("closeJobModal()")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PARTIAL SNAPSHOT RENDERING
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.fixture
+def partial_test_page(browser, mock_server):
+    """Page loaded with the partial-test host (partial local, partial cloud, normal VMs)."""
+    orig_hosts = HOSTS[:]
+    HOSTS.append({"id": "partial-test", "label": "Partial Test"})
+    ctx = browser.new_context(base_url=mock_server)
+    _block_fonts(ctx)
+    ctx.add_init_script(_mqtt_mock_script(list(ITEMS.keys()) + ["partial-test"]))
+    pg = ctx.new_page()
+    pg._js_errors = []
+    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.goto("/")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText.includes('home-vm')",
+        timeout=10000)
+    pg.click("#nav-partial-test")
+    pg.wait_for_function(
+        "() => document.getElementById('content').innerText.includes('partial-local-vm')",
+        timeout=10000)
+    yield pg
+    ctx.close()
+    HOSTS[:] = orig_hosts
+
+def test_partial_local_snapshot_has_css_class(partial_test_page: Page):
+    """A partial local snapshot row must have the snapshot-row--partial CSS class."""
+    expand_vm_card(partial_test_page, 601)
+    row = partial_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='601']) .snapshot-row--partial"
+    )
+    assert row.count() == 1, "Partial local snapshot must have snapshot-row--partial class"
+
+def test_partial_local_snapshot_shows_warning_icon(partial_test_page: Page):
+    """A partial local snapshot must show the ⚠ warning icon in the date cell."""
+    expand_vm_card(partial_test_page, 601)
+    date_cell = partial_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='601']) .snapshot-row--partial .snap-date"
+    )
+    assert "⚠" in date_cell.inner_text(), "⚠ icon missing from partial snapshot date"
+
+def test_partial_local_snapshot_shows_incomplete_label(partial_test_page: Page):
+    """A partial local snapshot must show 'incomplete' in the age/sub-line."""
+    expand_vm_card(partial_test_page, 601)
+    age_cell = partial_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='601']) .snapshot-row--partial .snap-age"
+    )
+    assert "incomplete" in age_cell.inner_text(), "'incomplete' label missing from partial snapshot"
+
+def test_partial_cloud_only_snapshot_has_css_class(partial_test_page: Page):
+    """A partial cloud-only snapshot row must also have the snapshot-row--partial CSS class."""
+    expand_vm_card(partial_test_page, 602)
+    row = partial_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='602']) .snapshot-row--partial"
+    )
+    assert row.count() == 1, "Partial cloud-only snapshot must have snapshot-row--partial class"
+
+def test_partial_cloud_only_snapshot_shows_warning_icon(partial_test_page: Page):
+    """A partial cloud-only snapshot must show the ⚠ warning icon."""
+    expand_vm_card(partial_test_page, 602)
+    date_cell = partial_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='602']) .snapshot-row--partial .snap-date"
+    )
+    assert "⚠" in date_cell.inner_text(), "⚠ icon missing from partial cloud-only snapshot"
+
+def test_normal_snapshot_has_no_partial_class(partial_test_page: Page):
+    """A normal (non-partial) snapshot must NOT have the snapshot-row--partial class."""
+    expand_vm_card(partial_test_page, 603)
+    rows = partial_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='603']) .snapshot-row"
+    )
+    partial_rows = partial_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='603']) .snapshot-row--partial"
+    )
+    assert rows.count() == 1, "Normal VM should have exactly one snapshot row"
+    assert partial_rows.count() == 0, "Normal snapshot must not have snapshot-row--partial class"
+
+def test_normal_snapshot_has_no_warning_icon(partial_test_page: Page):
+    """A normal snapshot date cell must not contain the ⚠ icon."""
+    expand_vm_card(partial_test_page, 603)
+    date_cell = partial_test_page.locator(
+        f".vm-card:has(.backup-btn[data-vmid='603']) .snap-date"
+    )
+    assert "⚠" not in date_cell.inner_text(), "⚠ icon must not appear in non-partial snapshot"
+
+def test_partial_snapshots_have_no_js_errors(partial_test_page: Page):
+    """Rendering partial snapshots (local and cloud) must not produce JS errors."""
+    expand_vm_card(partial_test_page, 601)
+    expand_vm_card(partial_test_page, 602)
+    expand_vm_card(partial_test_page, 603)
+    assert partial_test_page._js_errors == [], \
+        f"JS errors when rendering partial snapshots: {partial_test_page._js_errors}"
 
 
 def test_restic_409_shows_friendly_alert(snap_test_page: Page):
