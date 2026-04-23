@@ -142,6 +142,8 @@
   .snapshot-row { display:grid; grid-template-columns:1fr 90px 90px 130px 260px; align-items:center; gap:16px; padding:10px 18px 10px 68px; border-bottom:1px solid var(--border); transition:background .1s; }
   .snapshot-row:last-child { border-bottom:none; }
   .snapshot-row:hover { background:color-mix(in srgb, var(--text) 4%, transparent); }
+  .snapshot-row--partial { background:color-mix(in srgb, #e05252 6%, transparent); }
+  .snapshot-row--partial:hover { background:color-mix(in srgb, #e05252 10%, transparent); }
   .col-label { font-family:'IBM Plex Mono',monospace; font-size:10px; color:var(--muted); letter-spacing:.08em; text-transform:uppercase; }
   .snap-date { font-family:'IBM Plex Mono',monospace; font-size:12px; color:var(--text); }
   .snap-age  { font-size:11px; color:var(--muted); font-family:'IBM Plex Mono',monospace; margin-top:1px; }
@@ -997,9 +999,9 @@ function renderCard(item) {
   const snapshotRows = snapCount === 0
     ? `<div class="no-backups">No backups found</div>`
     : item.snapshots.map(s => `
-        <div class="snapshot-row" data-backup-time="${s.backup_time}">
+        <div class="snapshot-row${s.partial ? ' snapshot-row--partial' : ''}" data-backup-time="${s.backup_time}">
           <div class="snap-row-top">
-            <div><div class="snap-date">${s.date}</div><div class="snap-age">${s.age}${s.restic_short_id ? ` · <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted)">${s.restic_short_id}</span>` : ''}</div></div>
+            <div><div class="snap-date">${s.partial ? '<span title="Incomplete backup (failed mid-way)" style="color:var(--danger,#e05252)">⚠ </span>' : ''}${s.date}</div><div class="snap-age">${s.age}${s.restic_short_id ? ` · <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted)">${s.restic_short_id}</span>` : ''}${s.partial ? ' · <span style="color:var(--danger,#e05252);font-size:10px">incomplete</span>' : ''}</div></div>
             <div class="snap-size">${s.size}</div>
             <div class="snap-type">${s.incremental ? 'incremental' : 'full'}</div>
             ${locBadge(s.local, s.cloud)}

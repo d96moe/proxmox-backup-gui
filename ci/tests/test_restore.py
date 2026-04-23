@@ -1398,17 +1398,23 @@ def test_no_duplicate_snapshot_rows(real_page, host_id):
 PBS_DATASTORE_PATH = "/mnt/ci-pbs"
 
 
+_PARTIAL_EXCLUDED_VMIDS = {str(SELF_VMID)}
+
+
 def _find_existing_snapshot_dir() -> tuple[str, str, str] | None:
     """Find an existing PBS snapshot directory to clone.
 
     Returns (backup_type, vmid, snap_dir_path) or None if datastore is empty.
-    Scans PBS_DATASTORE_PATH for any complete snapshot (has index.json.blob).
+    Skips SELF_VMID so we never disturb the container running the backend.
+    Prefers VM-type snapshots (faster to scan) over CT when both exist.
     """
     for btype in ("vm", "ct"):
         type_dir = os.path.join(PBS_DATASTORE_PATH, btype)
         if not os.path.isdir(type_dir):
             continue
-        for vmid in os.listdir(type_dir):
+        for vmid in sorted(os.listdir(type_dir)):
+            if vmid in _PARTIAL_EXCLUDED_VMIDS:
+                continue
             vmid_dir = os.path.join(type_dir, vmid)
             if not os.path.isdir(vmid_dir):
                 continue
@@ -1459,10 +1465,36 @@ def _remove_partial_snapshot(snap_dir: str) -> None:
     shutil.rmtree(snap_dir, ignore_errors=True)
 
 
-def _trigger_rescan(host_id: str) -> None:
-    """Ask the agent to rescan immediately via the GUI API."""
+def _rescan(host_id: str) -> None:
+    """Ask the agent to trigger an immediate PBS rescan."""
     _post(f"/api/host/{host_id}/rescan", {})
-    time.sleep(3)  # give agent time to complete scan and publish
+
+
+def _wait_for_partial_snap(host_id: str, vmid: str, timeout: int = 30) -> dict:
+    """Poll /items until a partial snapshot appears for vmid. Raises TimeoutError."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        snap = _find_partial_snap_for_vm(host_id, vmid)
+        if snap is not None:
+            return snap
+        time.sleep(2)
+    raise TimeoutError(
+        f"Partial snapshot for vmid {vmid} not detected within {timeout}s — "
+        "agent rescan may be stuck or partial detection is broken"
+    )
+
+
+def _wait_for_no_partial_snap(host_id: str, vmid: str, timeout: int = 30) -> None:
+    """Poll /items until no partial snapshot exists for vmid. Raises TimeoutError."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _find_partial_snap_for_vm(host_id, vmid) is None:
+            return
+        time.sleep(2)
+    raise TimeoutError(
+        f"Partial snapshot for vmid {vmid} still present after {timeout}s — "
+        "cleanup or rescan may have failed"
+    )
 
 
 @pytest.fixture
@@ -1471,15 +1503,23 @@ def partial_snapshot(host_id):
 
     Yields (backup_type, vmid, clone_dir). Cleans up on teardown.
     Skips the test if no suitable source snapshot exists in the datastore.
+
+    Isolation guarantees:
+    - Never clones SELF_VMID (LXC 300 running the backend).
+    - Clone timestamp is 1 day before source, so it never becomes the "latest" snap.
+    - Setup blocks until agent actually reports the partial (no sleep guessing).
+    - Teardown blocks until agent confirms removal before yielding to the next test.
     """
     result = _make_partial_snapshot()
     if result is None:
         pytest.skip("No complete PBS snapshot found to clone — datastore may be empty")
     btype, vmid, clone_dir = result
-    _trigger_rescan(host_id)
+    _rescan(host_id)
+    _wait_for_partial_snap(host_id, vmid)
     yield btype, vmid, clone_dir
     _remove_partial_snapshot(clone_dir)
-    _trigger_rescan(host_id)
+    _rescan(host_id)
+    _wait_for_no_partial_snap(host_id, vmid)
 
 
 def _find_partial_snap_for_vm(host_id: str, vmid: str) -> dict | None:
@@ -1497,11 +1537,9 @@ def _find_partial_snap_for_vm(host_id: str, vmid: str) -> dict | None:
 def test_partial_pbs_snapshot_detected_by_agent(host_id, partial_snapshot):
     """Agent must flag a cloned PBS snapshot without index.json.blob as partial=True."""
     _, vmid, _ = partial_snapshot
+    # Fixture already waited for the partial to appear; verify the fields.
     snap = _find_partial_snap_for_vm(host_id, vmid)
-    assert snap is not None, (
-        f"Partial snapshot for vmid {vmid} not found in /items — "
-        f"agent may not have rescanned yet or partial detection is broken"
-    )
+    assert snap is not None, f"Partial snapshot for vmid {vmid} disappeared after fixture setup"
     assert snap.get("local") is True, "Partial snapshot should be local=True"
     assert snap.get("partial") is True, "Partial snapshot must have partial=True"
 
@@ -1531,9 +1569,7 @@ def test_partial_snapshot_cleaned_up_after_removal(host_id, partial_snapshot):
     assert snap_before is not None, "Partial snapshot should be present before cleanup"
 
     _remove_partial_snapshot(clone_dir)
-    _trigger_rescan(host_id)
-
-    snap_after = _find_partial_snap_for_vm(host_id, vmid)
-    assert snap_after is None, (
-        "Partial snapshot must disappear from /items after directory is removed"
-    )
+    _rescan(host_id)
+    # Fixture teardown will also call _wait_for_no_partial_snap, so this test just
+    # verifies the agent eventually stops reporting the snapshot.
+    _wait_for_no_partial_snap(host_id, vmid)

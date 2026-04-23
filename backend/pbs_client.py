@@ -96,12 +96,15 @@ class PBSClient:
                 size_bytes = sum(
                     f.get("size", 0) for f in snap.get("files", [])
                 )
+                files = snap.get("files", [])
+                has_manifest = any(f.get("filename") == "index.json.blob" for f in files)
                 snapshots.append({
                     "backup_time": ts,
                     "date": dt.strftime("%Y-%m-%d %H:%M"),
                     "size_bytes": size_bytes,
                     "size": _fmt_size(size_bytes),
                     "incremental": True,  # PBS always uses incremental chunking
+                    "partial": not has_manifest,
                     "local": True,
                     "cloud": False,
                 })
