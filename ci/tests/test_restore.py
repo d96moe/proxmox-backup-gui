@@ -1549,14 +1549,13 @@ def test_partial_pbs_snapshot_shows_warning_in_ui(real_page, host_id, partial_sn
     _, vmid, _ = partial_snapshot
     real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
     real_page.click(f"#nav-{host_id}")
-    real_page.wait_for_function(
-        "() => document.querySelectorAll('.vm-card').length > 0", timeout=15000)
-    card = real_page.locator(f".vm-card[data-vmid='{vmid}']")
-    assert card.count() > 0, f"VM card for vmid {vmid} not rendered"
-    expand = card.locator(".expand-btn")
-    if expand.count() > 0:
-        expand.first.click()
-    partial_row = card.locator(".snapshot-row--partial")
+    # Wait for the specific VM card AND its expand button — proves MQTT update arrived
+    real_page.wait_for_selector(
+        f".vm-card[data-vmid='{vmid}'] .expand-btn", timeout=20000)
+    real_page.locator(f".vm-card[data-vmid='{vmid}'] .expand-btn").first.click()
+    # After expand, wait for the partial row to actually appear (not just count immediately)
+    partial_row = real_page.locator(f".vm-card[data-vmid='{vmid}'] .snapshot-row--partial")
+    partial_row.first.wait_for(timeout=10000)
     assert partial_row.count() > 0, "Partial snapshot row must have snapshot-row--partial CSS class"
     date_cell = partial_row.locator(".snap-date").first
     assert "⚠" in date_cell.inner_text(), "⚠ icon missing from partial snapshot row in real GUI"
