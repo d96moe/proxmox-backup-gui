@@ -52,6 +52,8 @@
   .status-dot.error { background:var(--red); box-shadow:0 0 6px var(--red); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
   /* User button + dropdown */
+  .settings-btn { display:flex; align-items:center; justify-content:center; width:30px; height:30px; border-radius:6px; border:1px solid var(--border2); background:transparent; color:var(--muted); cursor:pointer; transition:all .15s; font-size:15px; }
+  .settings-btn:hover { border-color:var(--accent); color:var(--accent); }
   .user-btn { display:flex; align-items:center; gap:7px; padding:5px 10px; border-radius:6px; border:1px solid var(--border2); background:transparent; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:11px; cursor:pointer; transition:all .15s; position:relative; }
   .user-btn:hover { border-color:var(--accent); color:var(--accent); }
   .user-avatar { width:20px; height:20px; border-radius:4px; background:var(--accent); display:flex; align-items:center; justify-content:center; color:#fff; font-size:10px; font-weight:600; }
@@ -63,6 +65,21 @@
   .user-menu-item { display:flex; align-items:center; gap:8px; padding:9px 14px; font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); cursor:pointer; transition:background .1s; border:none; background:none; width:100%; text-align:left; }
   .user-menu-item:hover { background:var(--border); color:var(--text); }
   .user-menu-item.danger:hover { background:color-mix(in srgb, var(--red) 12%, transparent); color:var(--red); }
+
+  /* Settings modal */
+  .settings-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:500; align-items:center; justify-content:center; }
+  .settings-overlay.open { display:flex; }
+  .settings-modal { background:var(--surface); border:1px solid var(--border2); border-radius:12px; width:520px; max-width:95vw; max-height:85vh; display:flex; flex-direction:column; box-shadow:0 16px 48px rgba(0,0,0,.5); }
+  .settings-modal-header { padding:18px 22px 14px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+  .settings-modal-title { font-size:14px; font-weight:600; color:var(--text); }
+  .settings-modal-body { overflow-y:auto; padding:20px 22px; display:flex; flex-direction:column; gap:22px; }
+  .settings-section-title { font-family:'IBM Plex Mono',monospace; font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:10px; }
+  .settings-row { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+  .settings-label { font-size:13px; color:var(--text); }
+  .settings-hint  { font-size:11px; color:var(--muted); margin-top:2px; }
+  .settings-input { width:90px; padding:5px 9px; border-radius:6px; border:1px solid var(--border2); background:var(--bg); color:var(--text); font-family:'IBM Plex Mono',monospace; font-size:12px; text-align:right; }
+  .settings-input:focus { outline:none; border-color:var(--accent); }
+  .settings-modal-footer { padding:14px 22px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:10px; }
 
   /* Layout */
   .layout { display:grid; grid-template-columns:220px 1fr; min-height:calc(100vh - 52px); min-width:820px; }
@@ -339,6 +356,7 @@
   </div>
   <div class="status-pill">
     <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme"></button>
+    <button class="settings-btn" id="settings-btn" onclick="openSettingsModal()" title="Settings">⚙</button>
     <div style="position:relative;">
       <button class="user-btn" id="user-btn" onclick="toggleUserMenu()">
         <div class="user-avatar" id="user-avatar">?</div>
@@ -352,6 +370,45 @@
         <button class="user-menu-item" onclick="openChangePwModal(); closeUserMenu()">🔑 Change password</button>
         <button class="user-menu-item danger" onclick="doLogout()">↩ Sign out</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Settings modal ──────────────────────────────────────────────── -->
+<div class="settings-overlay" id="settings-overlay" onclick="if(event.target===this)closeSettingsModal()">
+  <div class="settings-modal">
+    <div class="settings-modal-header">
+      <span class="settings-modal-title">Settings</span>
+      <button class="modal-x" onclick="closeSettingsModal()">✕</button>
+    </div>
+    <div class="settings-modal-body" id="settings-modal-body">
+
+      <div>
+        <div class="settings-section-title">Restic — Cloud Retention</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div class="settings-row">
+            <div><div class="settings-label">Keep last</div><div class="settings-hint">Always keep this many snapshots</div></div>
+            <input class="settings-input" id="s-keep-last" type="number" min="0" placeholder="—">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Keep daily</div><div class="settings-hint">One snapshot per day, N days back</div></div>
+            <input class="settings-input" id="s-keep-daily" type="number" min="0" placeholder="—">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Keep weekly</div><div class="settings-hint">One snapshot per week, N weeks back</div></div>
+            <input class="settings-input" id="s-keep-weekly" type="number" min="0" placeholder="—">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Keep monthly</div><div class="settings-hint">One snapshot per month, N months back</div></div>
+            <input class="settings-input" id="s-keep-monthly" type="number" min="0" placeholder="—">
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="settings-modal-footer">
+      <button class="btn-secondary" onclick="closeSettingsModal()">Cancel</button>
+      <button class="btn-primary" id="settings-save-btn" onclick="saveSettings()">Save</button>
     </div>
   </div>
 </div>
@@ -1801,6 +1858,65 @@ async function loadCurrentUser() {
     document.getElementById('user-menu-role').textContent = _currentUser.role;
     document.getElementById('changepw-username-label').textContent = _currentUser.username;
   } catch (e) { /* ignore */ }
+}
+
+// ── Settings modal ────────────────────────────────────────────────────────────
+async function openSettingsModal() {
+  // Load current values from the active host's agent
+  const overlay = document.getElementById('settings-overlay');
+  const body    = document.getElementById('settings-modal-body');
+  overlay.classList.add('open');
+  if (!currentHost) return;
+  try {
+    const r = await fetch(`${API_BASE}/api/host/${currentHost}/settings`);
+    if (r.ok) {
+      const d = await r.json();
+      const retention = d.restic_retention || {};
+      document.getElementById('s-keep-last').value    = retention['keep-last']    ?? '';
+      document.getElementById('s-keep-daily').value   = retention['keep-daily']   ?? '';
+      document.getElementById('s-keep-weekly').value  = retention['keep-weekly']  ?? '';
+      document.getElementById('s-keep-monthly').value = retention['keep-monthly'] ?? '';
+    }
+  } catch (_) {}
+}
+
+function closeSettingsModal() {
+  document.getElementById('settings-overlay').classList.remove('open');
+}
+
+async function saveSettings() {
+  if (!currentHost) return;
+  const btn = document.getElementById('settings-save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  const retention = {};
+  const fields = {
+    'keep-last':    's-keep-last',
+    'keep-daily':   's-keep-daily',
+    'keep-weekly':  's-keep-weekly',
+    'keep-monthly': 's-keep-monthly',
+  };
+  for (const [key, id] of Object.entries(fields)) {
+    const v = document.getElementById(id).value.trim();
+    if (v !== '') retention[key] = parseInt(v, 10);
+  }
+  try {
+    const r = await fetch(`${API_BASE}/api/host/${currentHost}/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ restic_retention: retention }),
+    });
+    if (r.ok) {
+      closeSettingsModal();
+    } else {
+      const d = await r.json().catch(() => ({}));
+      alert(d.error || 'Failed to save settings');
+    }
+  } catch (e) {
+    alert('Network error');
+  }
+  btn.disabled = false;
+  btn.textContent = 'Save';
 }
 
 function toggleUserMenu() {
