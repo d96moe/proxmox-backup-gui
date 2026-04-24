@@ -780,15 +780,15 @@ function selectHost(id) {
   });
   const host = hosts.find(h => h.id === id);
   document.getElementById('hostname-label').textContent = host?.label ?? id;
-  // Clear MQTT DataStore so stale VM cards from the previous host don't persist
-  MQTTBus.clearStore();
-  // Re-subscribe so broker re-delivers all retained messages for the new host
-  MQTTBus.resubscribe();
-  // Clear stale content immediately
-  document.getElementById('content').innerHTML = MQTTBus.isEnabled()
-    ? '<div class="state-msg">Connecting…</div>'
-    : '<div class="state-msg">Loading…</div>';
-  document.getElementById('page-subtitle').textContent = '—';
+  // Show cached cards for the new host immediately (if available).
+  // resubscribe() will replay retained MQTT messages that update cards in-place.
+  const hadCache = MQTTBus.renderFromCache(id);
+  if (!hadCache) {
+    document.getElementById('content').innerHTML = MQTTBus.isEnabled()
+      ? '<div class="state-msg">Connecting…</div>'
+      : '<div class="state-msg">Loading…</div>';
+    document.getElementById('page-subtitle').textContent = '—';
+  }
   document.getElementById('local-usage').textContent = '— GB';
   document.getElementById('cloud-usage').textContent = '— GB';
   document.getElementById('local-bar').style.width = '0%';
@@ -800,8 +800,8 @@ function selectHost(id) {
   document.getElementById('tab-cloud').classList.remove('active');
   document.getElementById('tab-content-backups').style.display = '';
   document.getElementById('tab-content-cloud').style.display = 'none';
-  loadData(_abortController.signal);
-  // storage / info / schedules come via MQTT retained messages on connect
+  // Switch DataStore + replay retained messages — cards update in-place as they arrive.
+  MQTTBus.resubscribe();
 }
 
 // ─────────────────────────────────────────────
@@ -1910,9 +1910,11 @@ const MQTTBus = (() => {
   let _pingTimer   = null;
   let _reconnTimer = null;
 
-  // ── DataStore: accumulates per-VM state from retained MQTT messages ────────
-  // _ds[vmid] = { meta: {...}, pbs: {snapshots:[...]}, restic: {snapshots:[...]} }
-  const _ds = {};
+  // ── DataStore: per-host cache of VM state from retained MQTT messages ───────
+  // _dsPerHost[hostId][vmid] = { meta:{}, pbs:{}, restic:{} }
+  // _ds is a live reference to the active host's store — all internal code uses _ds.
+  const _dsPerHost = {};
+  let   _ds = {};
 
   function _human_age(ts) {
     const secs = Math.floor(Date.now() / 1000) - ts;
@@ -2054,13 +2056,28 @@ const MQTTBus = (() => {
     if (parts[2] === 'vms' && parts[3] === 'index') {
       try {
         const vmids = JSON.parse(msg);
+        // Prune cards for VMIDs no longer reported by the agent (VM deleted).
+        const current = new Set(vmids.map(String));
+        Object.keys(_ds).forEach(vmid => {
+          if (!current.has(String(vmid))) {
+            delete _ds[vmid];
+            const card = document.getElementById(`vm-card-${vmid}`);
+            if (card) {
+              const grid = card.parentElement;
+              card.remove();
+              const count = document.getElementById(`${grid?.id}-count`);
+              if (count) count.textContent = grid.children.length;
+              if (grid?.children.length === 0) grid.closest('[id$="-wrapper"]')?.remove();
+            }
+          }
+        });
         if (vmids.length === 0) {
           const content = document.getElementById('content');
           if (content?.querySelector('.state-msg')) {
             content.innerHTML = '<div class="state-msg">No VMs or containers found.</div>';
           }
-          _updateSubtitle();
         }
+        _updateSubtitle();
       } catch (_) {}
       return;
     }
@@ -2205,13 +2222,15 @@ const MQTTBus = (() => {
       console.info('MQTT-WS connected');
       _enabled = true;
       setStatus('ok', 'live');
-      // Clear stale data so retained messages from replay build a fresh list.
-      Object.keys(_ds).forEach(k => delete _ds[k]);
+      // Full WS reconnect: current host's cache is stale after a disconnect — clear it.
       if (currentHost) {
+        _dsPerHost[currentHost] = {};
+        _ds = _dsPerHost[currentHost];
         document.getElementById('content').innerHTML = '<div class="state-msg">Connecting…</div>';
         document.getElementById('page-subtitle').textContent = '—';
-        // Ask the proxy to replay all retained messages for this host.
         ws.send(JSON.stringify({ type: 'replay', prefix: `${_prefix}/${currentHost}` }));
+      } else {
+        _ds = {};
       }
       // Keepalive: ping every 20 s
       _pingTimer = setInterval(() => {
@@ -2243,13 +2262,25 @@ const MQTTBus = (() => {
 
   // Request the proxy to replay retained messages for the newly selected host.
   // Called by the host-switcher after updating currentHost.
+  // Does NOT clear the cache — renderFromCache() already rendered stale data;
+  // incoming MQTT messages will update cards in-place.
   function resubscribe() {
     if (!_ws || _ws.readyState !== WebSocket.OPEN || !currentHost) return;
-    // Clear stale data so we don't keep cards from the previous host.
-    Object.keys(_ds).forEach(k => delete _ds[k]);
-    document.getElementById('content').innerHTML = '<div class="state-msg">Connecting…</div>';
-    document.getElementById('page-subtitle').textContent = '—';
+    if (!_dsPerHost[currentHost]) _dsPerHost[currentHost] = {};
+    _ds = _dsPerHost[currentHost];
     _ws.send(JSON.stringify({ type: 'replay', prefix: `${_prefix}/${currentHost}` }));
+  }
+
+  // Render all cached cards for hostId immediately. Returns true if cache existed.
+  function renderFromCache(hostId) {
+    const store = _dsPerHost[hostId];
+    if (!store || Object.keys(store).length === 0) return false;
+    _ds = store;
+    const content = document.getElementById('content');
+    if (content) content.innerHTML = '';
+    Object.keys(store).forEach(vmid => _upsertCard(vmid));
+    _updateSubtitle();
+    return true;
   }
 
   function rescan(host) {
@@ -2287,7 +2318,7 @@ const MQTTBus = (() => {
   function clearStore() { Object.keys(_ds).forEach(k => delete _ds[k]); }
   function getDS() { return _ds; }
 
-  return { start, rescan, resubscribe, isEnabled, clearStore, getDS, triggerAction };
+  return { start, rescan, resubscribe, renderFromCache, isEnabled, clearStore, getDS, triggerAction };
 })();
 
 // ─────────────────────────────────────────────
