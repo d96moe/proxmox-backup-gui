@@ -221,7 +221,7 @@ The GUI uses `rclone lsjson locks/` to check if a restic backup is in progress b
 ## Roadmap
 
 - **Delete backup (cloud)** — guided workflow to remove a specific VM's backup from the restic repo: restore full datastore → delete from PBS → re-backup → forget old snapshot. Expensive but correct given the whole-datastore restic architecture.
-- **Restic log visibility** — nightly restic (cron-triggered) logs not yet surfaced in the GUI; PBS operations are visible but restic runs outside the agent task system.
+- **Restic nightly log streaming** — the sidebar shows a "Restic backup running" badge when a nightly restic job is active, and clicking it reopens the last GUI-triggered job modal. However, cron/timer-triggered restic runs have no log stream in the GUI (restic has no task API like PBS). Planned: agent tails a known journal/log file and streams lines via SSE.
 - **Host/connection settings** — PBS credentials, restic repo/password, agent URL editable in GUI (currently requires editing config files on the host).
 
 ## Related
