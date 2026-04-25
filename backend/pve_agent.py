@@ -2096,6 +2096,21 @@ def pbs_task_stream(upid: str):
 # Routes — settings
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _pvesh_set_backup_vm_selection(job_id: str, mode: str, vmids: list[int]) -> None:
+    """Set backup VM selection via pvesh — fallback for PVE versions that drop HTTP PUT."""
+    ids = ",".join(str(v) for v in vmids)
+    cmd = ["pvesh", "set", f"/cluster/backup/{job_id}"]
+    if mode == "include":
+        cmd += ["--all", "0"]
+        if ids:
+            cmd += ["--vmid", ids]
+    else:
+        cmd += ["--all", "1"]
+        if ids:
+            cmd += ["--exclude", ids]
+    subprocess.run(cmd, check=True, timeout=15)
+
+
 @app.route("/settings")
 def settings_get():
     res = LocalResticClient(_cfg)
@@ -2179,7 +2194,12 @@ def settings_post():
             jobs2 = pve2.get_backup_schedules()
             if not jobs2:
                 return jsonify({"error": "no PBS backup job found"}), 400
-            pve2.set_backup_vm_selection(jobs2[0]["id"], mode, vmids)
+            job_id2 = jobs2[0]["id"]
+            try:
+                pve2.set_backup_vm_selection(job_id2, mode, vmids)
+            except Exception:
+                # Fall back to pvesh for PVE versions that drop HTTP PUT connections
+                _pvesh_set_backup_vm_selection(job_id2, mode, vmids)
         except Exception as exc:
             errors.append(f"vm_selection: {exc}")
 
