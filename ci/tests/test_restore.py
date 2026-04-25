@@ -1890,6 +1890,211 @@ def test_settings_api_schedule_update_does_not_change_retention(host_id, origina
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SETTINGS — PBS prune policy
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PBS_PRUNE_KEYS = ("keep-last", "keep-hourly", "keep-daily", "keep-weekly", "keep-monthly", "keep-yearly")
+
+
+def _pbs_prune_job_live(job_id: str) -> dict:
+    """Read a PBS prune job dict from proxmox-backup-manager on the PVE host."""
+    import json as _json
+    out = _ssh_pve_output(
+        "proxmox-backup-manager", "prune-job", "list", "--output-format", "json",
+    )
+    jobs = _json.loads(out or "[]")
+    return next((j for j in jobs if j.get("id") == job_id), {})
+
+
+@pytest.fixture
+def original_pbs_prune(host_id):
+    """Save PBS prune retention before test and restore after."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url — settings endpoint not available")
+    data = _get(f"/api/host/{host_id}/settings")
+    pp = data.get("pbs_prune")
+    if not pp:
+        pytest.skip("No PBS prune job configured for this host's datastore")
+    yield pp  # {"id": ..., "retention": {...}}
+    try:
+        _post(f"/api/host/{host_id}/settings", {"pbs_prune": pp})
+    except Exception:
+        pass
+
+
+def test_settings_api_returns_pbs_prune(host_id, original_pbs_prune):
+    """GET /settings must include pbs_prune with id and retention."""
+    data = _get(f"/api/host/{host_id}/settings")
+    assert "pbs_prune" in data, f"'pbs_prune' missing from settings: {data}"
+    pp = data["pbs_prune"]
+    assert isinstance(pp, dict), f"pbs_prune must be dict, got {type(pp)}"
+    assert "id" in pp, f"pbs_prune missing 'id': {pp}"
+    assert isinstance(pp.get("retention"), dict), f"pbs_prune missing 'retention' dict: {pp}"
+
+
+def test_settings_api_pbs_prune_retention_values_are_integers(host_id, original_pbs_prune):
+    """pbs_prune.retention values must be integers."""
+    retention = _get(f"/api/host/{host_id}/settings")["pbs_prune"]["retention"]
+    for key, val in retention.items():
+        assert isinstance(val, int), \
+            f"pbs_prune.retention[{key!r}] must be int, got {type(val).__name__}: {val!r}"
+
+
+def test_settings_api_pbs_prune_roundtrip(host_id, original_pbs_prune):
+    """POST pbs_prune then GET must return the same retention."""
+    job_id = original_pbs_prune["id"]
+    new_ret = {"keep-last": 2, "keep-daily": 5, "keep-weekly": 3}
+    _post(f"/api/host/{host_id}/settings", {"pbs_prune": {"id": job_id, "retention": new_ret}})
+    after = _get(f"/api/host/{host_id}/settings")["pbs_prune"]["retention"]
+    for key, expected in new_ret.items():
+        assert after.get(key) == expected, \
+            f"pbs_prune.retention[{key!r}] expected {expected}, got {after.get(key)!r}"
+
+
+def test_settings_pbs_prune_written_to_pbs(host_id, original_pbs_prune):
+    """POST pbs_prune must be reflected in the actual PBS prune job."""
+    job_id = original_pbs_prune["id"]
+    new_ret = {"keep-last": 3, "keep-weekly": 2}
+    _post(f"/api/host/{host_id}/settings", {"pbs_prune": {"id": job_id, "retention": new_ret}})
+    live = _pbs_prune_job_live(job_id)
+    assert live.get("keep-last") == 3, \
+        f"PBS prune job keep-last: expected 3, got {live.get('keep-last')!r}"
+    assert live.get("keep-weekly") == 2, \
+        f"PBS prune job keep-weekly: expected 2, got {live.get('keep-weekly')!r}"
+
+
+def test_settings_pbs_prune_clear_key_removes_from_pbs(host_id, original_pbs_prune):
+    """Omitting a key from retention must remove it from the PBS prune job."""
+    job_id = original_pbs_prune["id"]
+    # Set keep-daily explicitly
+    _post(f"/api/host/{host_id}/settings", {
+        "pbs_prune": {"id": job_id, "retention": {"keep-last": 1, "keep-daily": 7}}
+    })
+    # Now save without keep-daily — should be deleted from PBS
+    _post(f"/api/host/{host_id}/settings", {
+        "pbs_prune": {"id": job_id, "retention": {"keep-last": 1}}
+    })
+    live = _pbs_prune_job_live(job_id)
+    assert "keep-daily" not in live, \
+        f"keep-daily should be removed from PBS prune job, but got: {live}"
+
+
+def test_settings_api_pbs_prune_invalid_body_returns_400(host_id, original_pbs_prune):
+    """POST pbs_prune without required fields must return 400."""
+    import urllib.error
+    try:
+        _post(f"/api/host/{host_id}/settings", {"pbs_prune": {"id": "x"}})
+        pytest.fail("Expected 400 for missing retention")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, f"Expected 400, got {e.code}"
+
+
+def test_settings_pbs_prune_does_not_change_retention(host_id, original_pbs_prune, original_retention):
+    """POST pbs_prune must leave restic retention unchanged."""
+    job_id = original_pbs_prune["id"]
+    ret_before = _get(f"/api/host/{host_id}/settings")["retention"]
+    _post(f"/api/host/{host_id}/settings", {
+        "pbs_prune": {"id": job_id, "retention": {"keep-last": 2}}
+    })
+    ret_after = _get(f"/api/host/{host_id}/settings")["retention"]
+    assert ret_before == ret_after, \
+        f"Restic retention changed after pbs_prune update: {ret_before} → {ret_after}"
+
+
+def test_settings_pbs_prune_unknown_job_id_returns_500(host_id, original_pbs_prune):
+    """POST pbs_prune with a non-existent job id must return 500."""
+    import urllib.error
+    try:
+        _post(f"/api/host/{host_id}/settings", {
+            "pbs_prune": {"id": "no-such-job-xyz", "retention": {"keep-last": 1}}
+        })
+        pytest.fail("Expected 500 for non-existent pbs prune job id")
+    except urllib.error.HTTPError as e:
+        assert e.code == 500, f"Expected 500, got {e.code}"
+
+
+def test_settings_pbs_prune_zero_value_treated_as_unset(host_id, original_pbs_prune):
+    """Retention value of 0 must be treated the same as omitted (field cleared in PBS)."""
+    job_id = original_pbs_prune["id"]
+    # First set keep-weekly explicitly
+    _post(f"/api/host/{host_id}/settings", {
+        "pbs_prune": {"id": job_id, "retention": {"keep-last": 1, "keep-weekly": 4}}
+    })
+    # Then send 0 for keep-weekly — should be treated as "clear"
+    _post(f"/api/host/{host_id}/settings", {
+        "pbs_prune": {"id": job_id, "retention": {"keep-last": 1, "keep-weekly": 0}}
+    })
+    after = _get(f"/api/host/{host_id}/settings")["pbs_prune"]["retention"]
+    assert "keep-weekly" not in after or after.get("keep-weekly") == 0, \
+        f"keep-weekly=0 should clear the field, got: {after}"
+    live = _pbs_prune_job_live(job_id)
+    assert not live.get("keep-weekly"), \
+        f"PBS prune job should not have keep-weekly after setting 0, got: {live.get('keep-weekly')}"
+
+
+def test_settings_pbs_prune_non_integer_retention_returns_400(host_id, original_pbs_prune):
+    """POST pbs_prune with string retention values must return 400."""
+    import urllib.error
+    try:
+        _post(f"/api/host/{host_id}/settings", {
+            "pbs_prune": {"id": original_pbs_prune["id"], "retention": {"keep-last": "many"}}
+        })
+        pytest.fail("Expected 400 for non-integer retention value")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, f"Expected 400, got {e.code}"
+
+
+def test_settings_pbs_prune_green_path(host_id, original_pbs_prune):
+    """Full end-to-end green path: POST → GET returns same → PBS live matches."""
+    job_id = original_pbs_prune["id"]
+    target = {"keep-last": 3, "keep-daily": 7, "keep-weekly": 4, "keep-monthly": 2}
+
+    # POST
+    resp = _post(f"/api/host/{host_id}/settings", {"pbs_prune": {"id": job_id, "retention": target}})
+    assert "pbs_prune" in resp, f"POST response missing pbs_prune: {resp}"
+
+    # GET roundtrip
+    after_api = _get(f"/api/host/{host_id}/settings")["pbs_prune"]["retention"]
+    for key, expected in target.items():
+        assert after_api.get(key) == expected, \
+            f"API GET: pbs_prune.retention[{key!r}] expected {expected}, got {after_api.get(key)!r}"
+
+    # Live PBS verification
+    live = _pbs_prune_job_live(job_id)
+    for key, expected in target.items():
+        assert live.get(key) == expected, \
+            f"PBS live: {key!r} expected {expected}, got {live.get(key)!r}"
+
+
+def test_settings_pbs_prune_empty_retention_clears_all_keys(host_id, original_pbs_prune):
+    """POST pbs_prune with empty retention dict must clear all keep-* fields in PBS."""
+    job_id = original_pbs_prune["id"]
+    # First ensure some values are set
+    _post(f"/api/host/{host_id}/settings", {
+        "pbs_prune": {"id": job_id, "retention": {"keep-last": 1, "keep-daily": 3}}
+    })
+    # Clear everything
+    _post(f"/api/host/{host_id}/settings", {
+        "pbs_prune": {"id": job_id, "retention": {}}
+    })
+    live = _pbs_prune_job_live(job_id)
+    for key in _PBS_PRUNE_KEYS:
+        assert key not in live, \
+            f"PBS prune job should have no {key!r} after empty retention, got: {live.get(key)}"
+
+
+def test_settings_pbs_prune_all_keys_roundtrip(host_id, original_pbs_prune):
+    """All keep-* fields written and read back correctly."""
+    job_id = original_pbs_prune["id"]
+    full_ret = {"keep-last": 2, "keep-daily": 7, "keep-weekly": 4, "keep-monthly": 3, "keep-yearly": 1}
+    _post(f"/api/host/{host_id}/settings", {"pbs_prune": {"id": job_id, "retention": full_ret}})
+    after = _get(f"/api/host/{host_id}/settings")["pbs_prune"]["retention"]
+    for key, expected in full_ret.items():
+        assert after.get(key) == expected, \
+            f"pbs_prune.retention[{key!r}]: expected {expected}, got {after.get(key)!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SETTINGS — VM/LXC backup selection (mode + vmids)
 # ─────────────────────────────────────────────────────────────────────────────
 

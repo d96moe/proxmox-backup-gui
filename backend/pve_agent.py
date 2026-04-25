@@ -2045,14 +2045,22 @@ def settings_get():
     res = LocalResticClient(_cfg)
     pve = PVEClient(_host())
     pbs_jobs = pve.get_backup_schedules()
-    pbs_job   = pbs_jobs[0] if pbs_jobs else None
+    pbs_job      = pbs_jobs[0] if pbs_jobs else None
     pbs_schedule = {"id": pbs_job["id"], "schedule": pbs_job["schedule"]} if pbs_job else None
     vm_selection = pve.get_backup_vm_selection(pbs_job["id"]) if pbs_job else {"mode": "exclude", "vmids": []}
+    prune_jobs   = res.get_pbs_prune_jobs()
+    cfg          = _cfg
+    pbs_prune    = next(
+        ({"id": j["id"], "retention": {k: j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
+         for j in prune_jobs if j.get("store") == (cfg.pbs_datastore if cfg else "")),
+        None,
+    )
     return jsonify({
         "retention":       res.get_retention(),
         "pbs_schedule":    pbs_schedule,
         "restic_schedule": res.get_restic_schedule(),
         "vm_selection":    vm_selection,
+        "pbs_prune":       pbs_prune,
     })
 
 
@@ -2089,6 +2097,20 @@ def settings_post():
         except Exception as exc:
             errors.append(f"pbs_schedule: {exc}")
 
+    if "pbs_prune" in body:
+        pp = body["pbs_prune"]
+        job_id    = pp.get("id")        if isinstance(pp, dict) else None
+        retention = pp.get("retention") if isinstance(pp, dict) else None
+        if not job_id or not isinstance(retention, dict):
+            return jsonify({"error": "pbs_prune requires {id, retention: dict}"}), 400
+        bad = {k: v for k, v in retention.items() if not isinstance(v, int)}
+        if bad:
+            return jsonify({"error": f"pbs_prune retention values must be integers: {bad}"}), 400
+        try:
+            res.set_pbs_prune_job(job_id, retention)
+        except Exception as exc:
+            errors.append(f"pbs_prune: {exc}")
+
     if "vm_selection" in body:
         sel = body["vm_selection"]
         mode  = sel.get("mode")  if isinstance(sel, dict) else None
@@ -2117,11 +2139,19 @@ def settings_post():
     pbs_job2   = pbs_jobs2[0] if pbs_jobs2 else None
     pbs_sched2 = {"id": pbs_job2["id"], "schedule": pbs_job2["schedule"]} if pbs_job2 else None
     vm_sel2    = pve.get_backup_vm_selection(pbs_job2["id"]) if pbs_job2 else {"mode": "exclude", "vmids": []}
+    prune_jobs2 = res.get_pbs_prune_jobs()
+    cfg2        = _cfg
+    pbs_prune2  = next(
+        ({"id": j["id"], "retention": {k: j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
+         for j in prune_jobs2 if j.get("store") == (cfg2.pbs_datastore if cfg2 else "")),
+        None,
+    )
     return jsonify({
         "retention":       res.get_retention(),
         "pbs_schedule":    pbs_sched2,
         "restic_schedule": res.get_restic_schedule(),
         "vm_selection":    vm_sel2,
+        "pbs_prune":       pbs_prune2,
     })
 
 

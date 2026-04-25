@@ -462,6 +462,22 @@ class ResticClient:
         except Exception:
             return []
 
+    _PBS_PRUNE_KEYS = ("keep-last", "keep-hourly", "keep-daily", "keep-weekly", "keep-monthly", "keep-yearly")
+
+    def set_pbs_prune_job(self, job_id: str, retention: dict) -> None:
+        """Update keep-* fields of a PBS prune job via proxmox-backup-manager on PVE host."""
+        parts = ["proxmox-backup-manager", "prune-job", "update", job_id]
+        to_delete = []
+        for key in self._PBS_PRUNE_KEYS:
+            val = retention.get(key)
+            if val:
+                parts += [f"--{key}", str(int(val))]
+            else:
+                to_delete.append(key)
+        if to_delete:
+            parts += ["--delete", ",".join(to_delete)]
+        self._ssh_run(" ".join(parts), timeout=15)
+
     def get_version(self) -> str:
         try:
             stdout = self._ssh_run("restic version", timeout=10)
