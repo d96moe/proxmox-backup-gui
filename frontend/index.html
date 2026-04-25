@@ -445,6 +445,7 @@
         <div class="job-indicator-dot"></div>
         <span id="global-job-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
       </div>
+      <div id="pbs-task-cards"></div>
     </div>
   </div>
 
@@ -852,6 +853,8 @@ function selectHost(id) {
   document.getElementById('cloud-bar').style.width = '0%';
   document.getElementById('pbs-dedup').textContent = '—';
   _schedules = null;
+  _pbsTasks = [];
+  renderPbsTasks();
   _activeTab = 'backups';
   document.getElementById('tab-backups').classList.add('active');
   document.getElementById('tab-cloud').classList.remove('active');
@@ -872,6 +875,91 @@ function loadData() {
 
 // loadStorage and loadInfo are replaced by MQTT topics proxmox/<host>/storage and /info.
 // _applyStorage() and _applyInfo() are called by MQTTBus._onMessage.
+
+// ─────────────────────────────────────────────
+// PBS tasks — running tasks from MQTT proxmox/<host>/pbs/tasks/running
+// ─────────────────────────────────────────────
+let _pbsTasks = [];
+
+const _PBS_TASK_LABELS = {
+  backup:            'PBS backup',
+  prune:             'PBS prune',
+  prunejob:          'PBS prune job',
+  garbage_collection:'PBS garbage collection',
+  verify:            'PBS verify',
+};
+
+function _pbsTaskTitle(t) {
+  const base = _PBS_TASK_LABELS[t.worker_type] || t.worker_type;
+  return t.worker_id ? `${base} — ${t.worker_id}` : base;
+}
+
+function renderPbsTasks() {
+  const section  = document.getElementById('global-job-section');
+  const container = document.getElementById('pbs-task-cards');
+  if (!container) return;
+  container.innerHTML = '';
+  // If a GUI op is already tracking a specific VMID, hide PBS tasks for that
+  // VMID (they are sub-tasks of the GUI op — showing both would be duplicates).
+  const guiVmids = new Set(
+    Object.keys(_activeJobs).map(k => String(k)).filter(k => !k.startsWith('_noid_'))
+  );
+  const GUI_TRIGGERED = new Set(['backup', 'prune']);
+  for (const t of _pbsTasks) {
+    if (GUI_TRIGGERED.has(t.worker_type) && guiVmids.size > 0) {
+      // Parse VMID from worker_id e.g. "local-store:vm/100" or "local-store::vm/100"
+      const m = (t.worker_id || '').match(/\/(\d+)$/);
+      if (m && guiVmids.has(m[1])) continue;
+    }
+    const title = _pbsTaskTitle(t);
+    const div = document.createElement('div');
+    div.className = 'job-indicator';
+    div.style.cssText = 'width:100%;box-sizing:border-box;margin-top:4px;cursor:pointer';
+    div.title = t.upid;
+    div.innerHTML = `<div class="job-indicator-dot"></div><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</span>`;
+    div.onclick = () => openPbsTaskModal(t.upid, title);
+    container.appendChild(div);
+  }
+  _updateGlobalJobIndicator();
+}
+
+function openPbsTaskModal(upid, title) {
+  const modal = document.getElementById('job-modal');
+  document.getElementById('job-title').textContent = title;
+  document.getElementById('job-subtitle').textContent = '';
+  document.getElementById('job-badge').textContent = 'running';
+  document.getElementById('job-badge').className = 'job-status-badge running';
+  document.getElementById('job-progress').style.display = 'none';
+  document.getElementById('job-close-btn').disabled = true;
+  const logEl = document.getElementById('job-log');
+  logEl.innerHTML = '';
+  modal.classList.add('open');
+
+  if (_jobPollInterval) { clearInterval(_jobPollInterval); _jobPollInterval = null; }
+
+  const es = new EventSource(`${API_BASE}/api/host/${currentHost}/pbs/tasks/${encodeURIComponent(upid)}/stream`);
+  es.onmessage = e => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data && data.done) {
+        es.close();
+        document.getElementById('job-badge').textContent = 'done';
+        document.getElementById('job-badge').className = 'job-status-badge ok';
+        document.getElementById('job-close-btn').disabled = false;
+        return;
+      }
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.textContent = typeof data === 'string' ? data : JSON.stringify(data);
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    } catch (_) {}
+  };
+  es.onerror = () => {
+    es.close();
+    document.getElementById('job-close-btn').disabled = false;
+  };
+}
 
 // ─────────────────────────────────────────────
 // Schedules — data arrives via MQTT proxmox/<host>/schedules (retained)
@@ -1305,8 +1393,12 @@ function _reopenLastJob() {
 function _updateGlobalJobIndicator() {
   const section = document.getElementById('global-job-section');
   const label = document.getElementById('global-job-label');
-  const anyRunning = Object.keys(_activeJobs).length > 0;
+  const anyGuiJobs = Object.keys(_activeJobs).length > 0;
+  const anyPbsTasks = (_pbsTasks || []).length > 0;
+  const anyRunning = anyGuiJobs || anyPbsTasks;
   if (section) section.style.display = anyRunning ? '' : 'none';
+  const indicator = document.getElementById('global-job-indicator');
+  if (indicator) indicator.style.display = anyGuiJobs ? '' : 'none';
   if (label && _lastJob) label.textContent = _lastJob.title;
 }
 
@@ -2250,6 +2342,14 @@ const MQTTBus = (() => {
     // proxmox/<host>/info — footer version strings
     if (parts[2] === 'info' && parts.length === 3) {
       try { _applyInfo(JSON.parse(msg)); } catch (_) {}
+      return;
+    }
+    // proxmox/<host>/pbs/tasks/running — PBS task cards in sidebar
+    if (parts[2] === 'pbs' && parts[3] === 'tasks' && parts[4] === 'running') {
+      try {
+        _pbsTasks = JSON.parse(msg) || [];
+        renderPbsTasks();
+      } catch (_) {}
       return;
     }
     // proxmox/<host>/schedules — sidebar schedule section

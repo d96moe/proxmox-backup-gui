@@ -1574,3 +1574,588 @@ def test_partial_snapshot_cleaned_up_after_removal(host_id, partial_snapshot):
     # Fixture teardown will also call _wait_for_no_partial_snap, so this test just
     # verifies the agent eventually stops reporting the snapshot.
     _wait_for_no_partial_snap(host_id, vmid)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SETTINGS — GET/POST /api/host/<id>/settings (restic retention)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _host_has_agent(host_id: str) -> bool:
+    """Return True if the host has an agent_url configured."""
+    hosts = _get("/api/hosts")
+    for h in hosts:
+        if h["id"] == host_id:
+            return bool(h.get("agent_url"))
+    return False
+
+
+@pytest.fixture
+def original_retention(host_id):
+    """Save retention before test and restore it after regardless of outcome."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url — settings endpoint not available")
+    original = _get(f"/api/host/{host_id}/settings").get("retention", {})
+    yield original
+    # Restore — ignore errors (e.g. if the test itself caused a partial write)
+    try:
+        _post(f"/api/host/{host_id}/settings", {"retention": original})
+    except Exception:
+        pass
+
+
+def test_settings_api_returns_retention_dict(host_id, original_retention):
+    """GET /settings must return {retention: dict}."""
+    data = _get(f"/api/host/{host_id}/settings")
+    assert "retention" in data, f"'retention' key missing from settings response: {data}"
+    assert isinstance(data["retention"], dict), \
+        f"retention must be a dict, got {type(data['retention']).__name__}"
+
+
+def test_settings_api_retention_values_are_integers(host_id, original_retention):
+    """All retention values must be integers (never strings or floats)."""
+    retention = _get(f"/api/host/{host_id}/settings")["retention"]
+    for key, val in retention.items():
+        assert isinstance(val, int), \
+            f"retention[{key!r}] must be int, got {type(val).__name__}: {val!r}"
+
+
+def test_settings_api_save_and_reload(host_id, original_retention):
+    """POST then GET must return the values that were saved."""
+    payload = {
+        "keep-last":    2,
+        "keep-daily":   5,
+        "keep-weekly":  2,
+        "keep-monthly": 2,
+    }
+    resp = _post(f"/api/host/{host_id}/settings", {"retention": payload})
+    assert "retention" in resp, f"POST /settings did not return retention: {resp}"
+    reloaded = _get(f"/api/host/{host_id}/settings")["retention"]
+    for key, expected in payload.items():
+        assert reloaded.get(key) == expected, \
+            f"retention[{key!r}] expected {expected}, got {reloaded.get(key)!r} after save"
+
+
+def test_settings_api_partial_update_preserves_other_keys(host_id, original_retention):
+    """POST with a subset of keys must not delete the other retention keys."""
+    # First write a known full state
+    full = {"keep-last": 3, "keep-daily": 7, "keep-weekly": 2, "keep-monthly": 2}
+    _post(f"/api/host/{host_id}/settings", {"retention": full})
+
+    # Now update only keep-weekly
+    _post(f"/api/host/{host_id}/settings", {"retention": {"keep-weekly": 4}})
+    after = _get(f"/api/host/{host_id}/settings")["retention"]
+
+    assert after.get("keep-weekly") == 4, \
+        f"keep-weekly not updated: {after.get('keep-weekly')!r}"
+    assert after.get("keep-last") == 3, \
+        f"keep-last was unexpectedly changed: {after.get('keep-last')!r}"
+    assert after.get("keep-daily") == 7, \
+        f"keep-daily was unexpectedly changed: {after.get('keep-daily')!r}"
+
+
+def test_settings_api_unknown_retention_keys_ignored(host_id, original_retention):
+    """POST with unknown retention keys must not crash — they are silently ignored."""
+    resp = _post(f"/api/host/{host_id}/settings", {
+        "retention": {"keep-last": 1, "keep-forever": 999, "bogus": "x"}
+    })
+    assert "retention" in resp, f"POST with unknown keys crashed: {resp}"
+    after = _get(f"/api/host/{host_id}/settings")["retention"]
+    assert "keep-forever" not in after, "Unknown key 'keep-forever' must not be written"
+    assert "bogus" not in after, "Unknown key 'bogus' must not be written"
+    assert after.get("keep-last") == 1, "keep-last must still be saved despite unknown keys"
+
+
+def test_settings_api_invalid_body_returns_400(host_id, original_retention):
+    """POST with retention as a non-dict must return 400."""
+    import urllib.error
+    try:
+        _post(f"/api/host/{host_id}/settings", {"retention": "invalid"})
+        pytest.fail("Expected 400 for retention=string, but got success")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, f"Expected 400, got {e.code}"
+
+
+def test_settings_api_missing_retention_key_returns_400(host_id, original_retention):
+    """POST body without 'retention' key must return 400."""
+    import urllib.error
+    try:
+        _post(f"/api/host/{host_id}/settings", {"wrong_key": {}})
+        pytest.fail("Expected 400 for missing retention key")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, f"Expected 400, got {e.code}"
+
+
+def test_settings_api_post_returns_updated_retention(host_id, original_retention):
+    """POST must return the full updated retention (not just the keys that were sent)."""
+    # First set a baseline with multiple keys
+    _post(f"/api/host/{host_id}/settings", {
+        "retention": {"keep-last": 1, "keep-daily": 3, "keep-weekly": 1}
+    })
+    resp = _post(f"/api/host/{host_id}/settings", {"retention": {"keep-monthly": 2}})
+    returned = resp.get("retention", {})
+    # The response must include keep-monthly that we just set
+    assert returned.get("keep-monthly") == 2, \
+        f"POST response must reflect newly saved key: {returned}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PBS TASKS — GET /api/host/<id>/pbs/tasks
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PBS TASKS — live integration: trigger GC, verify task visible via API + UI
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pbs_datastore(host_id: str) -> str | None:
+    """Return PBS datastore name for the host, or None if not configured."""
+    hosts = _get("/api/hosts")
+    for h in hosts:
+        if h["id"] == host_id:
+            return h.get("pbs_datastore") or h.get("pbs_storage_id")
+    return None
+
+
+_PVE_HOST_SSH = "root@10.10.0.1"  # PVE host as seen from inside LXC 300 (vmbr0 bridge)
+
+
+def _ssh_pve(*cmd: str) -> None:
+    """Run a command on the PVE host via SSH (fire-and-forget, ignores output)."""
+    subprocess.Popen(
+        ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+         _PVE_HOST_SSH, *cmd],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _trigger_pbs_gc(datastore: str) -> None:
+    """Start a PBS garbage collection on the PVE host (fire-and-forget)."""
+    _ssh_pve("proxmox-backup-manager", "garbage-collection", "start", datastore)
+
+
+def _trigger_pbs_external_backup(vmid: int, vm_type: str, storage: str = "local") -> None:
+    """Trigger a PBS backup of vmid via vzdump directly on the PVE host (bypasses agent).
+
+    This simulates a scheduled/cron backup that the GUI did not initiate — the resulting
+    PBS backup task should appear in /pbs/tasks as an external task card.
+    """
+    _ssh_pve(
+        "vzdump", str(vmid), f"--{vm_type}id", str(vmid),
+        "--storage", storage, "--mode", "snapshot", "--remove", "0",
+    )
+
+
+def _trigger_pbs_prune(datastore: str, vm_type: str, vmid: int) -> None:
+    """Trigger a PBS prune for vmid on the PVE host (fire-and-forget)."""
+    _ssh_pve(
+        "proxmox-backup-manager", "prune",
+        "--store", datastore,
+        "--backup-type", vm_type,
+        "--backup-id", str(vmid),
+        "--keep-last", "10",  # keep-last=10 is safe — won't delete anything in CI
+    )
+
+
+def _wait_for_running_pbs_task(host_id: str, worker_type: str, timeout: int = 30) -> dict:
+    """Poll /pbs/tasks?running=1 until a task of the given worker_type appears."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        tasks = _get(f"/api/host/{host_id}/pbs/tasks?running=1")
+        for t in tasks:
+            if t.get("worker_type") == worker_type:
+                return t
+        time.sleep(2)
+    raise TimeoutError(
+        f"No running PBS task of type '{worker_type}' appeared within {timeout}s"
+    )
+
+
+def _wait_for_pbs_task_done(host_id: str, upid: str, timeout: int = 120) -> dict:
+    """Poll /pbs/tasks until the task with this UPID has an endtime."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        tasks = _get(f"/api/host/{host_id}/pbs/tasks")
+        for t in tasks:
+            if t.get("upid") == upid and t.get("endtime"):
+                return t
+        time.sleep(3)
+    raise TimeoutError(f"PBS task {upid[:20]}… did not finish within {timeout}s")
+
+
+@pytest.fixture
+def running_gc_task(host_id):
+    """Trigger a PBS GC and yield the running task dict. Waits for it to finish on teardown."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    datastore = _pbs_datastore(host_id)
+    if not datastore:
+        pytest.skip("No PBS datastore configured for host")
+    _trigger_pbs_gc(datastore)
+    task = _wait_for_running_pbs_task(host_id, "garbage_collection", timeout=30)
+    yield task
+    # Wait for it to finish so it doesn't interfere with subsequent tests
+    try:
+        _wait_for_pbs_task_done(host_id, task["upid"], timeout=120)
+    except TimeoutError:
+        pass
+
+
+def test_pbs_gc_task_appears_in_running_api(host_id, running_gc_task):
+    """Triggered GC must appear in /pbs/tasks?running=1 with correct fields."""
+    task = running_gc_task
+    assert task["worker_type"] == "garbage_collection"
+    assert "upid" in task
+    assert "starttime" in task
+    assert not task.get("endtime"), "Running task must not have endtime yet"
+
+
+def test_pbs_gc_task_log_has_content(host_id, running_gc_task):
+    """Log endpoint for a running GC task must return non-empty lines."""
+    import urllib.parse
+    upid = running_gc_task["upid"]
+    encoded = urllib.parse.quote(upid, safe="")
+    data = _get(f"/api/host/{host_id}/pbs/tasks/{encoded}/log")
+    assert "lines" in data
+    assert len(data["lines"]) > 0, \
+        f"Log for running GC task must not be empty. UPID: {upid[:30]}…"
+
+
+def test_pbs_gc_task_card_appears_in_sidebar(real_page, host_id, running_gc_task):
+    """While GC is running, a PBS task card must appear in the sidebar Running section."""
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
+
+    # PBS task cards arrive via MQTT (pbs/tasks/running) — wait for the section to appear
+    real_page.wait_for_function(
+        "() => document.getElementById('global-job-section').style.display !== 'none'",
+        timeout=20000,
+    )
+    cards = real_page.locator("#pbs-task-cards .job-indicator")
+    assert cards.count() > 0, \
+        "No PBS task cards rendered in sidebar while GC is running"
+
+    # Card must contain a recognisable label
+    card_text = cards.first.inner_text()
+    assert any(word in card_text.lower() for word in ("gc", "garbage", "collection")), \
+        f"PBS task card text does not mention GC: {card_text!r}"
+    assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
+
+
+def test_pbs_gc_task_card_opens_log_modal(real_page, host_id, running_gc_task):
+    """Clicking a PBS task card must open the job modal with log content."""
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
+
+    real_page.wait_for_function(
+        "() => document.getElementById('pbs-task-cards').children.length > 0",
+        timeout=20000,
+    )
+    real_page.locator("#pbs-task-cards .job-indicator").first.click()
+
+    real_page.wait_for_selector("#job-modal.open", timeout=5000)
+
+    # Log must receive at least one line from the SSE stream
+    real_page.wait_for_function(
+        "() => document.getElementById('job-log').children.length > 0",
+        timeout=15000,
+    )
+    log_text = real_page.locator("#job-log").inner_text()
+    assert log_text.strip(), "Job modal log must not be empty for running GC task"
+
+    real_page.evaluate("closeJobModal()")
+    assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
+
+
+def test_pbs_gc_task_card_disappears_when_done(real_page, host_id, running_gc_task):
+    """After GC finishes, the PBS task card must disappear from the sidebar."""
+    upid = running_gc_task["upid"]
+
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
+
+    # Wait for GC to finish via API
+    _wait_for_pbs_task_done(host_id, upid, timeout=120)
+
+    # Agent publishes updated (empty) running task list via MQTT —
+    # card must disappear within the next poll cycle (15s)
+    real_page.wait_for_function(
+        "() => document.getElementById('pbs-task-cards').children.length === 0",
+        timeout=25000,
+    )
+    assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
+
+
+@pytest.fixture
+def running_backup_task(host_id, items):
+    """Trigger an external PBS backup (via vzdump, not via agent) and yield the task.
+
+    Uses ct/301 — the designated CI test target. This tests the case where a backup
+    runs outside the GUI (cron/manual) and must still appear as a PBS task card.
+    """
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    _trigger_pbs_external_backup(301, "ct")
+    task = _wait_for_running_pbs_task(host_id, "backup", timeout=30)
+    yield task
+    try:
+        _wait_for_pbs_task_done(host_id, task["upid"], timeout=300)
+    except TimeoutError:
+        pass
+
+
+@pytest.fixture
+def running_prune_task(host_id):
+    """Trigger an external PBS prune for ct/301 and yield the task."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    datastore = _pbs_datastore(host_id)
+    if not datastore:
+        pytest.skip("No PBS datastore configured")
+    _trigger_pbs_prune(datastore, "ct", 301)
+    try:
+        task = _wait_for_running_pbs_task(host_id, "prune", timeout=20)
+    except TimeoutError:
+        pytest.skip("Prune finished before we could observe it running — datastore may be too small")
+    yield task
+    try:
+        _wait_for_pbs_task_done(host_id, task["upid"], timeout=60)
+    except TimeoutError:
+        pass
+
+
+def test_external_backup_task_appears_in_api(host_id, running_backup_task):
+    """External (non-GUI) backup must appear in /pbs/tasks?running=1."""
+    task = running_backup_task
+    assert task["worker_type"] == "backup"
+    assert "upid" in task
+    assert not task.get("endtime"), "Running backup must not have endtime"
+    # worker_id should reference the VM
+    assert "301" in (task.get("worker_id") or ""), \
+        f"Expected '301' in worker_id for ct/301 backup: {task.get('worker_id')}"
+
+
+def test_external_backup_task_card_in_sidebar(real_page, host_id, running_backup_task):
+    """External backup must show as a PBS task card in the sidebar (no GUI op active)."""
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
+
+    real_page.wait_for_function(
+        "() => document.getElementById('pbs-task-cards').children.length > 0",
+        timeout=20000,
+    )
+    card_text = real_page.locator("#pbs-task-cards .job-indicator").first.inner_text()
+    assert "backup" in card_text.lower(), \
+        f"PBS task card for backup not found in sidebar. Card text: {card_text!r}"
+    assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
+
+
+def test_gui_backup_no_duplicate_when_external_running(real_page, host_id, running_backup_task):
+    """When a GUI backup op runs for the same VMID, the PBS task card must be hidden (no dupes)."""
+    # Start a GUI backup for ct/301 — this creates a GUI op card for VMID 301
+    resp = _post(f"/api/host/{host_id}/backup/pbs", {"vmid": 301, "type": "ct"})
+    if "job_id" not in resp:
+        pytest.skip(f"Could not start GUI backup: {resp}")
+
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
+
+    # Wait for the GUI op indicator to appear (global-job-indicator visible)
+    real_page.wait_for_function(
+        "() => document.getElementById('global-job-indicator').style.display !== 'none'",
+        timeout=15000,
+    )
+
+    # The PBS task card for vmid 301 must be hidden (dedup logic)
+    cards = real_page.locator("#pbs-task-cards .job-indicator")
+    visible_texts = [c.inner_text() for c in cards.all() if c.is_visible()]
+    for text in visible_texts:
+        # None of the visible PBS cards should be a backup for 301
+        assert "301" not in text or "backup" not in text.lower(), \
+            f"Duplicate PBS backup card shown for vmid 301 alongside GUI op: {text!r}"
+
+    # Let the backup finish
+    _poll_job(resp["job_id"], timeout=300)
+    real_page.evaluate("closeJobModal()")
+    assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
+
+
+def test_external_prune_task_appears_in_api(host_id, running_prune_task):
+    """External prune must appear in /pbs/tasks?running=1."""
+    task = running_prune_task
+    assert task["worker_type"] == "prune"
+    assert "upid" in task
+    assert not task.get("endtime"), "Running prune must not have endtime"
+
+
+def test_pbs_tasks_api_returns_list(host_id):
+    """GET /pbs/tasks must return a JSON list (possibly empty)."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    tasks = _get(f"/api/host/{host_id}/pbs/tasks")
+    assert isinstance(tasks, list), \
+        f"Expected list from /pbs/tasks, got {type(tasks).__name__}: {tasks!r}"
+
+
+def test_pbs_tasks_running_filter_returns_list(host_id):
+    """GET /pbs/tasks?running=1 must return a list (no tasks running is fine)."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    tasks = _get(f"/api/host/{host_id}/pbs/tasks?running=1")
+    assert isinstance(tasks, list), \
+        f"Expected list from /pbs/tasks?running=1, got {type(tasks).__name__}"
+
+
+def test_pbs_tasks_fields_present(host_id):
+    """Each task in /pbs/tasks must have upid, worker_type, starttime fields."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    tasks = _get(f"/api/host/{host_id}/pbs/tasks")
+    if not tasks:
+        pytest.skip("No PBS tasks returned — cannot verify field structure")
+    for t in tasks:
+        for field in ("upid", "worker_type", "starttime"):
+            assert field in t, \
+                f"Field '{field}' missing from PBS task: {t}"
+
+
+def test_pbs_tasks_worker_type_is_known(host_id):
+    """All returned task worker_types must be from the expected set."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    known = {"backup", "prune", "prunejob", "garbage_collection", "verify"}
+    tasks = _get(f"/api/host/{host_id}/pbs/tasks")
+    for t in tasks:
+        assert t.get("worker_type") in known, \
+            f"Unexpected worker_type {t.get('worker_type')!r} in task: {t}"
+
+
+def test_pbs_tasks_running_filter_excludes_finished(host_id):
+    """Tasks returned by ?running=1 must not have an endtime."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    tasks = _get(f"/api/host/{host_id}/pbs/tasks?running=1")
+    for t in tasks:
+        assert not t.get("endtime"), \
+            f"Running-filter returned task with endtime: {t}"
+
+
+def test_pbs_task_log_returns_lines_for_recent_task(host_id):
+    """GET /pbs/tasks/<upid>/log must return {lines: [...]} for a known completed task."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    tasks = _get(f"/api/host/{host_id}/pbs/tasks")
+    completed = [t for t in tasks if t.get("endtime")]
+    if not completed:
+        pytest.skip("No completed PBS tasks found to test log endpoint")
+
+    upid = completed[0]["upid"]
+    import urllib.parse
+    encoded = urllib.parse.quote(upid, safe="")
+    data = _get(f"/api/host/{host_id}/pbs/tasks/{encoded}/log")
+    assert "lines" in data, f"Log response missing 'lines' key: {data}"
+    assert isinstance(data["lines"], list), \
+        f"'lines' must be a list, got {type(data['lines']).__name__}"
+    assert len(data["lines"]) > 0, \
+        f"Log for completed task {upid[:16]}… must not be empty"
+
+
+def test_pbs_task_log_invalid_upid_returns_empty(host_id):
+    """GET /pbs/tasks/<bad-upid>/log must return empty lines, not crash."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    import urllib.parse
+    bad = urllib.parse.quote("UPID:invalid:00000000:00000000:00000000:bogus::root@pam:", safe="")
+    data = _get(f"/api/host/{host_id}/pbs/tasks/{bad}/log")
+    assert "lines" in data, f"Response missing 'lines' key for invalid UPID: {data}"
+    assert isinstance(data["lines"], list), "lines must be a list even for invalid UPID"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SETTINGS UI — settings modal opens, loads and saves values
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_settings_modal_opens_and_closes(real_page, host_id):
+    """Settings ⚙ button must open the modal; Cancel must close it."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url — settings modal requires agent")
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
+
+    real_page.click("#settings-btn")
+    real_page.wait_for_selector(".settings-overlay.open", timeout=5000)
+
+    real_page.click("button.btn-secondary")  # Cancel
+    real_page.wait_for_function(
+        "() => !document.querySelector('.settings-overlay').classList.contains('open')",
+        timeout=3000,
+    )
+    assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
+
+
+def test_settings_modal_loads_current_values(real_page, host_id, original_retention):
+    """Settings modal must pre-populate fields with current agent retention values."""
+    # Write known values first via API
+    _post(f"/api/host/{host_id}/settings", {
+        "retention": {"keep-last": 3, "keep-weekly": 2, "keep-monthly": 1}
+    })
+
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
+
+    real_page.click("#settings-btn")
+    real_page.wait_for_selector(".settings-overlay.open", timeout=5000)
+    # Modal fetches values async — wait for a field to be populated
+    real_page.wait_for_function(
+        "() => document.getElementById('s-keep-last').value !== ''", timeout=5000)
+
+    assert real_page.locator("#s-keep-last").input_value() == "3", \
+        "keep-last field did not load from agent"
+    assert real_page.locator("#s-keep-weekly").input_value() == "2", \
+        "keep-weekly field did not load from agent"
+    assert real_page.locator("#s-keep-monthly").input_value() == "1", \
+        "keep-monthly field did not load from agent"
+
+    real_page.click("button.btn-secondary")
+    assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
+
+
+def test_settings_modal_save_persists_values(real_page, host_id, original_retention):
+    """Filling in retention fields and clicking Save must persist the values."""
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
+
+    real_page.click("#settings-btn")
+    real_page.wait_for_selector(".settings-overlay.open", timeout=5000)
+
+    real_page.fill("#s-keep-last", "4")
+    real_page.fill("#s-keep-weekly", "3")
+
+    real_page.click("#settings-save-btn")
+    # Modal closes on successful save
+    real_page.wait_for_function(
+        "() => !document.querySelector('.settings-overlay').classList.contains('open')",
+        timeout=5000,
+    )
+
+    # Verify persisted via API
+    saved = _get(f"/api/host/{host_id}/settings")["retention"]
+    assert saved.get("keep-last") == 4, \
+        f"keep-last not persisted after modal save: {saved}"
+    assert saved.get("keep-weekly") == 3, \
+        f"keep-weekly not persisted after modal save: {saved}"
+    assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"

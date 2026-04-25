@@ -843,6 +843,53 @@ def get_schedules(host_id: str):
     return jsonify(result)
 
 
+@app.get("/api/host/<host_id>/pbs/tasks")
+@login_required
+def get_pbs_tasks(host_id: str):
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    running_only = request.args.get("running") == "1"
+    return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_pbs_tasks(running_only=running_only))
+
+
+@app.get("/api/host/<host_id>/pbs/tasks/<path:upid>/log")
+@login_required
+def get_pbs_task_log(host_id: str, upid: str):
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    return jsonify({"lines": AgentClient(host.agent_url, token=host.agent_token).get_pbs_task_log(upid)})
+
+
+@app.get("/api/host/<host_id>/pbs/tasks/<path:upid>/stream")
+@login_required
+def stream_pbs_task(host_id: str, upid: str):
+    """Proxy SSE stream from agent for a PBS task log."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    import requests as _req
+
+    def generate():
+        url = f"{host.agent_url}/pbs/tasks/{upid}/stream"
+        headers = {"Authorization": f"Bearer {host.agent_token}"} if host.agent_token else {}
+        with _req.get(url, headers=headers, stream=True, timeout=(5, 300)) as r:
+            for chunk in r.iter_content(chunk_size=None):
+                if chunk:
+                    yield chunk
+
+    return Response(stream_with_context(generate()),
+                    mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.get("/api/host/<host_id>/settings")
 @login_required
 def get_host_settings(host_id: str):

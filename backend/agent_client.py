@@ -137,6 +137,15 @@ class AgentClient:
     def get_schedules(self) -> dict:
         return self._get("/schedules")
 
+    # ── PBS tasks ────────────────────────────────────────────────────────────
+
+    def get_pbs_tasks(self, running_only: bool = False) -> list[dict]:
+        params = "?running=1" if running_only else ""
+        return self._get(f"/pbs/tasks{params}")
+
+    def get_pbs_task_log(self, upid: str) -> list[str]:
+        return self._get(f"/pbs/tasks/{upid}/log").get("lines", [])
+
     # ── Settings ─────────────────────────────────────────────────────────────
 
     def get_settings(self) -> dict:

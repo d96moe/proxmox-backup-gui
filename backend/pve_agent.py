@@ -519,6 +519,9 @@ class StatePoller:
     CLOUD_STORAGE_INTERVAL = 60   # seconds — cloud quota/usage (just 2 rclone calls)
     INFO_INTERVAL         = 3600  # seconds — version strings (rarely change)
     SCHEDULES_INTERVAL    = 120   # seconds — next scheduled backup
+    PBS_TASKS_INTERVAL    = 15    # seconds — running PBS task poll
+
+    PBS_TASK_TYPES = {"backup", "prune", "prunejob", "garbage_collection", "verify"}
 
     def __init__(self, cfg: "AgentConfig", mqtt: MQTTPublisher) -> None:
         self._cfg   = cfg
@@ -572,9 +575,10 @@ class StatePoller:
         threading.Thread(target=self._loop_cloud_storage,  daemon=True, name="poller-cloud-storage").start()
         threading.Thread(target=self._loop_info,           daemon=True, name="poller-info").start()
         threading.Thread(target=self._loop_schedules,      daemon=True, name="poller-schedules").start()
-        log.info("StatePoller started (pve/pbs %ds, restic %ds, cloud-storage %ds, info %ds, schedules %ds)",
+        threading.Thread(target=self._loop_pbs_tasks,      daemon=True, name="poller-pbs-tasks").start()
+        log.info("StatePoller started (pve/pbs %ds, restic %ds, cloud-storage %ds, info %ds, schedules %ds, pbs-tasks %ds)",
                  self.PVE_PBS_INTERVAL, self.RESTIC_INTERVAL, self.CLOUD_STORAGE_INTERVAL,
-                 self.INFO_INTERVAL, self.SCHEDULES_INTERVAL)
+                 self.INFO_INTERVAL, self.SCHEDULES_INTERVAL, self.PBS_TASKS_INTERVAL)
 
     def stop(self) -> None:
         self._stop.set()
@@ -650,6 +654,14 @@ class StatePoller:
             except Exception as exc:
                 log.warning("Schedules poll error: %s", exc)
             self._stop.wait(self.SCHEDULES_INTERVAL)
+
+    def _loop_pbs_tasks(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._scan_pbs_tasks()
+            except Exception as exc:
+                log.warning("PBS tasks poll error: %s", exc)
+            self._stop.wait(self.PBS_TASKS_INTERVAL)
 
     # ── scan implementations ──────────────────────────────────────────────────
 
@@ -899,6 +911,15 @@ class StatePoller:
             except Exception as exc:
                 log.warning("Schedule restic fetch failed: %s", exc)
         self._pub_if_changed("schedules", result)
+
+    def _scan_pbs_tasks(self) -> None:
+        """Poll PBS for running tasks and publish via MQTT."""
+        try:
+            tasks = _get_pbs_tasks(running_only=True)
+        except Exception as exc:
+            log.warning("PBS task scan failed: %s", exc)
+            return
+        self._pub_if_changed("pbs/tasks/running", tasks)
 
     def _scan_restic(self) -> None:
         cfg = self._cfg
@@ -1486,6 +1507,39 @@ def _run_in_background(op: Operation, fn, rescan_restic: bool = False) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# PBS task helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PBS_TASK_TYPES = {"backup", "prune", "prunejob", "garbage_collection", "verify"}
+
+
+def _get_pbs_tasks(running_only: bool = False, limit: int = 50) -> list[dict]:
+    """Return PBS tasks via proxmox-backup-manager task list."""
+    cmd = ["proxmox-backup-manager", "task", "list", "--all", "--output-format", "json"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout
+        tasks = json.loads(out.strip() or "[]")
+    except Exception:
+        return []
+    tasks = [t for t in tasks if t.get("worker_type") in _PBS_TASK_TYPES]
+    if running_only:
+        tasks = [t for t in tasks if not t.get("endtime")]
+    return tasks[:limit]
+
+
+def _get_pbs_task_log(upid: str) -> list[str]:
+    """Fetch log lines for a PBS task by UPID."""
+    try:
+        out = subprocess.run(
+            ["proxmox-backup-manager", "task", "log", upid],
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+        return out.splitlines()
+    except Exception:
+        return []
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Routes — health
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1942,6 +1996,44 @@ def schedules():
         pass
 
     return jsonify(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routes — PBS tasks
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/pbs/tasks")
+def pbs_tasks():
+    running_only = request.args.get("running") == "1"
+    return jsonify(_get_pbs_tasks(running_only=running_only))
+
+
+@app.route("/pbs/tasks/<path:upid>/log")
+def pbs_task_log(upid: str):
+    return jsonify({"lines": _get_pbs_task_log(upid)})
+
+
+@app.route("/pbs/tasks/<path:upid>/stream")
+def pbs_task_stream(upid: str):
+    """SSE stream of a PBS task log — polls until task finishes."""
+    def generate() -> Iterator[str]:
+        seen = 0
+        while True:
+            lines = _get_pbs_task_log(upid)
+            for line in lines[seen:]:
+                yield f"data: {json.dumps(line)}\n\n"
+            seen = len(lines)
+            # Check if task is done
+            tasks = _get_pbs_tasks(running_only=True)
+            running_upids = {t.get("upid") for t in tasks}
+            if upid not in running_upids and seen > 0:
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                return
+            time.sleep(2)
+
+    return Response(stream_with_context(generate()),
+                    mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
