@@ -114,6 +114,11 @@ Playwright + `requests` against the real Flask backend. Cover:
 - **Cloud restore** — restore PBS datastore from restic/Google Drive snapshot, restart PBS, verify snapshots
 - **Cloud restore + backup after** — full flow: restore from cloud, re-backup PBS, verify new snapshot
 - **Concurrent backups** — two backup jobs triggered simultaneously both get job IDs
+- **Settings — restic retention** — GET/POST roundtrip, partial update, unknown keys ignored, type validation (400), isolation
+- **Settings — PBS prune policy** — GET/POST roundtrip, all keep-* keys, clear-key deletes from PBS live, zero=unset, empty retention clears all, unknown job id (500), non-integer (400), green path (POST→GET→live PBS verify via SSH)
+- **Settings — schedules** — PBS schedule roundtrip + verified via `pvesh` on PVE host; restic schedule roundtrip + verified in timer file via SSH; error cases
+- **Settings — VM selection** — exclude mode (all=1 + exclude field), include mode (all=0 + vmid field), mode switch, PVE verification, error cases
+- **PBS tasks** — GC, external backup, and prune triggered via SSH to PVE host; task visible in `/pbs/tasks` API; running card appears in sidebar; GUI backup suppresses duplicate PBS card for same VMID
 
 ---
 

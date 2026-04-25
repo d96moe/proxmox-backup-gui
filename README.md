@@ -2,7 +2,7 @@
 
 A self-hosted web dashboard for monitoring Proxmox Backup Server (PBS) and restic cloud backups.
 
-Shows per-VM backup status, local/cloud coverage, storage usage, and historical snapshots in a clean dark UI.
+Shows per-VM backup status, local/cloud coverage, storage usage, and historical snapshots in a clean dark UI. Includes a settings modal for retention policies, backup schedules, and VM selection — all written back to the PVE host via the agent.
 
 ![til](./p-b-g_ui.gif)
 
@@ -55,6 +55,13 @@ Cloud backup, cloud restore, and ☁ sync are skipped gracefully if `restic_repo
 - **☁ sync** — trigger a standalone restic cloud sync from any VM card or snapshot row
 - **Restore** — restore from a PBS snapshot (local) or restic snapshot (cloud)
 - **Job indicator** — running jobs show a pulsing indicator on the VM card; click to reopen progress modal
+- **PBS task visibility** — running PBS operations (GC, external backup, prune) appear as clickable cards in the sidebar; click to view live log stream
+- **Settings modal** — editable per-host settings written back to the PVE host via agent:
+  - Restic cloud retention (keep-last / keep-daily / keep-weekly / keep-monthly)
+  - PBS prune policy (keep-last / keep-daily / keep-weekly / keep-monthly / keep-yearly)
+  - PBS backup schedule and restic backup schedule (systemd OnCalendar)
+  - VM/LXC backup selection — exclude-list (backup all, mark exclusions) or include-list (only named VMs)
+- **Authentication** — login page with bcrypt-hashed credentials; role system (admin / viewer)
 - **Multi-host** — monitor multiple PVE/PBS hosts simultaneously in one UI
 - **Real-time updates** — browser receives live data via MQTT WebSocket; no polling
 
@@ -91,6 +98,7 @@ Each agent publishes under `proxmox/<mqtt_hostname>/`. The GUI subscribes to `pr
 | `storage` | yes | `{local_used, local_total, cloud_used, cloud_total, cloud_quota_used, dedup_factor}` |
 | `info` | yes | `{pbs: "4.1.4", pve: "9.0.0", restic: "0.18.0"}` — version strings |
 | `schedules` | yes | `{pbs_jobs, pbs_running, restic_next, restic_running, pbs_retention, restic_retention}` |
+| `pbs/tasks/running` | yes | `[{upid, worker_type, worker_id, starttime}]` — running PBS tasks (GC, backup, prune); polled every 15 s |
 | `job/<corr_id>/ack` | no | `{op_id: "…"}` — correlation-ID response after the agent accepts a command |
 
 #### Published by browser → received by agent
@@ -195,6 +203,11 @@ The `id` field **must match** `mqtt_hostname` in the agent's `config.json` on ea
 | `GET /api/host/<id>/storage` | PBS and Google Drive storage usage (async) |
 | `GET /api/host/<id>/ha/sensors` | Flat sensor dict for Home Assistant |
 | `GET /api/host/<id>/info` | PBS and restic version info |
+| `GET /api/host/<id>/settings` | Read restic retention, PBS prune policy, schedules, VM selection |
+| `POST /api/host/<id>/settings` | Write any combination of the above settings to the PVE host |
+| `GET /api/host/<id>/pbs/tasks` | List PBS tasks (`?running=1` for running only) |
+| `GET /api/host/<id>/pbs/tasks/<upid>/log` | Full log of a PBS task |
+| `GET /api/host/<id>/pbs/tasks/<upid>/stream` | SSE stream of a running PBS task log |
 | `WS  /mqtt-ws` | MQTT proxy WebSocket — browser subscribes here instead of directly to Mosquitto; requires session cookie (login required) |
 
 ## CI & Testing
@@ -207,12 +220,9 @@ The GUI uses `rclone lsjson locks/` to check if a restic backup is in progress b
 
 ## Roadmap
 
-- **Authentication** — login page with hashed credentials; currently the GUI is open to anyone who can reach the LXC
-- **VM/LXC backup mask** — per-VM include/exclude toggles so not every container is backed up to cloud
-- **Prune / retention settings** — UI for both PBS retention (`prune-backups` per storage in PVE) and restic `--keep-last / --keep-daily / --keep-weekly`; both written to PVE host config via SSH
-- **Backup scheduler** — view and edit schedules for both PBS (vzdump) and restic (cloud) jobs; currently both are configured statically on the PVE host via systemd timers / cron outside the GUI
 - **Delete backup (cloud)** — guided workflow to remove a specific VM's backup from the restic repo: restore full datastore → delete from PBS → re-backup → forget old snapshot. Expensive but correct given the whole-datastore restic architecture.
-- **Restic prune after sync** — after a successful `☁ sync`, automatically run `restic forget --prune` according to configured retention policy; currently pruning is handled outside the GUI
+- **Restic log visibility** — nightly restic (cron-triggered) logs not yet surfaced in the GUI; PBS operations are visible but restic runs outside the agent task system.
+- **Host/connection settings** — PBS credentials, restic repo/password, agent URL editable in GUI (currently requires editing config files on the host).
 
 ## Related
 
