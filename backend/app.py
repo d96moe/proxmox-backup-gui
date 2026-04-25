@@ -912,7 +912,14 @@ def post_host_settings(host_id: str):
     if not host.agent_url:
         abort(404)
     body = request.get_json(silent=True) or {}
-    return jsonify(AgentClient(host.agent_url, token=host.agent_token).set_settings(body))
+    try:
+        return jsonify(AgentClient(host.agent_url, token=host.agent_token).set_settings(body))
+    except RuntimeError as exc:
+        import re as _re
+        m = _re.search(r"→ (\d+):", str(exc))
+        if m:
+            abort(int(m.group(1)))
+        raise
 
 
 @app.get("/api/host/<host_id>/restic/log")

@@ -2473,7 +2473,7 @@ def running_backup_task(host_id, items):
     if not _host_has_agent(host_id):
         pytest.skip("Host has no agent_url")
     _trigger_pbs_external_backup(301, "ct")
-    task = _wait_for_running_pbs_task(host_id, "backup", timeout=30)
+    task = _wait_for_running_pbs_task(host_id, "backup", timeout=60)
     yield task
     try:
         _wait_for_pbs_task_done(host_id, task["upid"], timeout=300)

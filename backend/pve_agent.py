@@ -1189,7 +1189,7 @@ class LocalResticClient:
             k = k.strip()
             v = v.strip().strip('"').strip("'")
             if k in mapping and v:
-                result[mapping[k]] = v
+                result[mapping[k]] = int(v) if v.isdigit() else v
         return result
 
     def set_retention(self, retention: dict) -> None:
@@ -2123,7 +2123,7 @@ def settings_get():
     prune_jobs   = res.get_pbs_prune_jobs()
     cfg          = _cfg
     pbs_prune    = next(
-        ({"id": j["id"], "retention": {k: j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
+        ({"id": j["id"], "retention": {k: int(j[k]) if str(j[k]).isdigit() else j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
          for j in prune_jobs if j.get("store") == (cfg.pbs_datastore if cfg else "")),
         None,
     )
