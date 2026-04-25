@@ -89,6 +89,26 @@ class PVEClient:
         except Exception:
             return []
 
+    def get_backup_excluded(self, job_id: str) -> list[int]:
+        """Return excluded VMIDs for a vzdump backup job."""
+        try:
+            jobs = self._get("/cluster/backup")
+            for j in (jobs if isinstance(jobs, list) else []):
+                if j.get("id") == job_id:
+                    raw = j.get("exclude", "")
+                    return [int(v) for v in str(raw).split(",") if v.strip().isdigit()]
+        except Exception:
+            pass
+        return []
+
+    def set_backup_excluded(self, job_id: str, vmids: list[int]) -> None:
+        """Set the exclude list for a vzdump backup job (empty list = backup all)."""
+        if vmids:
+            self._put(f"/cluster/backup/{job_id}", exclude=",".join(str(v) for v in vmids))
+        else:
+            # PVE API: set exclude to empty string clears it
+            self._put(f"/cluster/backup/{job_id}", exclude="")
+
     def set_backup_schedule(self, job_id: str, schedule: str) -> None:
         """Update the schedule of an existing vzdump backup job."""
         self._put(f"/cluster/backup/{job_id}", schedule=schedule)

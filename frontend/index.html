@@ -80,6 +80,11 @@
   .settings-input { width:90px; padding:5px 9px; border-radius:6px; border:1px solid var(--border2); background:var(--bg); color:var(--text); font-family:'IBM Plex Mono',monospace; font-size:12px; text-align:right; }
   .settings-input:focus { outline:none; border-color:var(--accent); }
   .settings-modal-footer { padding:14px 22px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:10px; }
+  .vm-select-list { display:flex; flex-direction:column; gap:6px; max-height:180px; overflow-y:auto; border:1px solid var(--border2); border-radius:6px; padding:8px 10px; background:var(--bg); }
+  .vm-select-row { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text); cursor:pointer; }
+  .vm-select-row input[type=checkbox] { accent-color:var(--accent); width:14px; height:14px; cursor:pointer; }
+  .vm-select-vmid { font-family:'IBM Plex Mono',monospace; color:var(--muted); min-width:36px; }
+  .vm-select-type { font-size:10px; color:var(--muted); background:var(--border2); border-radius:3px; padding:1px 4px; }
 
   /* Layout */
   .layout { display:grid; grid-template-columns:220px 1fr; min-height:calc(100vh - 52px); min-width:820px; }
@@ -403,6 +408,12 @@
             <input class="settings-input" id="s-keep-monthly" type="number" min="0" placeholder="—">
           </div>
         </div>
+      </div>
+
+      <div id="s-vm-selection-section" style="display:none">
+        <div class="settings-section-title">VM / LXC Backup Selection</div>
+        <div class="settings-hint" style="margin-bottom:8px">Unchecked VMs are excluded from the nightly PBS backup.</div>
+        <div class="vm-select-list" id="s-vm-list"></div>
       </div>
 
       <div id="s-schedules-section" style="display:none">
@@ -1994,6 +2005,27 @@ async function openSettingsModal() {
       } else {
         schedSection.style.display = 'none';
       }
+
+      // VM selection — build from live MQTT store
+      const vmSec  = document.getElementById('s-vm-selection-section');
+      const vmList = document.getElementById('s-vm-list');
+      const ds     = MQTTBus.getDS();
+      const excluded = new Set((d.excluded_vmids || []).map(String));
+      const vmEntries = Object.entries(ds)
+        .map(([vmid, v]) => ({ vmid, name: v.meta?.name || `vm-${vmid}`, type: v.meta?.type || 'vm' }))
+        .sort((a, b) => Number(a.vmid) - Number(b.vmid));
+      if (vmEntries.length) {
+        vmSec.style.display = '';
+        vmList.innerHTML = vmEntries.map(({ vmid, name, type }) => `
+          <label class="vm-select-row">
+            <input type="checkbox" data-vmid="${vmid}" ${excluded.has(vmid) ? '' : 'checked'}>
+            <span class="vm-select-vmid">${vmid}</span>
+            <span class="vm-select-type">${type}</span>
+            <span>${name}</span>
+          </label>`).join('');
+      } else {
+        vmSec.style.display = 'none';
+      }
     }
   } catch (_) {}
 }
@@ -2029,6 +2061,15 @@ async function saveSettings() {
   }
   if (resVal) {
     body.restic_schedule = resVal;
+  }
+
+  const excludedVmids = [];
+  document.querySelectorAll('#s-vm-list input[type=checkbox]').forEach(cb => {
+    if (!cb.checked) excludedVmids.push(parseInt(cb.dataset.vmid, 10));
+  });
+  // Always send excluded_vmids if the section is visible (empty list = backup all)
+  if (document.getElementById('s-vm-selection-section').style.display !== 'none') {
+    body.excluded_vmids = excludedVmids;
   }
 
   try {
