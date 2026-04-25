@@ -2140,6 +2140,10 @@ def settings_get():
 def settings_post():
     body = request.get_json(silent=True) or {}
 
+    _RECOGNIZED = {"retention", "restic_schedule", "pbs_schedule", "pbs_prune", "vm_selection"}
+    if not any(k in body for k in _RECOGNIZED):
+        return jsonify({"error": "body must contain at least one recognized key"}), 400
+
     res = LocalResticClient(_cfg)
     errors = []
 
@@ -2222,7 +2226,7 @@ def settings_post():
     prune_jobs2 = res.get_pbs_prune_jobs()
     cfg2        = _cfg
     pbs_prune2  = next(
-        ({"id": j["id"], "retention": {k: j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
+        ({"id": j["id"], "retention": {k: int(j[k]) if str(j[k]).isdigit() else j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
          for j in prune_jobs2 if j.get("store") == (cfg2.pbs_datastore if cfg2 else "")),
         None,
     )

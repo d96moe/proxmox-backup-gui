@@ -2181,7 +2181,7 @@ async function saveSettings() {
   }
 
   const pbsPruneSec2 = document.getElementById('s-pbs-prune-section');
-  if (pbsPruneSec2.style.display !== 'none') {
+  if (pbsPruneSec2.style.display !== 'none' && pbsPruneSec2.dataset.jobId) {
     const pbsPruneFields = {
       'keep-last': 's-pbs-keep-last', 'keep-daily': 's-pbs-keep-daily',
       'keep-weekly': 's-pbs-keep-weekly', 'keep-monthly': 's-pbs-keep-monthly',

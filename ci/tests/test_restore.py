@@ -2284,7 +2284,16 @@ def _pbs_datastore(host_id: str) -> str | None:
     hosts = _get("/api/hosts")
     for h in hosts:
         if h["id"] == host_id:
-            return h.get("pbs_datastore") or h.get("pbs_storage_id")
+            return h.get("pbs_datastore") or None
+    return None
+
+
+def _pbs_storage_id(host_id: str) -> str | None:
+    """Return PVE storage ID for PBS on the host (used with vzdump), or None."""
+    hosts = _get("/api/hosts")
+    for h in hosts:
+        if h["id"] == host_id:
+            return h.get("pbs_storage_id") or None
     return None
 
 
@@ -2472,7 +2481,10 @@ def running_backup_task(host_id, items):
     """
     if not _host_has_agent(host_id):
         pytest.skip("Host has no agent_url")
-    _trigger_pbs_external_backup(301, "ct")
+    pbs_storage = _pbs_storage_id(host_id)
+    if not pbs_storage:
+        pytest.skip("No PBS storage configured for host")
+    _trigger_pbs_external_backup(301, "ct", storage=pbs_storage)
     task = _wait_for_running_pbs_task(host_id, "backup", timeout=60)
     yield task
     try:

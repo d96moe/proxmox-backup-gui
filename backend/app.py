@@ -391,7 +391,9 @@ def mqtt_proxy(ws):
 def get_hosts():
     return jsonify([
         {"id": h.id, "label": h.label, "self_vmid": SELF_VMID,
-         "agent_url": h.agent_url or ""}
+         "agent_url": h.agent_url or "",
+         "pbs_datastore": h.pbs_datastore or "",
+         "pbs_storage_id": h.pbs_storage_id or ""}
         for h in HOSTS.values()
     ])
 
