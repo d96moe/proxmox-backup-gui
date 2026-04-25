@@ -1154,6 +1154,47 @@ class LocalResticClient:
                 result[mapping[k]] = v
         return result
 
+    def set_retention(self, retention: dict) -> None:
+        """Write RESTIC_RETENTION_KEEP_* values back to config.env.
+
+        Only updates keys present in retention; leaves all other lines intact.
+        """
+        config_path = "/etc/proxmox-backup-restore/config.env"
+        mapping = {
+            "keep-last":    "RESTIC_RETENTION_KEEP_LAST",
+            "keep-daily":   "RESTIC_RETENTION_KEEP_DAILY",
+            "keep-weekly":  "RESTIC_RETENTION_KEEP_WEEKLY",
+            "keep-monthly": "RESTIC_RETENTION_KEEP_MONTHLY",
+            "keep-yearly":  "RESTIC_RETENTION_KEEP_YEARLY",
+        }
+        try:
+            with open(config_path) as f:
+                lines = f.readlines()
+        except OSError:
+            lines = []
+
+        env_updates = {mapping[k]: str(v) for k, v in retention.items() if k in mapping}
+        written = set()
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key = stripped.split("=", 1)[0].strip()
+                if key in env_updates:
+                    new_lines.append(f'{key}={env_updates[key]}\n')
+                    written.add(key)
+                    continue
+            new_lines.append(line)
+        # Append any keys not already present
+        for key, val in env_updates.items():
+            if key not in written:
+                new_lines.append(f'{key}={val}\n')
+
+        import os as _os
+        _os.makedirs(_os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w") as f:
+            f.writelines(new_lines)
+
     def get_pbs_prune_jobs(self) -> list[dict]:
         """Read PBS prune job settings via proxmox-backup-manager."""
         try:
@@ -1901,6 +1942,30 @@ def schedules():
         pass
 
     return jsonify(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routes — settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/settings")
+def settings_get():
+    res = LocalResticClient(_cfg)
+    return jsonify({"retention": res.get_retention()})
+
+
+@app.route("/settings", methods=["POST"])
+def settings_post():
+    body = request.get_json(silent=True) or {}
+    retention = body.get("retention")
+    if not isinstance(retention, dict):
+        return jsonify({"error": "retention must be a dict"}), 400
+    res = LocalResticClient(_cfg)
+    try:
+        res.set_retention(retention)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"retention": res.get_retention()})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

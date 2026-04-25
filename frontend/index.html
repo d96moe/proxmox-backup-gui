@@ -923,7 +923,7 @@ function renderSchedules() {
   const resTitle = restic_next ? restic_next.next.replace(/:\d{2}\s+\S+$/, '') : '';
   const resRet   = restic_retention || {};
 
-  const hasAny = pbs_jobs?.length || restic_next || pbs_running || restic_running;
+  const hasAny = pbs_jobs?.length || restic_next || pbs_running || restic_running || Object.keys(resRet).length || Object.keys(pbsRet).length;
   if (!hasAny) { section.style.display = 'none'; return; }
 
   let html = '';
@@ -1871,7 +1871,7 @@ async function openSettingsModal() {
     const r = await fetch(`${API_BASE}/api/host/${currentHost}/settings`);
     if (r.ok) {
       const d = await r.json();
-      const retention = d.restic_retention || {};
+      const retention = d.retention || {};
       document.getElementById('s-keep-last').value    = retention['keep-last']    ?? '';
       document.getElementById('s-keep-daily').value   = retention['keep-daily']   ?? '';
       document.getElementById('s-keep-weekly').value  = retention['keep-weekly']  ?? '';
@@ -1904,7 +1904,7 @@ async function saveSettings() {
     const r = await fetch(`${API_BASE}/api/host/${currentHost}/settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ restic_retention: retention }),
+      body: JSON.stringify({ retention }),
     });
     if (r.ok) {
       closeSettingsModal();

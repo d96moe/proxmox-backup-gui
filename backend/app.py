@@ -843,6 +843,30 @@ def get_schedules(host_id: str):
     return jsonify(result)
 
 
+@app.get("/api/host/<host_id>/settings")
+@login_required
+def get_host_settings(host_id: str):
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_settings())
+
+
+@app.post("/api/host/<host_id>/settings")
+@login_required
+@admin_required
+def post_host_settings(host_id: str):
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    body = request.get_json(silent=True) or {}
+    return jsonify(AgentClient(host.agent_url, token=host.agent_token).set_settings(body))
+
+
 # ──────────────────────────────────────────────
 # Backup / Restore
 # ──────────────────────────────────────────────

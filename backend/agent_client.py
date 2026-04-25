@@ -136,3 +136,11 @@ class AgentClient:
 
     def get_schedules(self) -> dict:
         return self._get("/schedules")
+
+    # ── Settings ─────────────────────────────────────────────────────────────
+
+    def get_settings(self) -> dict:
+        return self._get("/settings")
+
+    def set_settings(self, settings: dict) -> dict:
+        return self._post("/settings", settings)
