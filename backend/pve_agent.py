@@ -2043,21 +2043,64 @@ def pbs_task_stream(upid: str):
 @app.route("/settings")
 def settings_get():
     res = LocalResticClient(_cfg)
-    return jsonify({"retention": res.get_retention()})
+    pve = PVEClient(_host())
+    pbs_jobs = pve.get_backup_schedules()
+    pbs_schedule = {"id": pbs_jobs[0]["id"], "schedule": pbs_jobs[0]["schedule"]} if pbs_jobs else None
+    return jsonify({
+        "retention":       res.get_retention(),
+        "pbs_schedule":    pbs_schedule,
+        "restic_schedule": res.get_restic_schedule(),
+    })
 
 
 @app.route("/settings", methods=["POST"])
 def settings_post():
     body = request.get_json(silent=True) or {}
-    retention = body.get("retention")
-    if not isinstance(retention, dict):
-        return jsonify({"error": "retention must be a dict"}), 400
+
     res = LocalResticClient(_cfg)
-    try:
-        res.set_retention(retention)
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-    return jsonify({"retention": res.get_retention()})
+    errors = []
+
+    if "retention" in body:
+        retention = body["retention"]
+        if not isinstance(retention, dict):
+            return jsonify({"error": "retention must be a dict"}), 400
+        try:
+            res.set_retention(retention)
+        except Exception as exc:
+            errors.append(f"retention: {exc}")
+
+    if "restic_schedule" in body:
+        try:
+            res.set_restic_schedule(body["restic_schedule"])
+        except Exception as exc:
+            errors.append(f"restic_schedule: {exc}")
+
+    if "pbs_schedule" in body:
+        sched = body["pbs_schedule"]
+        job_id   = sched.get("id")   if isinstance(sched, dict) else None
+        schedule = sched.get("schedule") if isinstance(sched, dict) else None
+        if not job_id or not schedule:
+            return jsonify({"error": "pbs_schedule requires {id, schedule}"}), 400
+        try:
+            PVEClient(_host()).set_backup_schedule(job_id, schedule)
+        except Exception as exc:
+            errors.append(f"pbs_schedule: {exc}")
+
+    if errors:
+        return jsonify({"error": "; ".join(errors)}), 500
+
+    # Republish updated schedules via MQTT
+    if _poller:
+        _poller._scan_schedules()
+
+    pve = PVEClient(_host())
+    pbs_jobs = pve.get_backup_schedules()
+    pbs_schedule = {"id": pbs_jobs[0]["id"], "schedule": pbs_jobs[0]["schedule"]} if pbs_jobs else None
+    return jsonify({
+        "retention":       res.get_retention(),
+        "pbs_schedule":    pbs_schedule,
+        "restic_schedule": res.get_restic_schedule(),
+    })
 
 
 # ─────────────────────────────────────────────────────────────────────────────

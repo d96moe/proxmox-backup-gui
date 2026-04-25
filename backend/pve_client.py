@@ -38,6 +38,11 @@ class PVEClient:
         resp.raise_for_status()
         return resp.json().get("data", {})
 
+    def _put(self, path: str, **data) -> dict:
+        resp = self._session.put(f"{self._base}/api2/json{path}", json=data)
+        resp.raise_for_status()
+        return resp.json().get("data", {}) or {}
+
     def get_nodes(self) -> list[str]:
         nodes = self._get("/nodes")
         return [n["node"] for n in nodes]
@@ -83,6 +88,10 @@ class PVEClient:
             return result
         except Exception:
             return []
+
+    def set_backup_schedule(self, job_id: str, schedule: str) -> None:
+        """Update the schedule of an existing vzdump backup job."""
+        self._put(f"/cluster/backup/{job_id}", schedule=schedule)
 
     def is_backup_running(self) -> bool:
         """Return True if a vzdump task is currently running on any node."""

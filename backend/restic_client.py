@@ -396,6 +396,32 @@ class ResticClient:
             pass
         return None
 
+    def get_restic_schedule(self) -> str | None:
+        """Read the OnCalendar value from restic-backup.timer on the PVE host."""
+        try:
+            stdout = self._ssh_run(
+                "systemctl cat restic-backup.timer 2>/dev/null | grep -i OnCalendar | head -1",
+                timeout=10,
+            )
+            line = stdout.strip()
+            if not line:
+                return None
+            _, _, value = line.partition("=")
+            return value.strip() or None
+        except Exception:
+            return None
+
+    def set_restic_schedule(self, on_calendar: str) -> None:
+        """Write a new OnCalendar value into restic-backup.timer and reload."""
+        safe = on_calendar.replace("'", "")
+        script = (
+            f"sed -i 's|^OnCalendar=.*|OnCalendar={safe}|' "
+            "/etc/systemd/system/restic-backup.timer && "
+            "systemctl daemon-reload && "
+            "systemctl restart restic-backup.timer"
+        )
+        self._ssh_run(script, timeout=15)
+
     def get_retention(self) -> dict:
         """Read RESTIC_RETENTION_KEEP_* settings from config.env on PVE host."""
         try:

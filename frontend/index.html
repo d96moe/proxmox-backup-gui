@@ -405,6 +405,20 @@
         </div>
       </div>
 
+      <div id="s-schedules-section" style="display:none">
+        <div class="settings-section-title">Schedules</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div class="settings-row">
+            <div><div class="settings-label">PBS backup</div><div class="settings-hint">PVE vzdump schedule (e.g. 02:00 or sat 03:00)</div></div>
+            <input class="settings-input" id="s-pbs-schedule" type="text" placeholder="—" style="width:110px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Restic backup</div><div class="settings-hint">systemd OnCalendar (e.g. 02:30 or Sat 03:00)</div></div>
+            <input class="settings-input" id="s-restic-schedule" type="text" placeholder="—" style="width:110px;text-align:left">
+          </div>
+        </div>
+      </div>
+
     </div>
     <div class="settings-modal-footer">
       <button class="btn-secondary" onclick="closeSettingsModal()">Cancel</button>
@@ -1968,6 +1982,18 @@ async function openSettingsModal() {
       document.getElementById('s-keep-daily').value   = retention['keep-daily']   ?? '';
       document.getElementById('s-keep-weekly').value  = retention['keep-weekly']  ?? '';
       document.getElementById('s-keep-monthly').value = retention['keep-monthly'] ?? '';
+
+      const schedSection = document.getElementById('s-schedules-section');
+      const pbsEl  = document.getElementById('s-pbs-schedule');
+      const resEl  = document.getElementById('s-restic-schedule');
+      if (d.pbs_schedule || d.restic_schedule != null) {
+        schedSection.style.display = '';
+        pbsEl.value  = d.pbs_schedule?.schedule ?? '';
+        pbsEl.dataset.jobId = d.pbs_schedule?.id ?? '';
+        resEl.value  = d.restic_schedule ?? '';
+      } else {
+        schedSection.style.display = 'none';
+      }
     }
   } catch (_) {}
 }
@@ -1992,11 +2018,24 @@ async function saveSettings() {
     const v = document.getElementById(id).value.trim();
     if (v !== '') retention[key] = parseInt(v, 10);
   }
+
+  const body = { retention };
+  const pbsEl = document.getElementById('s-pbs-schedule');
+  const resEl = document.getElementById('s-restic-schedule');
+  const pbsVal = pbsEl?.value.trim();
+  const resVal = resEl?.value.trim();
+  if (pbsVal && pbsEl.dataset.jobId) {
+    body.pbs_schedule = { id: pbsEl.dataset.jobId, schedule: pbsVal };
+  }
+  if (resVal) {
+    body.restic_schedule = resVal;
+  }
+
   try {
     const r = await fetch(`${API_BASE}/api/host/${currentHost}/settings`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ retention }),
+      body: JSON.stringify(body),
     });
     if (r.ok) {
       closeSettingsModal();
