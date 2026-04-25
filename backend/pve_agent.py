@@ -519,6 +519,9 @@ class StatePoller:
     CLOUD_STORAGE_INTERVAL = 60   # seconds — cloud quota/usage (just 2 rclone calls)
     INFO_INTERVAL         = 3600  # seconds — version strings (rarely change)
     SCHEDULES_INTERVAL    = 120   # seconds — next scheduled backup
+    PBS_TASKS_INTERVAL    = 15    # seconds — running PBS task poll
+
+    PBS_TASK_TYPES = {"backup", "prune", "prunejob", "garbage_collection", "verify"}
 
     def __init__(self, cfg: "AgentConfig", mqtt: MQTTPublisher) -> None:
         self._cfg   = cfg
@@ -572,9 +575,10 @@ class StatePoller:
         threading.Thread(target=self._loop_cloud_storage,  daemon=True, name="poller-cloud-storage").start()
         threading.Thread(target=self._loop_info,           daemon=True, name="poller-info").start()
         threading.Thread(target=self._loop_schedules,      daemon=True, name="poller-schedules").start()
-        log.info("StatePoller started (pve/pbs %ds, restic %ds, cloud-storage %ds, info %ds, schedules %ds)",
+        threading.Thread(target=self._loop_pbs_tasks,      daemon=True, name="poller-pbs-tasks").start()
+        log.info("StatePoller started (pve/pbs %ds, restic %ds, cloud-storage %ds, info %ds, schedules %ds, pbs-tasks %ds)",
                  self.PVE_PBS_INTERVAL, self.RESTIC_INTERVAL, self.CLOUD_STORAGE_INTERVAL,
-                 self.INFO_INTERVAL, self.SCHEDULES_INTERVAL)
+                 self.INFO_INTERVAL, self.SCHEDULES_INTERVAL, self.PBS_TASKS_INTERVAL)
 
     def stop(self) -> None:
         self._stop.set()
@@ -650,6 +654,14 @@ class StatePoller:
             except Exception as exc:
                 log.warning("Schedules poll error: %s", exc)
             self._stop.wait(self.SCHEDULES_INTERVAL)
+
+    def _loop_pbs_tasks(self) -> None:
+        while not self._stop.is_set():
+            try:
+                self._scan_pbs_tasks()
+            except Exception as exc:
+                log.warning("PBS tasks poll error: %s", exc)
+            self._stop.wait(self.PBS_TASKS_INTERVAL)
 
     # ── scan implementations ──────────────────────────────────────────────────
 
@@ -899,6 +911,15 @@ class StatePoller:
             except Exception as exc:
                 log.warning("Schedule restic fetch failed: %s", exc)
         self._pub_if_changed("schedules", result)
+
+    def _scan_pbs_tasks(self) -> None:
+        """Poll PBS for running tasks and publish via MQTT."""
+        try:
+            tasks = _get_pbs_tasks(running_only=True)
+        except Exception as exc:
+            log.warning("PBS task scan failed: %s", exc)
+            return
+        self._pub_if_changed("pbs/tasks/running", tasks)
 
     def _scan_restic(self) -> None:
         cfg = self._cfg
@@ -1153,6 +1174,47 @@ class LocalResticClient:
             if k in mapping and v:
                 result[mapping[k]] = v
         return result
+
+    def set_retention(self, retention: dict) -> None:
+        """Write RESTIC_RETENTION_KEEP_* values back to config.env.
+
+        Only updates keys present in retention; leaves all other lines intact.
+        """
+        config_path = "/etc/proxmox-backup-restore/config.env"
+        mapping = {
+            "keep-last":    "RESTIC_RETENTION_KEEP_LAST",
+            "keep-daily":   "RESTIC_RETENTION_KEEP_DAILY",
+            "keep-weekly":  "RESTIC_RETENTION_KEEP_WEEKLY",
+            "keep-monthly": "RESTIC_RETENTION_KEEP_MONTHLY",
+            "keep-yearly":  "RESTIC_RETENTION_KEEP_YEARLY",
+        }
+        try:
+            with open(config_path) as f:
+                lines = f.readlines()
+        except OSError:
+            lines = []
+
+        env_updates = {mapping[k]: str(v) for k, v in retention.items() if k in mapping}
+        written = set()
+        new_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#") and "=" in stripped:
+                key = stripped.split("=", 1)[0].strip()
+                if key in env_updates:
+                    new_lines.append(f'{key}={env_updates[key]}\n')
+                    written.add(key)
+                    continue
+            new_lines.append(line)
+        # Append any keys not already present
+        for key, val in env_updates.items():
+            if key not in written:
+                new_lines.append(f'{key}={val}\n')
+
+        import os as _os
+        _os.makedirs(_os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w") as f:
+            f.writelines(new_lines)
 
     def get_pbs_prune_jobs(self) -> list[dict]:
         """Read PBS prune job settings via proxmox-backup-manager."""
@@ -1442,6 +1504,39 @@ def _run_in_background(op: Operation, fn, rescan_restic: bool = False) -> None:
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PBS task helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+_PBS_TASK_TYPES = {"backup", "prune", "prunejob", "garbage_collection", "verify"}
+
+
+def _get_pbs_tasks(running_only: bool = False, limit: int = 50) -> list[dict]:
+    """Return PBS tasks via proxmox-backup-manager task list."""
+    cmd = ["proxmox-backup-manager", "task", "list", "--all", "--output-format", "json"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15).stdout
+        tasks = json.loads(out.strip() or "[]")
+    except Exception:
+        return []
+    tasks = [t for t in tasks if t.get("worker_type") in _PBS_TASK_TYPES]
+    if running_only:
+        tasks = [t for t in tasks if not t.get("endtime")]
+    return tasks[:limit]
+
+
+def _get_pbs_task_log(upid: str) -> list[str]:
+    """Fetch log lines for a PBS task by UPID."""
+    try:
+        out = subprocess.run(
+            ["proxmox-backup-manager", "task", "log", upid],
+            capture_output=True, text=True, timeout=30,
+        ).stdout
+        return out.splitlines()
+    except Exception:
+        return []
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1901,6 +1996,163 @@ def schedules():
         pass
 
     return jsonify(result)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routes — PBS tasks
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/pbs/tasks")
+def pbs_tasks():
+    running_only = request.args.get("running") == "1"
+    return jsonify(_get_pbs_tasks(running_only=running_only))
+
+
+@app.route("/pbs/tasks/<path:upid>/log")
+def pbs_task_log(upid: str):
+    return jsonify({"lines": _get_pbs_task_log(upid)})
+
+
+@app.route("/pbs/tasks/<path:upid>/stream")
+def pbs_task_stream(upid: str):
+    """SSE stream of a PBS task log — polls until task finishes."""
+    def generate() -> Iterator[str]:
+        seen = 0
+        while True:
+            lines = _get_pbs_task_log(upid)
+            for line in lines[seen:]:
+                yield f"data: {json.dumps(line)}\n\n"
+            seen = len(lines)
+            # Check if task is done
+            tasks = _get_pbs_tasks(running_only=True)
+            running_upids = {t.get("upid") for t in tasks}
+            if upid not in running_upids and seen > 0:
+                yield f"data: {json.dumps({'done': True})}\n\n"
+                return
+            time.sleep(2)
+
+    return Response(stream_with_context(generate()),
+                    mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Routes — settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.route("/settings")
+def settings_get():
+    res = LocalResticClient(_cfg)
+    pve = PVEClient(_host())
+    pbs_jobs = pve.get_backup_schedules()
+    pbs_job      = pbs_jobs[0] if pbs_jobs else None
+    pbs_schedule = {"id": pbs_job["id"], "schedule": pbs_job["schedule"]} if pbs_job else None
+    vm_selection = pve.get_backup_vm_selection(pbs_job["id"]) if pbs_job else {"mode": "exclude", "vmids": []}
+    prune_jobs   = res.get_pbs_prune_jobs()
+    cfg          = _cfg
+    pbs_prune    = next(
+        ({"id": j["id"], "retention": {k: j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
+         for j in prune_jobs if j.get("store") == (cfg.pbs_datastore if cfg else "")),
+        None,
+    )
+    return jsonify({
+        "retention":       res.get_retention(),
+        "pbs_schedule":    pbs_schedule,
+        "restic_schedule": res.get_restic_schedule(),
+        "vm_selection":    vm_selection,
+        "pbs_prune":       pbs_prune,
+    })
+
+
+@app.route("/settings", methods=["POST"])
+def settings_post():
+    body = request.get_json(silent=True) or {}
+
+    res = LocalResticClient(_cfg)
+    errors = []
+
+    if "retention" in body:
+        retention = body["retention"]
+        if not isinstance(retention, dict):
+            return jsonify({"error": "retention must be a dict"}), 400
+        try:
+            res.set_retention(retention)
+        except Exception as exc:
+            errors.append(f"retention: {exc}")
+
+    if "restic_schedule" in body:
+        try:
+            res.set_restic_schedule(body["restic_schedule"])
+        except Exception as exc:
+            errors.append(f"restic_schedule: {exc}")
+
+    if "pbs_schedule" in body:
+        sched = body["pbs_schedule"]
+        job_id   = sched.get("id")       if isinstance(sched, dict) else None
+        schedule = sched.get("schedule") if isinstance(sched, dict) else None
+        if not job_id or not schedule:
+            return jsonify({"error": "pbs_schedule requires {id, schedule}"}), 400
+        try:
+            PVEClient(_host()).set_backup_schedule(job_id, schedule)
+        except Exception as exc:
+            errors.append(f"pbs_schedule: {exc}")
+
+    if "pbs_prune" in body:
+        pp = body["pbs_prune"]
+        job_id    = pp.get("id")        if isinstance(pp, dict) else None
+        retention = pp.get("retention") if isinstance(pp, dict) else None
+        if not job_id or not isinstance(retention, dict):
+            return jsonify({"error": "pbs_prune requires {id, retention: dict}"}), 400
+        bad = {k: v for k, v in retention.items() if not isinstance(v, int)}
+        if bad:
+            return jsonify({"error": f"pbs_prune retention values must be integers: {bad}"}), 400
+        try:
+            res.set_pbs_prune_job(job_id, retention)
+        except Exception as exc:
+            errors.append(f"pbs_prune: {exc}")
+
+    if "vm_selection" in body:
+        sel = body["vm_selection"]
+        mode  = sel.get("mode")  if isinstance(sel, dict) else None
+        vmids = sel.get("vmids") if isinstance(sel, dict) else None
+        if mode not in ("exclude", "include") or not isinstance(vmids, list) \
+                or not all(isinstance(v, int) for v in vmids):
+            return jsonify({"error": "vm_selection requires {mode: 'exclude'|'include', vmids: [int]}"}), 400
+        try:
+            pve2 = PVEClient(_host())
+            jobs2 = pve2.get_backup_schedules()
+            if not jobs2:
+                return jsonify({"error": "no PBS backup job found"}), 400
+            pve2.set_backup_vm_selection(jobs2[0]["id"], mode, vmids)
+        except Exception as exc:
+            errors.append(f"vm_selection: {exc}")
+
+    if errors:
+        return jsonify({"error": "; ".join(errors)}), 500
+
+    # Republish updated schedules via MQTT
+    if _poller:
+        _poller._scan_schedules()
+
+    pve = PVEClient(_host())
+    pbs_jobs2 = pve.get_backup_schedules()
+    pbs_job2   = pbs_jobs2[0] if pbs_jobs2 else None
+    pbs_sched2 = {"id": pbs_job2["id"], "schedule": pbs_job2["schedule"]} if pbs_job2 else None
+    vm_sel2    = pve.get_backup_vm_selection(pbs_job2["id"]) if pbs_job2 else {"mode": "exclude", "vmids": []}
+    prune_jobs2 = res.get_pbs_prune_jobs()
+    cfg2        = _cfg
+    pbs_prune2  = next(
+        ({"id": j["id"], "retention": {k: j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
+         for j in prune_jobs2 if j.get("store") == (cfg2.pbs_datastore if cfg2 else "")),
+        None,
+    )
+    return jsonify({
+        "retention":       res.get_retention(),
+        "pbs_schedule":    pbs_sched2,
+        "restic_schedule": res.get_restic_schedule(),
+        "vm_selection":    vm_sel2,
+        "pbs_prune":       pbs_prune2,
+    })
 
 
 # ─────────────────────────────────────────────────────────────────────────────

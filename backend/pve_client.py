@@ -38,6 +38,11 @@ class PVEClient:
         resp.raise_for_status()
         return resp.json().get("data", {})
 
+    def _put(self, path: str, **data) -> dict:
+        resp = self._session.put(f"{self._base}/api2/json{path}", json=data)
+        resp.raise_for_status()
+        return resp.json().get("data", {}) or {}
+
     def get_nodes(self) -> list[str]:
         nodes = self._get("/nodes")
         return [n["node"] for n in nodes]
@@ -83,6 +88,43 @@ class PVEClient:
             return result
         except Exception:
             return []
+
+    def get_backup_vm_selection(self, job_id: str) -> dict:
+        """Return {mode, vmids} for the named vzdump job.
+
+        mode="exclude": job has all=1; vmids is the exclude list.
+        mode="include": job has no all; vmids is the explicit include list.
+        """
+        try:
+            jobs = self._get("/cluster/backup")
+            for j in (jobs if isinstance(jobs, list) else []):
+                if j.get("id") != job_id:
+                    continue
+                if j.get("all"):
+                    raw = j.get("exclude", "")
+                    vmids = [int(v) for v in str(raw).split(",") if v.strip().isdigit()]
+                    return {"mode": "exclude", "vmids": vmids}
+                else:
+                    raw = j.get("vmid", "")
+                    vmids = [int(v) for v in str(raw).split(",") if v.strip().isdigit()]
+                    return {"mode": "include", "vmids": vmids}
+        except Exception:
+            pass
+        return {"mode": "exclude", "vmids": []}
+
+    def set_backup_vm_selection(self, job_id: str, mode: str, vmids: list[int]) -> None:
+        """Set backup VM selection mode and vmid list for a vzdump job."""
+        ids = ",".join(str(v) for v in vmids)
+        if mode == "include":
+            # Explicit include: remove all=1, set vmid list (empty = no VMs backed up)
+            self._put(f"/cluster/backup/{job_id}", all=0, vmid=ids, exclude="")
+        else:
+            # Exclude mode: set all=1, set exclude list
+            self._put(f"/cluster/backup/{job_id}", all=1, exclude=ids, vmid="")
+
+    def set_backup_schedule(self, job_id: str, schedule: str) -> None:
+        """Update the schedule of an existing vzdump backup job."""
+        self._put(f"/cluster/backup/{job_id}", schedule=schedule)
 
     def is_backup_running(self) -> bool:
         """Return True if a vzdump task is currently running on any node."""

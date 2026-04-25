@@ -52,6 +52,8 @@
   .status-dot.error { background:var(--red); box-shadow:0 0 6px var(--red); }
   @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
   /* User button + dropdown */
+  .settings-btn { display:flex; align-items:center; justify-content:center; width:30px; height:30px; border-radius:6px; border:1px solid var(--border2); background:transparent; color:var(--muted); cursor:pointer; transition:all .15s; font-size:15px; }
+  .settings-btn:hover { border-color:var(--accent); color:var(--accent); }
   .user-btn { display:flex; align-items:center; gap:7px; padding:5px 10px; border-radius:6px; border:1px solid var(--border2); background:transparent; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:11px; cursor:pointer; transition:all .15s; position:relative; }
   .user-btn:hover { border-color:var(--accent); color:var(--accent); }
   .user-avatar { width:20px; height:20px; border-radius:4px; background:var(--accent); display:flex; align-items:center; justify-content:center; color:#fff; font-size:10px; font-weight:600; }
@@ -63,6 +65,26 @@
   .user-menu-item { display:flex; align-items:center; gap:8px; padding:9px 14px; font-family:'IBM Plex Mono',monospace; font-size:11px; color:var(--muted); cursor:pointer; transition:background .1s; border:none; background:none; width:100%; text-align:left; }
   .user-menu-item:hover { background:var(--border); color:var(--text); }
   .user-menu-item.danger:hover { background:color-mix(in srgb, var(--red) 12%, transparent); color:var(--red); }
+
+  /* Settings modal */
+  .settings-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.5); z-index:500; align-items:center; justify-content:center; }
+  .settings-overlay.open { display:flex; }
+  .settings-modal { background:var(--surface); border:1px solid var(--border2); border-radius:12px; width:520px; max-width:95vw; max-height:85vh; display:flex; flex-direction:column; box-shadow:0 16px 48px rgba(0,0,0,.5); }
+  .settings-modal-header { padding:18px 22px 14px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+  .settings-modal-title { font-size:14px; font-weight:600; color:var(--text); }
+  .settings-modal-body { overflow-y:auto; padding:20px 22px; display:flex; flex-direction:column; gap:22px; }
+  .settings-section-title { font-family:'IBM Plex Mono',monospace; font-size:10px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); margin-bottom:10px; }
+  .settings-row { display:flex; align-items:center; justify-content:space-between; gap:16px; }
+  .settings-label { font-size:13px; color:var(--text); }
+  .settings-hint  { font-size:11px; color:var(--muted); margin-top:2px; }
+  .settings-input { width:90px; padding:5px 9px; border-radius:6px; border:1px solid var(--border2); background:var(--bg); color:var(--text); font-family:'IBM Plex Mono',monospace; font-size:12px; text-align:right; }
+  .settings-input:focus { outline:none; border-color:var(--accent); }
+  .settings-modal-footer { padding:14px 22px; border-top:1px solid var(--border); display:flex; justify-content:flex-end; gap:10px; }
+  .vm-select-list { display:flex; flex-direction:column; gap:6px; max-height:180px; overflow-y:auto; border:1px solid var(--border2); border-radius:6px; padding:8px 10px; background:var(--bg); }
+  .vm-select-row { display:flex; align-items:center; gap:8px; font-size:12px; color:var(--text); cursor:pointer; }
+  .vm-select-row input[type=checkbox] { accent-color:var(--accent); width:14px; height:14px; cursor:pointer; }
+  .vm-select-vmid { font-family:'IBM Plex Mono',monospace; color:var(--muted); min-width:36px; }
+  .vm-select-type { font-size:10px; color:var(--muted); background:var(--border2); border-radius:3px; padding:1px 4px; }
 
   /* Layout */
   .layout { display:grid; grid-template-columns:220px 1fr; min-height:calc(100vh - 52px); min-width:820px; }
@@ -339,6 +361,7 @@
   </div>
   <div class="status-pill">
     <button class="theme-toggle" id="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme"></button>
+    <button class="settings-btn" id="settings-btn" onclick="openSettingsModal()" title="Settings">⚙</button>
     <div style="position:relative;">
       <button class="user-btn" id="user-btn" onclick="toggleUserMenu()">
         <div class="user-avatar" id="user-avatar">?</div>
@@ -352,6 +375,98 @@
         <button class="user-menu-item" onclick="openChangePwModal(); closeUserMenu()">🔑 Change password</button>
         <button class="user-menu-item danger" onclick="doLogout()">↩ Sign out</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Settings modal ──────────────────────────────────────────────── -->
+<div class="settings-overlay" id="settings-overlay" onclick="if(event.target===this)closeSettingsModal()">
+  <div class="settings-modal">
+    <div class="settings-modal-header">
+      <span class="settings-modal-title">Settings</span>
+      <button class="modal-x" onclick="closeSettingsModal()">✕</button>
+    </div>
+    <div class="settings-modal-body" id="settings-modal-body">
+
+      <div>
+        <div class="settings-section-title">Restic — Cloud Retention</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div class="settings-row">
+            <div><div class="settings-label">Keep last</div><div class="settings-hint">Always keep this many snapshots</div></div>
+            <input class="settings-input" id="s-keep-last" type="number" min="0" placeholder="—">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Keep daily</div><div class="settings-hint">One snapshot per day, N days back</div></div>
+            <input class="settings-input" id="s-keep-daily" type="number" min="0" placeholder="—">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Keep weekly</div><div class="settings-hint">One snapshot per week, N weeks back</div></div>
+            <input class="settings-input" id="s-keep-weekly" type="number" min="0" placeholder="—">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Keep monthly</div><div class="settings-hint">One snapshot per month, N months back</div></div>
+            <input class="settings-input" id="s-keep-monthly" type="number" min="0" placeholder="—">
+          </div>
+        </div>
+      </div>
+
+      <div id="s-pbs-prune-section" style="display:none">
+        <div class="settings-section-title">PBS — Prune Policy</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div class="settings-row">
+            <div><div class="settings-label">Keep last</div><div class="settings-hint">Always keep this many snapshots</div></div>
+            <input class="settings-input" id="s-pbs-keep-last" type="number" min="0" placeholder="—">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Keep daily</div><div class="settings-hint">One per day, N days back</div></div>
+            <input class="settings-input" id="s-pbs-keep-daily" type="number" min="0" placeholder="—">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Keep weekly</div><div class="settings-hint">One per week, N weeks back</div></div>
+            <input class="settings-input" id="s-pbs-keep-weekly" type="number" min="0" placeholder="—">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Keep monthly</div><div class="settings-hint">One per month, N months back</div></div>
+            <input class="settings-input" id="s-pbs-keep-monthly" type="number" min="0" placeholder="—">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Keep yearly</div><div class="settings-hint">One per year, N years back</div></div>
+            <input class="settings-input" id="s-pbs-keep-yearly" type="number" min="0" placeholder="—">
+          </div>
+        </div>
+      </div>
+
+      <div id="s-vm-selection-section" style="display:none">
+        <div class="settings-section-title">VM / LXC Backup Selection</div>
+        <div class="settings-row" style="margin-bottom:10px">
+          <div><div class="settings-label">Mode</div></div>
+          <select id="s-vm-mode" class="settings-input" style="width:140px;text-align:left" onchange="renderVmSelectionList()">
+            <option value="exclude">Backup all (exclude)</option>
+            <option value="include">Backup selected (include)</option>
+          </select>
+        </div>
+        <div class="settings-hint" id="s-vm-mode-hint" style="margin-bottom:8px"></div>
+        <div class="vm-select-list" id="s-vm-list"></div>
+      </div>
+
+      <div id="s-schedules-section" style="display:none">
+        <div class="settings-section-title">Schedules</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div class="settings-row">
+            <div><div class="settings-label">PBS backup</div><div class="settings-hint">PVE vzdump schedule (e.g. 02:00 or sat 03:00)</div></div>
+            <input class="settings-input" id="s-pbs-schedule" type="text" placeholder="—" style="width:110px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Restic backup</div><div class="settings-hint">systemd OnCalendar (e.g. 02:30 or Sat 03:00)</div></div>
+            <input class="settings-input" id="s-restic-schedule" type="text" placeholder="—" style="width:110px;text-align:left">
+          </div>
+        </div>
+      </div>
+
+    </div>
+    <div class="settings-modal-footer">
+      <button class="btn-secondary" onclick="closeSettingsModal()">Cancel</button>
+      <button class="btn-primary" id="settings-save-btn" onclick="saveSettings()">Save</button>
     </div>
   </div>
 </div>
@@ -388,6 +503,7 @@
         <div class="job-indicator-dot"></div>
         <span id="global-job-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
       </div>
+      <div id="pbs-task-cards"></div>
     </div>
   </div>
 
@@ -795,6 +911,8 @@ function selectHost(id) {
   document.getElementById('cloud-bar').style.width = '0%';
   document.getElementById('pbs-dedup').textContent = '—';
   _schedules = null;
+  _pbsTasks = [];
+  renderPbsTasks();
   _activeTab = 'backups';
   document.getElementById('tab-backups').classList.add('active');
   document.getElementById('tab-cloud').classList.remove('active');
@@ -815,6 +933,91 @@ function loadData() {
 
 // loadStorage and loadInfo are replaced by MQTT topics proxmox/<host>/storage and /info.
 // _applyStorage() and _applyInfo() are called by MQTTBus._onMessage.
+
+// ─────────────────────────────────────────────
+// PBS tasks — running tasks from MQTT proxmox/<host>/pbs/tasks/running
+// ─────────────────────────────────────────────
+let _pbsTasks = [];
+
+const _PBS_TASK_LABELS = {
+  backup:            'PBS backup',
+  prune:             'PBS prune',
+  prunejob:          'PBS prune job',
+  garbage_collection:'PBS garbage collection',
+  verify:            'PBS verify',
+};
+
+function _pbsTaskTitle(t) {
+  const base = _PBS_TASK_LABELS[t.worker_type] || t.worker_type;
+  return t.worker_id ? `${base} — ${t.worker_id}` : base;
+}
+
+function renderPbsTasks() {
+  const section  = document.getElementById('global-job-section');
+  const container = document.getElementById('pbs-task-cards');
+  if (!container) return;
+  container.innerHTML = '';
+  // If a GUI op is already tracking a specific VMID, hide PBS tasks for that
+  // VMID (they are sub-tasks of the GUI op — showing both would be duplicates).
+  const guiVmids = new Set(
+    Object.keys(_activeJobs).map(k => String(k)).filter(k => !k.startsWith('_noid_'))
+  );
+  const GUI_TRIGGERED = new Set(['backup', 'prune']);
+  for (const t of _pbsTasks) {
+    if (GUI_TRIGGERED.has(t.worker_type) && guiVmids.size > 0) {
+      // Parse VMID from worker_id e.g. "local-store:vm/100" or "local-store::vm/100"
+      const m = (t.worker_id || '').match(/\/(\d+)$/);
+      if (m && guiVmids.has(m[1])) continue;
+    }
+    const title = _pbsTaskTitle(t);
+    const div = document.createElement('div');
+    div.className = 'job-indicator';
+    div.style.cssText = 'width:100%;box-sizing:border-box;margin-top:4px;cursor:pointer';
+    div.title = t.upid;
+    div.innerHTML = `<div class="job-indicator-dot"></div><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</span>`;
+    div.onclick = () => openPbsTaskModal(t.upid, title);
+    container.appendChild(div);
+  }
+  _updateGlobalJobIndicator();
+}
+
+function openPbsTaskModal(upid, title) {
+  const modal = document.getElementById('job-modal');
+  document.getElementById('job-title').textContent = title;
+  document.getElementById('job-subtitle').textContent = '';
+  document.getElementById('job-badge').textContent = 'running';
+  document.getElementById('job-badge').className = 'job-status-badge running';
+  document.getElementById('job-progress').style.display = 'none';
+  document.getElementById('job-close-btn').disabled = true;
+  const logEl = document.getElementById('job-log');
+  logEl.innerHTML = '';
+  modal.classList.add('open');
+
+  if (_jobPollInterval) { clearInterval(_jobPollInterval); _jobPollInterval = null; }
+
+  const es = new EventSource(`${API_BASE}/api/host/${currentHost}/pbs/tasks/${encodeURIComponent(upid)}/stream`);
+  es.onmessage = e => {
+    try {
+      const data = JSON.parse(e.data);
+      if (data && data.done) {
+        es.close();
+        document.getElementById('job-badge').textContent = 'done';
+        document.getElementById('job-badge').className = 'job-status-badge ok';
+        document.getElementById('job-close-btn').disabled = false;
+        return;
+      }
+      const line = document.createElement('div');
+      line.className = 'log-line';
+      line.textContent = typeof data === 'string' ? data : JSON.stringify(data);
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    } catch (_) {}
+  };
+  es.onerror = () => {
+    es.close();
+    document.getElementById('job-close-btn').disabled = false;
+  };
+}
 
 // ─────────────────────────────────────────────
 // Schedules — data arrives via MQTT proxmox/<host>/schedules (retained)
@@ -866,7 +1069,7 @@ function renderSchedules() {
   const resTitle = restic_next ? restic_next.next.replace(/:\d{2}\s+\S+$/, '') : '';
   const resRet   = restic_retention || {};
 
-  const hasAny = pbs_jobs?.length || restic_next || pbs_running || restic_running;
+  const hasAny = pbs_jobs?.length || restic_next || pbs_running || restic_running || Object.keys(resRet).length || Object.keys(pbsRet).length;
   if (!hasAny) { section.style.display = 'none'; return; }
 
   let html = '';
@@ -1248,8 +1451,12 @@ function _reopenLastJob() {
 function _updateGlobalJobIndicator() {
   const section = document.getElementById('global-job-section');
   const label = document.getElementById('global-job-label');
-  const anyRunning = Object.keys(_activeJobs).length > 0;
+  const anyGuiJobs = Object.keys(_activeJobs).length > 0;
+  const anyPbsTasks = (_pbsTasks || []).length > 0;
+  const anyRunning = anyGuiJobs || anyPbsTasks;
   if (section) section.style.display = anyRunning ? '' : 'none';
+  const indicator = document.getElementById('global-job-indicator');
+  if (indicator) indicator.style.display = anyGuiJobs ? '' : 'none';
   if (label && _lastJob) label.textContent = _lastJob.title;
 }
 
@@ -1803,6 +2010,169 @@ async function loadCurrentUser() {
   } catch (e) { /* ignore */ }
 }
 
+// ── Settings modal ────────────────────────────────────────────────────────────
+async function openSettingsModal() {
+  // Load current values from the active host's agent
+  const overlay = document.getElementById('settings-overlay');
+  const body    = document.getElementById('settings-modal-body');
+  overlay.classList.add('open');
+  if (!currentHost) return;
+  try {
+    const r = await fetch(`${API_BASE}/api/host/${currentHost}/settings`);
+    if (r.ok) {
+      const d = await r.json();
+      const retention = d.retention || {};
+      document.getElementById('s-keep-last').value    = retention['keep-last']    ?? '';
+      document.getElementById('s-keep-daily').value   = retention['keep-daily']   ?? '';
+      document.getElementById('s-keep-weekly').value  = retention['keep-weekly']  ?? '';
+      document.getElementById('s-keep-monthly').value = retention['keep-monthly'] ?? '';
+
+      const schedSection = document.getElementById('s-schedules-section');
+      const pbsEl  = document.getElementById('s-pbs-schedule');
+      const resEl  = document.getElementById('s-restic-schedule');
+      if (d.pbs_schedule || d.restic_schedule != null) {
+        schedSection.style.display = '';
+        pbsEl.value  = d.pbs_schedule?.schedule ?? '';
+        pbsEl.dataset.jobId = d.pbs_schedule?.id ?? '';
+        resEl.value  = d.restic_schedule ?? '';
+      } else {
+        schedSection.style.display = 'none';
+      }
+
+      // PBS prune policy
+      const pbsPruneSec = document.getElementById('s-pbs-prune-section');
+      const pbsPrune = d.pbs_prune;
+      if (pbsPrune) {
+        pbsPruneSec.style.display = '';
+        const pr = pbsPrune.retention || {};
+        document.getElementById('s-pbs-keep-last').value    = pr['keep-last']    ?? '';
+        document.getElementById('s-pbs-keep-daily').value   = pr['keep-daily']   ?? '';
+        document.getElementById('s-pbs-keep-weekly').value  = pr['keep-weekly']  ?? '';
+        document.getElementById('s-pbs-keep-monthly').value = pr['keep-monthly'] ?? '';
+        document.getElementById('s-pbs-keep-yearly').value  = pr['keep-yearly']  ?? '';
+        pbsPruneSec.dataset.jobId = pbsPrune.id;
+      } else {
+        pbsPruneSec.style.display = 'none';
+      }
+
+      // VM selection
+      const vmSec = document.getElementById('s-vm-selection-section');
+      const vmSel = d.vm_selection || { mode: 'exclude', vmids: [] };
+      document.getElementById('s-vm-mode').value = vmSel.mode;
+      window._vmSelectionData = vmSel;
+      const ds = MQTTBus.getDS();
+      const vmEntries = Object.entries(ds)
+        .map(([vmid, v]) => ({ vmid, name: v.meta?.name || `vm-${vmid}`, type: v.meta?.type || 'vm' }))
+        .sort((a, b) => Number(a.vmid) - Number(b.vmid));
+      window._vmEntries = vmEntries;
+      if (vmEntries.length) {
+        vmSec.style.display = '';
+        renderVmSelectionList();
+      } else {
+        vmSec.style.display = 'none';
+      }
+    }
+  } catch (_) {}
+}
+
+function renderVmSelectionList() {
+  const mode    = document.getElementById('s-vm-mode')?.value || 'exclude';
+  const vmids   = new Set(((window._vmSelectionData || {}).vmids || []).map(String));
+  const entries = window._vmEntries || [];
+  const hint    = document.getElementById('s-vm-mode-hint');
+  const list    = document.getElementById('s-vm-list');
+  if (hint) hint.textContent = mode === 'exclude'
+    ? 'All VMs are backed up. Uncheck to exclude from nightly PBS backup.'
+    : 'No VMs are backed up by default. Check to include in nightly PBS backup.';
+  if (!list) return;
+  list.innerHTML = entries.map(({ vmid, name, type }) => {
+    const checked = mode === 'exclude' ? !vmids.has(vmid) : vmids.has(vmid);
+    return `<label class="vm-select-row">
+      <input type="checkbox" data-vmid="${vmid}" ${checked ? 'checked' : ''}>
+      <span class="vm-select-vmid">${vmid}</span>
+      <span class="vm-select-type">${type}</span>
+      <span>${name}</span>
+    </label>`;
+  }).join('');
+}
+
+function closeSettingsModal() {
+  document.getElementById('settings-overlay').classList.remove('open');
+}
+
+async function saveSettings() {
+  if (!currentHost) return;
+  const btn = document.getElementById('settings-save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving…';
+  const retention = {};
+  const fields = {
+    'keep-last':    's-keep-last',
+    'keep-daily':   's-keep-daily',
+    'keep-weekly':  's-keep-weekly',
+    'keep-monthly': 's-keep-monthly',
+  };
+  for (const [key, id] of Object.entries(fields)) {
+    const v = document.getElementById(id).value.trim();
+    if (v !== '') retention[key] = parseInt(v, 10);
+  }
+
+  const body = { retention };
+  const pbsEl = document.getElementById('s-pbs-schedule');
+  const resEl = document.getElementById('s-restic-schedule');
+  const pbsVal = pbsEl?.value.trim();
+  const resVal = resEl?.value.trim();
+  if (pbsVal && pbsEl.dataset.jobId) {
+    body.pbs_schedule = { id: pbsEl.dataset.jobId, schedule: pbsVal };
+  }
+  if (resVal) {
+    body.restic_schedule = resVal;
+  }
+
+  const pbsPruneSec2 = document.getElementById('s-pbs-prune-section');
+  if (pbsPruneSec2.style.display !== 'none') {
+    const pbsPruneFields = {
+      'keep-last': 's-pbs-keep-last', 'keep-daily': 's-pbs-keep-daily',
+      'keep-weekly': 's-pbs-keep-weekly', 'keep-monthly': 's-pbs-keep-monthly',
+      'keep-yearly': 's-pbs-keep-yearly',
+    };
+    const pbsRet = {};
+    for (const [key, id] of Object.entries(pbsPruneFields)) {
+      const v = document.getElementById(id).value.trim();
+      if (v !== '') pbsRet[key] = parseInt(v, 10);
+    }
+    body.pbs_prune = { id: pbsPruneSec2.dataset.jobId, retention: pbsRet };
+  }
+
+  if (document.getElementById('s-vm-selection-section').style.display !== 'none') {
+    const mode = document.getElementById('s-vm-mode').value;
+    const vmids = [];
+    document.querySelectorAll('#s-vm-list input[type=checkbox]').forEach(cb => {
+      if (mode === 'exclude' && !cb.checked) vmids.push(parseInt(cb.dataset.vmid, 10));
+      if (mode === 'include' &&  cb.checked) vmids.push(parseInt(cb.dataset.vmid, 10));
+    });
+    body.vm_selection = { mode, vmids };
+  }
+
+  try {
+    const r = await fetch(`${API_BASE}/api/host/${currentHost}/settings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) {
+      closeSettingsModal();
+    } else {
+      const d = await r.json().catch(() => ({}));
+      alert(d.error || 'Failed to save settings');
+    }
+  } catch (e) {
+    alert('Network error');
+  }
+  btn.disabled = false;
+  btn.textContent = 'Save';
+}
+
 function toggleUserMenu() {
   document.getElementById('user-menu').classList.toggle('open');
 }
@@ -2134,6 +2504,14 @@ const MQTTBus = (() => {
     // proxmox/<host>/info — footer version strings
     if (parts[2] === 'info' && parts.length === 3) {
       try { _applyInfo(JSON.parse(msg)); } catch (_) {}
+      return;
+    }
+    // proxmox/<host>/pbs/tasks/running — PBS task cards in sidebar
+    if (parts[2] === 'pbs' && parts[3] === 'tasks' && parts[4] === 'running') {
+      try {
+        _pbsTasks = JSON.parse(msg) || [];
+        renderPbsTasks();
+      } catch (_) {}
       return;
     }
     // proxmox/<host>/schedules — sidebar schedule section
