@@ -1049,6 +1049,10 @@ def _host():
 class LocalResticClient:
     """Run restic and related commands directly via subprocess — no SSH."""
 
+    _PBS_PRUNE_KEYS = (
+        "keep-last", "keep-daily", "keep-weekly", "keep-monthly", "keep-yearly",
+    )
+
     def __init__(self, cfg: AgentConfig) -> None:
         self._repo = cfg.restic_repo
         self._env = {
@@ -1240,6 +1244,45 @@ class LocalResticClient:
             return jobs if isinstance(jobs, list) else []
         except Exception:
             return []
+
+    _RESTIC_TIMER = "/etc/systemd/system/restic-backup.timer"
+
+    def get_restic_schedule(self) -> str | None:
+        """Return the OnCalendar value from the restic systemd timer, or None."""
+        try:
+            with open(self._RESTIC_TIMER) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("OnCalendar="):
+                        return line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+        return None
+
+    def set_restic_schedule(self, on_calendar: str) -> None:
+        """Update OnCalendar in the restic systemd timer and reload."""
+        subprocess.run(
+            ["sed", "-i", f"s|^OnCalendar=.*|OnCalendar={on_calendar}|",
+             self._RESTIC_TIMER],
+            check=True, timeout=10,
+        )
+        subprocess.run(["systemctl", "daemon-reload"], check=True, timeout=15)
+        subprocess.run(["systemctl", "restart", "restic-backup.timer"],
+                       check=True, timeout=15)
+
+    def set_pbs_prune_job(self, job_id: str, retention: dict) -> None:
+        """Update a PBS prune job's retention policy via proxmox-backup-manager."""
+        parts = ["proxmox-backup-manager", "prune-job", "update", job_id]
+        to_delete = []
+        for key in self._PBS_PRUNE_KEYS:
+            val = retention.get(key)
+            if val:
+                parts += [f"--{key}", str(int(val))]
+            else:
+                to_delete.append(key)
+        if to_delete:
+            parts += ["--delete", ",".join(to_delete)]
+        subprocess.run(parts, check=True, timeout=15)
 
     def get_stats(self) -> dict:
         """Return cloud storage usage via rclone (same repo as restic uses).
