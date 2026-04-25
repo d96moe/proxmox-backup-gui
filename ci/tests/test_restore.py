@@ -2745,10 +2745,10 @@ _RESTIC_LOG_SENTINEL = "=== restic VM backup started: test sentinel ==="
 @pytest.fixture
 def seeded_restic_log(host_id):
     """Write a known log file on the PVE host; remove it on teardown."""
-    _ssh_pve("bash", "-c",
-             f"echo '{_RESTIC_LOG_SENTINEL}' > {_RESTIC_LOG_PATH}")
+    _ssh_pve_output("bash", "-c",
+                    f"echo '{_RESTIC_LOG_SENTINEL}' > {_RESTIC_LOG_PATH}")
     yield
-    _ssh_pve("rm", "-f", _RESTIC_LOG_PATH)
+    _ssh_pve_output("rm", "-f", _RESTIC_LOG_PATH)
 
 
 def test_restic_log_api_returns_lines(host_id, seeded_restic_log):

@@ -158,6 +158,3 @@ class AgentClient:
 
     def get_restic_log(self) -> dict:
         return self._get("/restic/log")
-
-    def stream_restic_log_url(self) -> str:
-        return f"{self._base}/restic/log/stream"

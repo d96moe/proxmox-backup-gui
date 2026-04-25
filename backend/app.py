@@ -928,21 +928,31 @@ def get_restic_log(host_id: str):
 @app.get("/api/host/<host_id>/restic/log/stream")
 @login_required
 def stream_restic_log(host_id: str):
-    """Proxy SSE stream of the nightly restic log from the agent."""
+    """SSE stream of the nightly restic log — polls agent GET endpoint until done."""
     host = HOSTS.get(host_id)
     if not host:
         abort(404)
     if not host.agent_url:
         abort(404)
-    import requests as _req
+    import time as _t
 
     def generate():
-        url = AgentClient(host.agent_url, token=host.agent_token).stream_restic_log_url()
-        headers = {"Authorization": f"Bearer {host.agent_token}"} if host.agent_token else {}
-        with _req.get(url, headers=headers, stream=True, timeout=(5, 600)) as r:
-            for chunk in r.iter_content(chunk_size=None):
-                if chunk:
-                    yield chunk
+        client = AgentClient(host.agent_url, token=host.agent_token)
+        sent = 0
+        while True:
+            try:
+                resp = client.get_restic_log()
+            except Exception:
+                yield "data: __done__\n\n"
+                return
+            lines = resp.get("lines", [])
+            while sent < len(lines):
+                yield f"data: {lines[sent]}\n\n"
+                sent += 1
+            if not resp.get("running", False):
+                yield "data: __done__\n\n"
+                return
+            _t.sleep(2)
 
     return Response(stream_with_context(generate()),
                     mimetype="text/event-stream",
