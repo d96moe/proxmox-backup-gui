@@ -366,7 +366,21 @@ for i in $(seq 1 20); do
     sleep 3
 done
 curl -sf -H "Authorization: Bearer ${AGENT_TOKEN}" http://10.10.0.1:8099/health || { echo "ERROR: Agent not reachable"; exit 1; }
-echo "Agent deployed and healthy"
+
+# Smoke-test every key endpoint — catches missing methods/attributes that only
+# blow up at runtime (not at import time), which /health alone won't catch.
+for EP in /settings /schedules /vms /items; do
+    CODE=$(curl -s -o /tmp/agent-ep-out.txt -w "%{http_code}" \
+        -H "Authorization: Bearer ${AGENT_TOKEN}" "http://10.10.0.1:8099${EP}")
+    if [ "${CODE}" != "200" ]; then
+        echo "ERROR: Agent ${EP} returned HTTP ${CODE}"
+        cat /tmp/agent-ep-out.txt
+        journalctl -u pve-agent --no-pager -n 30 || true
+        exit 1
+    fi
+    echo "  ${EP} → ${CODE} OK"
+done
+echo "Agent deployed and all endpoints healthy"
 DEPLOY_AGENT
 
                     # ── Deploy backend + frontend to LXC 300 ──

@@ -140,6 +140,10 @@ Playwright + `requests` against the real Flask backend. Cover:
 | `VM_IP` | `Jenkinsfile.integration` env block | `192.168.0.250` | Free IP for the CI VM |
 | `BACKEND_URL` | `Jenkinsfile.integration` run-tests stage | `http://10.10.0.100:5000` | Flask URL inside CI VM |
 
+### Agent endpoint smoke-tests
+
+After deploying the agent in the `Deploy latest code` stage, the pipeline smoke-tests `/settings`, `/schedules`, `/vms`, and `/items` in addition to `/health`. A 500 from any of these fails the build immediately (before any pytest runs), catching missing class attributes or methods that only blow up at runtime.
+
 ### mqtt_hostname alignment
 
 The pve-agent `config.json` key `mqtt_hostname` **must match** the `id` field in `hosts.json` on LXC 300. The pipeline writes both — if they diverge, the browser's WebSocket replay request (`proxmox/<host-id>`) won't match any retained MQTT topics (`proxmox/<mqtt_hostname>/...`), VM cards never render, and all `test_restore.py` UI tests will timeout.
