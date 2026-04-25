@@ -153,3 +153,11 @@ class AgentClient:
 
     def set_settings(self, settings: dict) -> dict:
         return self._post("/settings", settings)
+
+    # ── Restic log ────────────────────────────────────────────────────────────
+
+    def get_restic_log(self) -> dict:
+        return self._get("/restic/log")
+
+    def stream_restic_log_url(self) -> str:
+        return f"{self._base}/restic/log/stream"

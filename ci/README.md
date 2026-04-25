@@ -119,6 +119,7 @@ Playwright + `requests` against the real Flask backend. Cover:
 - **Settings — schedules** — PBS schedule roundtrip + verified via `pvesh` on PVE host; restic schedule roundtrip + verified in timer file via SSH; error cases
 - **Settings — VM selection** — exclude mode (all=1 + exclude field), include mode (all=0 + vmid field), mode switch, PVE verification, error cases
 - **PBS tasks** — GC, external backup, and prune triggered via SSH to PVE host; task visible in `/pbs/tasks` API; running card appears in sidebar; GUI backup suppresses duplicate PBS card for same VMID
+- **Restic nightly log** — API returns lines + running flag; seeded log file used for SSE stream tests; `__done__` emitted when no process active; `openResticLogModal()` opens job modal with log content
 
 ---
 

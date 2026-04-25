@@ -1127,6 +1127,8 @@ class LocalResticClient:
             pass
         return None
 
+    RESTIC_LOG_FILE = "/var/log/restic-backup.log"
+
     def is_running(self) -> bool:
         """Return True if a restic *backup* is currently running (not just listing)."""
         try:
@@ -1137,6 +1139,17 @@ class LocalResticClient:
             return result.returncode == 0
         except Exception:
             return False
+
+    def get_log_lines(self, tail: int = 500) -> list[str]:
+        """Return the last N lines from the restic log file."""
+        try:
+            with open(self.RESTIC_LOG_FILE) as f:
+                lines = f.readlines()
+            return [l.rstrip("\n") for l in lines[-tail:]]
+        except FileNotFoundError:
+            return []
+        except Exception:
+            return []
 
     def get_version(self) -> str:
         """Return installed restic version string, e.g. '0.16.2'."""
@@ -2153,6 +2166,34 @@ def settings_post():
         "vm_selection":    vm_sel2,
         "pbs_prune":       pbs_prune2,
     })
+
+
+@app.route("/restic/log")
+def restic_log_get():
+    res = LocalResticClient(_cfg)
+    return jsonify({"lines": res.get_log_lines(), "running": res.is_running()})
+
+
+@app.route("/restic/log/stream")
+def restic_log_stream():
+    """SSE stream of the restic log file — tails while running, sends __done__ when finished."""
+    def generate() -> Iterator[str]:
+        res = LocalResticClient(_cfg)
+        sent = 0
+        while True:
+            lines = res.get_log_lines(tail=10000)
+            while sent < len(lines):
+                yield f"data: {lines[sent]}\n\n"
+                sent += 1
+            if not res.is_running():
+                yield "data: __done__\n\n"
+                return
+            time.sleep(2)
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

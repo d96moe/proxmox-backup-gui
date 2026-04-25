@@ -1075,8 +1075,7 @@ function renderSchedules() {
   let html = '';
   if (pbs_running) html += `<div class="running-badge pbs" style="margin-bottom:8px"><div class="running-badge-dot"></div>PBS backup running</div>`;
   if (restic_running) {
-    const clickable = _lastJob ? ` onclick="_reopenLastJob()" style="cursor:pointer" title="Click to open job"` : '';
-    html += `<div class="running-badge cloud"${clickable} style="margin-bottom:8px"><div class="running-badge-dot"></div>Restic backup running</div>`;
+    html += `<div class="running-badge cloud" onclick="openResticLogModal(currentHost)" style="cursor:pointer;margin-bottom:8px" title="Click to view live log"><div class="running-badge-dot"></div>Restic backup running</div>`;
   }
 
   const fmtRetCell = ret => retDims
@@ -1521,6 +1520,58 @@ function reopenJobModal(vmid) {
 function closeJobModal() {
   document.getElementById('job-modal').classList.remove('open');
   // Keep polling in background so indicator stays accurate and job completes cleanly
+}
+
+let _resticLogES = null;
+
+async function openResticLogModal(host) {
+  const logEl = document.getElementById('job-log');
+  const badge = document.getElementById('job-badge');
+  const prog  = document.getElementById('job-progress');
+  document.getElementById('job-title').textContent = 'Restic nightly backup log';
+  document.getElementById('job-subtitle').textContent = '';
+  logEl.innerHTML = '';
+  badge.className = 'job-status-badge running';
+  badge.textContent = 'running';
+  prog.style.display = 'none';
+  document.getElementById('job-close-btn').disabled = false;
+  document.getElementById('job-modal').classList.add('open');
+
+  // First render existing lines
+  try {
+    const r = await fetch(`${API_BASE}/api/host/${host}/restic/log`);
+    if (r.ok) {
+      const { lines, running } = await r.json();
+      lines.forEach(l => { logEl.innerHTML += `<div>${_escHtml(l)}</div>`; });
+      logEl.scrollTop = logEl.scrollHeight;
+      if (!running) {
+        badge.className = 'job-status-badge ok';
+        badge.textContent = 'done';
+        return;
+      }
+    }
+  } catch (_) {}
+
+  // Stream new lines via SSE
+  if (_resticLogES) { _resticLogES.close(); _resticLogES = null; }
+  const es = new EventSource(`${API_BASE}/api/host/${host}/restic/log/stream`);
+  _resticLogES = es;
+  es.onmessage = (evt) => {
+    if (evt.data === '__done__') {
+      badge.className = 'job-status-badge ok';
+      badge.textContent = 'done';
+      es.close();
+      _resticLogES = null;
+      return;
+    }
+    logEl.innerHTML += `<div>${_escHtml(evt.data)}</div>`;
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+  es.onerror = () => { es.close(); _resticLogES = null; };
+}
+
+function _escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
 async function _pollJob(jobId, vmid) {

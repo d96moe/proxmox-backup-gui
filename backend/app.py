@@ -914,6 +914,41 @@ def post_host_settings(host_id: str):
     return jsonify(AgentClient(host.agent_url, token=host.agent_token).set_settings(body))
 
 
+@app.get("/api/host/<host_id>/restic/log")
+@login_required
+def get_restic_log(host_id: str):
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_restic_log())
+
+
+@app.get("/api/host/<host_id>/restic/log/stream")
+@login_required
+def stream_restic_log(host_id: str):
+    """Proxy SSE stream of the nightly restic log from the agent."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    import requests as _req
+
+    def generate():
+        url = AgentClient(host.agent_url, token=host.agent_token).stream_restic_log_url()
+        headers = {"Authorization": f"Bearer {host.agent_token}"} if host.agent_token else {}
+        with _req.get(url, headers=headers, stream=True, timeout=(5, 600)) as r:
+            for chunk in r.iter_content(chunk_size=None):
+                if chunk:
+                    yield chunk
+
+    return Response(stream_with_context(generate()),
+                    mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 # ──────────────────────────────────────────────
 # Backup / Restore
 # ──────────────────────────────────────────────

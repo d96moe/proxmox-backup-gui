@@ -2732,3 +2732,121 @@ def test_settings_modal_save_persists_values(real_page, host_id, original_retent
     assert saved.get("keep-weekly") == 3, \
         f"keep-weekly not persisted after modal save: {saved}"
     assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Restic log API + UI
+# ─────────────────────────────────────────────────────────────────────────────
+
+_RESTIC_LOG_PATH = "/var/log/restic-backup.log"
+_RESTIC_LOG_SENTINEL = "=== restic VM backup started: test sentinel ==="
+
+
+@pytest.fixture
+def seeded_restic_log(host_id):
+    """Write a known log file on the PVE host; remove it on teardown."""
+    _ssh_pve("bash", "-c",
+             f"echo '{_RESTIC_LOG_SENTINEL}' > {_RESTIC_LOG_PATH}")
+    yield
+    _ssh_pve("rm", "-f", _RESTIC_LOG_PATH)
+
+
+def test_restic_log_api_returns_lines(host_id, seeded_restic_log):
+    """GET /api/host/<id>/restic/log must return a lines list and running bool."""
+    result = _get(f"/api/host/{host_id}/restic/log")
+    assert "lines" in result, f"Missing 'lines' in response: {result}"
+    assert "running" in result, f"Missing 'running' in response: {result}"
+    assert isinstance(result["lines"], list)
+    assert isinstance(result["running"], bool)
+
+
+def test_restic_log_api_contains_seeded_line(host_id, seeded_restic_log):
+    """The seeded sentinel line must appear in the returned lines."""
+    result = _get(f"/api/host/{host_id}/restic/log")
+    assert any(_RESTIC_LOG_SENTINEL in l for l in result["lines"]), \
+        f"Sentinel not found in log lines: {result['lines']}"
+
+
+def test_restic_log_api_returns_empty_when_no_file(host_id):
+    """When the log file does not exist, lines must be [] and running must be False."""
+    _ssh_pve("rm", "-f", _RESTIC_LOG_PATH)
+    result = _get(f"/api/host/{host_id}/restic/log")
+    assert result["lines"] == [], f"Expected empty lines, got: {result['lines']}"
+    assert result["running"] is False, f"Expected running=False, got: {result['running']}"
+
+
+def test_restic_log_running_false_when_no_process(host_id, seeded_restic_log):
+    """running must be False when no restic backup process is active."""
+    result = _get(f"/api/host/{host_id}/restic/log")
+    assert result["running"] is False, \
+        f"Expected running=False (no restic process), got: {result['running']}"
+
+
+def test_restic_log_stream_returns_done_when_not_running(host_id, seeded_restic_log):
+    """SSE stream must emit __done__ quickly when no process is active."""
+    import urllib.request as _ur
+    _ensure_session()
+    url = f"{BACKEND_URL}/api/host/{host_id}/restic/log/stream"
+    req = _ur.Request(url)
+    for c in _cookie_jar:
+        req.add_header("Cookie", f"{c.name}={c.value}")
+    done_seen = False
+    with _ur.urlopen(req, timeout=30) as resp:
+        for raw in resp:
+            line = raw.decode().strip()
+            if line.startswith("data:"):
+                payload = line[5:].strip()
+                if payload == "__done__":
+                    done_seen = True
+                    break
+    assert done_seen, "SSE stream did not emit __done__ after log finished"
+
+
+def test_restic_log_stream_delivers_existing_lines(host_id, seeded_restic_log):
+    """SSE stream must replay existing log lines before emitting __done__."""
+    import urllib.request as _ur
+    _ensure_session()
+    url = f"{BACKEND_URL}/api/host/{host_id}/restic/log/stream"
+    req = _ur.Request(url)
+    for c in _cookie_jar:
+        req.add_header("Cookie", f"{c.name}={c.value}")
+    lines_seen = []
+    with _ur.urlopen(req, timeout=30) as resp:
+        for raw in resp:
+            line = raw.decode().strip()
+            if line.startswith("data:"):
+                payload = line[5:].strip()
+                if payload == "__done__":
+                    break
+                lines_seen.append(payload)
+    assert any(_RESTIC_LOG_SENTINEL in l for l in lines_seen), \
+        f"Sentinel not in SSE lines: {lines_seen}"
+
+
+def test_restic_log_badge_opens_modal(real_page, host_id, seeded_restic_log):
+    """
+    When restic_running=True the sidebar badge is clickable and opens the job modal
+    with the log content.
+
+    We can't easily fake restic_running via MQTT in this test, so we call
+    openResticLogModal() directly from JS (the function must exist and not throw).
+    """
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
+
+    # Call the modal open function directly — verifies it exists and renders
+    real_page.evaluate(f"openResticLogModal({repr(host_id)})")
+    real_page.wait_for_selector("#job-modal.open", timeout=5000)
+
+    title = real_page.inner_text("#job-title")
+    assert "restic" in title.lower() or "Restic" in title, \
+        f"Unexpected modal title: {title}"
+
+    real_page.click("#job-close-btn")
+    real_page.wait_for_function(
+        "() => !document.getElementById('job-modal').classList.contains('open')",
+        timeout=3000,
+    )
+    assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
