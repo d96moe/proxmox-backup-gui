@@ -1699,6 +1699,197 @@ def test_settings_api_post_returns_updated_retention(host_id, original_retention
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SETTINGS — schedule (PBS vzdump schedule + restic OnCalendar)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ssh_pve_output(*cmd: str) -> str:
+    """Run a command on the PVE host via SSH and return stdout."""
+    result = subprocess.run(
+        ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
+         _PVE_HOST_SSH, *cmd],
+        capture_output=True, text=True, timeout=15,
+    )
+    return result.stdout.strip()
+
+
+def _read_pve_backup_schedule(job_id: str) -> str:
+    """Read the current schedule of a PVE vzdump backup job via pvesh."""
+    out = _ssh_pve_output(
+        "pvesh", "get", f"/cluster/backup/{job_id}",
+        "--output-format", "json",
+    )
+    import json as _json
+    return _json.loads(out).get("schedule", "")
+
+
+def _read_restic_on_calendar() -> str:
+    """Read the OnCalendar value from restic-backup.timer on the PVE host."""
+    out = _ssh_pve_output(
+        "bash", "-c",
+        "grep -i OnCalendar /etc/systemd/system/restic-backup.timer | head -1",
+    )
+    _, _, value = out.partition("=")
+    return value.strip()
+
+
+@pytest.fixture
+def original_schedules(host_id):
+    """Save PBS + restic schedules before test and restore after."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url — settings endpoint not available")
+    data = _get(f"/api/host/{host_id}/settings")
+    orig_pbs    = data.get("pbs_schedule")   # {id, schedule} or None
+    orig_restic = data.get("restic_schedule") # str or None
+    yield {"pbs": orig_pbs, "restic": orig_restic}
+    # Restore
+    body = {}
+    if orig_pbs:
+        body["pbs_schedule"] = orig_pbs
+    if orig_restic is not None:
+        body["restic_schedule"] = orig_restic
+    if body:
+        try:
+            _post(f"/api/host/{host_id}/settings", body)
+        except Exception:
+            pass
+
+
+def test_settings_api_returns_schedule_fields(host_id, original_schedules):
+    """GET /settings must include pbs_schedule and restic_schedule keys."""
+    data = _get(f"/api/host/{host_id}/settings")
+    assert "pbs_schedule" in data, f"'pbs_schedule' key missing from settings: {data}"
+    assert "restic_schedule" in data, f"'restic_schedule' key missing from settings: {data}"
+
+
+def test_settings_api_pbs_schedule_has_id_and_schedule(host_id, original_schedules):
+    """pbs_schedule must be a dict with 'id' and 'schedule' keys."""
+    pbs = _get(f"/api/host/{host_id}/settings").get("pbs_schedule")
+    if pbs is None:
+        pytest.skip("No PBS backup job configured on this host")
+    assert isinstance(pbs, dict), f"pbs_schedule must be a dict, got {type(pbs)}"
+    assert "id" in pbs,       f"pbs_schedule missing 'id': {pbs}"
+    assert "schedule" in pbs, f"pbs_schedule missing 'schedule': {pbs}"
+    assert pbs["schedule"],   f"pbs_schedule.schedule must not be empty: {pbs}"
+
+
+def test_settings_api_restic_schedule_is_string(host_id, original_schedules):
+    """restic_schedule must be a non-empty string when the timer is configured."""
+    restic = _get(f"/api/host/{host_id}/settings").get("restic_schedule")
+    if restic is None:
+        pytest.skip("No restic-backup.timer configured on this host")
+    assert isinstance(restic, str), \
+        f"restic_schedule must be a string, got {type(restic).__name__}: {restic!r}"
+    assert restic, "restic_schedule must not be empty"
+
+
+def test_settings_api_pbs_schedule_roundtrip(host_id, original_schedules):
+    """POST pbs_schedule then GET must return the new schedule."""
+    orig = original_schedules["pbs"]
+    if not orig:
+        pytest.skip("No PBS backup job configured on this host")
+    job_id   = orig["id"]
+    new_sched = "03:00"
+    if orig["schedule"] == new_sched:
+        new_sched = "03:30"
+
+    _post(f"/api/host/{host_id}/settings", {
+        "pbs_schedule": {"id": job_id, "schedule": new_sched},
+    })
+    after = _get(f"/api/host/{host_id}/settings").get("pbs_schedule", {})
+    assert after.get("schedule") == new_sched, \
+        f"Expected pbs_schedule={new_sched!r}, got {after.get('schedule')!r}"
+
+
+def test_settings_pbs_schedule_written_to_pve(host_id, original_schedules):
+    """pbs_schedule POST must be reflected in the actual PVE cluster/backup job."""
+    orig = original_schedules["pbs"]
+    if not orig:
+        pytest.skip("No PBS backup job configured on this host")
+    job_id    = orig["id"]
+    new_sched = "04:00"
+    if orig["schedule"] == new_sched:
+        new_sched = "04:15"
+
+    _post(f"/api/host/{host_id}/settings", {
+        "pbs_schedule": {"id": job_id, "schedule": new_sched},
+    })
+    actual = _read_pve_backup_schedule(job_id)
+    assert actual == new_sched, \
+        f"PVE backup job {job_id!r} schedule: expected {new_sched!r}, got {actual!r}"
+
+
+def test_settings_api_restic_schedule_roundtrip(host_id, original_schedules):
+    """POST restic_schedule then GET must return the new OnCalendar value."""
+    orig = original_schedules["restic"]
+    if orig is None:
+        pytest.skip("No restic-backup.timer configured on this host")
+    new_sched = "05:00"
+    if orig == new_sched:
+        new_sched = "05:30"
+
+    _post(f"/api/host/{host_id}/settings", {"restic_schedule": new_sched})
+    after = _get(f"/api/host/{host_id}/settings").get("restic_schedule")
+    assert after == new_sched, \
+        f"Expected restic_schedule={new_sched!r}, got {after!r}"
+
+
+def test_settings_restic_schedule_written_to_timer_file(host_id, original_schedules):
+    """restic_schedule POST must be reflected in the actual systemd timer file."""
+    orig = original_schedules["restic"]
+    if orig is None:
+        pytest.skip("No restic-backup.timer configured on this host")
+    new_sched = "05:15"
+    if orig == new_sched:
+        new_sched = "05:45"
+
+    _post(f"/api/host/{host_id}/settings", {"restic_schedule": new_sched})
+    actual = _read_restic_on_calendar()
+    assert actual == new_sched, \
+        f"Timer file OnCalendar: expected {new_sched!r}, got {actual!r}"
+
+
+def test_settings_api_pbs_schedule_invalid_id_returns_error(host_id, original_schedules):
+    """POST pbs_schedule with a non-existent job id must return an error."""
+    import urllib.error
+    try:
+        _post(f"/api/host/{host_id}/settings", {
+            "pbs_schedule": {"id": "no-such-job-xyz", "schedule": "03:00"},
+        })
+        pytest.fail("Expected error for non-existent pbs job id")
+    except urllib.error.HTTPError as e:
+        assert e.code == 500, f"Expected 500, got {e.code}"
+
+
+def test_settings_api_pbs_schedule_missing_fields_returns_400(host_id, original_schedules):
+    """POST pbs_schedule without id/schedule must return 400."""
+    import urllib.error
+    try:
+        _post(f"/api/host/{host_id}/settings", {"pbs_schedule": {"id": "x"}})
+        pytest.fail("Expected 400 for pbs_schedule missing schedule field")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, f"Expected 400, got {e.code}"
+
+
+def test_settings_api_schedule_update_does_not_change_retention(host_id, original_schedules, original_retention):
+    """Updating only pbs_schedule must leave retention unchanged."""
+    orig = original_schedules["pbs"]
+    if not orig:
+        pytest.skip("No PBS backup job configured on this host")
+    ret_before = _get(f"/api/host/{host_id}/settings")["retention"]
+
+    job_id    = orig["id"]
+    new_sched = "03:45"
+    if orig["schedule"] == new_sched:
+        new_sched = "04:45"
+    _post(f"/api/host/{host_id}/settings", {
+        "pbs_schedule": {"id": job_id, "schedule": new_sched},
+    })
+    ret_after = _get(f"/api/host/{host_id}/settings")["retention"]
+    assert ret_before == ret_after, \
+        f"Retention changed unexpectedly after schedule update: {ret_before} → {ret_after}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PBS TASKS — GET /api/host/<id>/pbs/tasks
 # ─────────────────────────────────────────────────────────────────────────────
 
