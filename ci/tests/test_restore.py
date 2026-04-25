@@ -1890,6 +1890,142 @@ def test_settings_api_schedule_update_does_not_change_retention(host_id, origina
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# SETTINGS — VM/LXC backup selection (exclude-list)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _pve_backup_job_excluded(job_id: str) -> list[int]:
+    """Read the exclude field of a PVE vzdump backup job via pvesh on PVE host."""
+    out = _ssh_pve_output(
+        "pvesh", "get", f"/cluster/backup/{job_id}",
+        "--output-format", "json",
+    )
+    import json as _json
+    raw = _json.loads(out).get("exclude", "")
+    return [int(v) for v in str(raw).split(",") if v.strip().isdigit()] if raw else []
+
+
+@pytest.fixture
+def original_excluded(host_id):
+    """Save excluded_vmids before test and restore after."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url — settings endpoint not available")
+    data = _get(f"/api/host/{host_id}/settings")
+    pbs_schedule = data.get("pbs_schedule")
+    if not pbs_schedule:
+        pytest.skip("No PBS backup job configured — excluded_vmids not applicable")
+    orig = data.get("excluded_vmids", [])
+    yield {"excluded": orig, "job_id": pbs_schedule["id"]}
+    try:
+        _post(f"/api/host/{host_id}/settings", {"excluded_vmids": orig})
+    except Exception:
+        pass
+
+
+def test_settings_api_returns_excluded_vmids(host_id, original_excluded):
+    """GET /settings must include excluded_vmids as a list."""
+    data = _get(f"/api/host/{host_id}/settings")
+    assert "excluded_vmids" in data, f"'excluded_vmids' key missing from settings: {data}"
+    assert isinstance(data["excluded_vmids"], list), \
+        f"excluded_vmids must be a list, got {type(data['excluded_vmids']).__name__}"
+
+
+def test_settings_api_excluded_vmids_are_integers(host_id, original_excluded):
+    """excluded_vmids must contain only integers."""
+    vmids = _get(f"/api/host/{host_id}/settings")["excluded_vmids"]
+    for v in vmids:
+        assert isinstance(v, int), f"excluded_vmids entry must be int, got {type(v).__name__}: {v!r}"
+
+
+def _get_any_vmid(host_id: str) -> int | None:
+    """Return any VMID known to the backend for this host (not SELF_VMID)."""
+    items = _get(f"/api/host/{host_id}/items")
+    for key in ("lxcs", "vms"):
+        for item in items.get(key, []):
+            if item["id"] != SELF_VMID:
+                return item["id"]
+    return None
+
+
+def test_settings_api_exclude_vmid_roundtrip(host_id, original_excluded):
+    """POST excluded_vmids then GET must return the same list."""
+    vmid = _get_any_vmid(host_id)
+    if vmid is None:
+        pytest.skip("No VM/LXC available to exclude")
+
+    _post(f"/api/host/{host_id}/settings", {"excluded_vmids": [vmid]})
+    after = _get(f"/api/host/{host_id}/settings")["excluded_vmids"]
+    assert vmid in after, f"VMID {vmid} not found in excluded_vmids after save: {after}"
+
+
+def test_settings_exclude_vmid_written_to_pve(host_id, original_excluded):
+    """Excluding a VMID must be reflected in the PVE backup job's exclude field."""
+    vmid = _get_any_vmid(host_id)
+    if vmid is None:
+        pytest.skip("No VM/LXC available to exclude")
+    job_id = original_excluded["job_id"]
+
+    _post(f"/api/host/{host_id}/settings", {"excluded_vmids": [vmid]})
+    actual = _pve_backup_job_excluded(job_id)
+    assert vmid in actual, \
+        f"VMID {vmid} not in PVE backup job exclude field after save: {actual}"
+
+
+def test_settings_clear_excluded_vmids(host_id, original_excluded):
+    """POST excluded_vmids=[] must clear the PVE exclude field (backup all)."""
+    vmid = _get_any_vmid(host_id)
+    if vmid is None:
+        pytest.skip("No VM/LXC available")
+    job_id = original_excluded["job_id"]
+
+    # First exclude something
+    _post(f"/api/host/{host_id}/settings", {"excluded_vmids": [vmid]})
+    # Then clear
+    _post(f"/api/host/{host_id}/settings", {"excluded_vmids": []})
+
+    after_api = _get(f"/api/host/{host_id}/settings")["excluded_vmids"]
+    assert after_api == [], f"excluded_vmids must be empty after clearing: {after_api}"
+
+    after_pve = _pve_backup_job_excluded(job_id)
+    assert after_pve == [], f"PVE exclude field must be empty after clearing: {after_pve}"
+
+
+def test_settings_api_excluded_vmids_invalid_type_returns_400(host_id, original_excluded):
+    """POST excluded_vmids as non-list must return 400."""
+    import urllib.error
+    try:
+        _post(f"/api/host/{host_id}/settings", {"excluded_vmids": "100,101"})
+        pytest.fail("Expected 400 for excluded_vmids as string")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, f"Expected 400, got {e.code}"
+
+
+def test_settings_api_excluded_vmids_non_int_entries_returns_400(host_id, original_excluded):
+    """POST excluded_vmids with non-integer entries must return 400."""
+    import urllib.error
+    try:
+        _post(f"/api/host/{host_id}/settings", {"excluded_vmids": ["abc", 100]})
+        pytest.fail("Expected 400 for excluded_vmids with string entries")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400, f"Expected 400, got {e.code}"
+
+
+def test_settings_exclude_does_not_change_schedule(host_id, original_excluded, original_schedules):
+    """POST excluded_vmids must not affect the PBS schedule."""
+    vmid = _get_any_vmid(host_id)
+    if vmid is None:
+        pytest.skip("No VM/LXC available")
+    orig_pbs = original_schedules["pbs"]
+    if not orig_pbs:
+        pytest.skip("No PBS schedule to verify")
+    sched_before = _get(f"/api/host/{host_id}/settings")["pbs_schedule"]["schedule"]
+
+    _post(f"/api/host/{host_id}/settings", {"excluded_vmids": [vmid]})
+    sched_after = _get(f"/api/host/{host_id}/settings")["pbs_schedule"]["schedule"]
+    assert sched_before == sched_after, \
+        f"PBS schedule changed unexpectedly: {sched_before!r} → {sched_after!r}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # PBS TASKS — GET /api/host/<id>/pbs/tasks
 # ─────────────────────────────────────────────────────────────────────────────
 
