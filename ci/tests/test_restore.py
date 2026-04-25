@@ -1890,50 +1890,46 @@ def test_settings_api_schedule_update_does_not_change_retention(host_id, origina
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SETTINGS — VM/LXC backup selection (exclude-list)
+# SETTINGS — VM/LXC backup selection (mode + vmids)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _pve_backup_job_excluded(job_id: str) -> list[int]:
-    """Read the exclude field of a PVE vzdump backup job via pvesh on PVE host."""
+def _pve_backup_job_raw(job_id: str) -> dict:
+    """Read a vzdump backup job dict from pvesh on the PVE host."""
+    import json as _json
     out = _ssh_pve_output(
         "pvesh", "get", f"/cluster/backup/{job_id}",
         "--output-format", "json",
     )
-    import json as _json
-    raw = _json.loads(out).get("exclude", "")
+    return _json.loads(out)
+
+
+def _pve_backup_job_excluded(job_id: str) -> list[int]:
+    j = _pve_backup_job_raw(job_id)
+    raw = j.get("exclude", "")
+    return [int(v) for v in str(raw).split(",") if v.strip().isdigit()] if raw else []
+
+
+def _pve_backup_job_vmids(job_id: str) -> list[int]:
+    j = _pve_backup_job_raw(job_id)
+    raw = j.get("vmid", "")
     return [int(v) for v in str(raw).split(",") if v.strip().isdigit()] if raw else []
 
 
 @pytest.fixture
-def original_excluded(host_id):
-    """Save excluded_vmids before test and restore after."""
+def original_vm_selection(host_id):
+    """Save vm_selection before test and restore after."""
     if not _host_has_agent(host_id):
         pytest.skip("Host has no agent_url — settings endpoint not available")
     data = _get(f"/api/host/{host_id}/settings")
     pbs_schedule = data.get("pbs_schedule")
     if not pbs_schedule:
-        pytest.skip("No PBS backup job configured — excluded_vmids not applicable")
-    orig = data.get("excluded_vmids", [])
-    yield {"excluded": orig, "job_id": pbs_schedule["id"]}
+        pytest.skip("No PBS backup job configured — vm_selection not applicable")
+    orig = data.get("vm_selection", {"mode": "exclude", "vmids": []})
+    yield {"vm_selection": orig, "job_id": pbs_schedule["id"]}
     try:
-        _post(f"/api/host/{host_id}/settings", {"excluded_vmids": orig})
+        _post(f"/api/host/{host_id}/settings", {"vm_selection": orig})
     except Exception:
         pass
-
-
-def test_settings_api_returns_excluded_vmids(host_id, original_excluded):
-    """GET /settings must include excluded_vmids as a list."""
-    data = _get(f"/api/host/{host_id}/settings")
-    assert "excluded_vmids" in data, f"'excluded_vmids' key missing from settings: {data}"
-    assert isinstance(data["excluded_vmids"], list), \
-        f"excluded_vmids must be a list, got {type(data['excluded_vmids']).__name__}"
-
-
-def test_settings_api_excluded_vmids_are_integers(host_id, original_excluded):
-    """excluded_vmids must contain only integers."""
-    vmids = _get(f"/api/host/{host_id}/settings")["excluded_vmids"]
-    for v in vmids:
-        assert isinstance(v, int), f"excluded_vmids entry must be int, got {type(v).__name__}: {v!r}"
 
 
 def _get_any_vmid(host_id: str) -> int | None:
@@ -1946,80 +1942,125 @@ def _get_any_vmid(host_id: str) -> int | None:
     return None
 
 
-def test_settings_api_exclude_vmid_roundtrip(host_id, original_excluded):
-    """POST excluded_vmids then GET must return the same list."""
-    vmid = _get_any_vmid(host_id)
-    if vmid is None:
-        pytest.skip("No VM/LXC available to exclude")
-
-    _post(f"/api/host/{host_id}/settings", {"excluded_vmids": [vmid]})
-    after = _get(f"/api/host/{host_id}/settings")["excluded_vmids"]
-    assert vmid in after, f"VMID {vmid} not found in excluded_vmids after save: {after}"
-
-
-def test_settings_exclude_vmid_written_to_pve(host_id, original_excluded):
-    """Excluding a VMID must be reflected in the PVE backup job's exclude field."""
-    vmid = _get_any_vmid(host_id)
-    if vmid is None:
-        pytest.skip("No VM/LXC available to exclude")
-    job_id = original_excluded["job_id"]
-
-    _post(f"/api/host/{host_id}/settings", {"excluded_vmids": [vmid]})
-    actual = _pve_backup_job_excluded(job_id)
-    assert vmid in actual, \
-        f"VMID {vmid} not in PVE backup job exclude field after save: {actual}"
+def test_settings_api_returns_vm_selection(host_id, original_vm_selection):
+    """GET /settings must include vm_selection with mode and vmids."""
+    data = _get(f"/api/host/{host_id}/settings")
+    assert "vm_selection" in data, f"'vm_selection' missing from settings: {data}"
+    sel = data["vm_selection"]
+    assert isinstance(sel, dict), f"vm_selection must be dict, got {type(sel)}"
+    assert sel.get("mode") in ("exclude", "include"), \
+        f"vm_selection.mode must be 'exclude' or 'include', got {sel.get('mode')!r}"
+    assert isinstance(sel.get("vmids"), list), \
+        f"vm_selection.vmids must be list, got {type(sel.get('vmids'))}"
 
 
-def test_settings_clear_excluded_vmids(host_id, original_excluded):
-    """POST excluded_vmids=[] must clear the PVE exclude field (backup all)."""
+def test_settings_api_vm_selection_vmids_are_integers(host_id, original_vm_selection):
+    """vm_selection.vmids must contain only integers."""
+    vmids = _get(f"/api/host/{host_id}/settings")["vm_selection"]["vmids"]
+    for v in vmids:
+        assert isinstance(v, int), \
+            f"vm_selection.vmids entry must be int, got {type(v).__name__}: {v!r}"
+
+
+def test_settings_api_exclude_mode_roundtrip(host_id, original_vm_selection):
+    """POST vm_selection exclude mode then GET must return the same list."""
     vmid = _get_any_vmid(host_id)
     if vmid is None:
         pytest.skip("No VM/LXC available")
-    job_id = original_excluded["job_id"]
 
-    # First exclude something
-    _post(f"/api/host/{host_id}/settings", {"excluded_vmids": [vmid]})
-    # Then clear
-    _post(f"/api/host/{host_id}/settings", {"excluded_vmids": []})
-
-    after_api = _get(f"/api/host/{host_id}/settings")["excluded_vmids"]
-    assert after_api == [], f"excluded_vmids must be empty after clearing: {after_api}"
-
-    after_pve = _pve_backup_job_excluded(job_id)
-    assert after_pve == [], f"PVE exclude field must be empty after clearing: {after_pve}"
+    _post(f"/api/host/{host_id}/settings", {"vm_selection": {"mode": "exclude", "vmids": [vmid]}})
+    after = _get(f"/api/host/{host_id}/settings")["vm_selection"]
+    assert after["mode"] == "exclude", f"mode should be 'exclude', got {after['mode']!r}"
+    assert vmid in after["vmids"], f"VMID {vmid} not in vmids after save: {after['vmids']}"
 
 
-def test_settings_api_excluded_vmids_invalid_type_returns_400(host_id, original_excluded):
-    """POST excluded_vmids as non-list must return 400."""
+def test_settings_exclude_mode_written_to_pve(host_id, original_vm_selection):
+    """Exclude mode must set all=1 + exclude field on PVE backup job."""
+    vmid = _get_any_vmid(host_id)
+    if vmid is None:
+        pytest.skip("No VM/LXC available")
+    job_id = original_vm_selection["job_id"]
+
+    _post(f"/api/host/{host_id}/settings", {"vm_selection": {"mode": "exclude", "vmids": [vmid]}})
+    j = _pve_backup_job_raw(job_id)
+    assert j.get("all") == 1, f"PVE job should have all=1 in exclude mode, got {j.get('all')}"
+    assert vmid in _pve_backup_job_excluded(job_id), \
+        f"VMID {vmid} not in PVE exclude field: {_pve_backup_job_excluded(job_id)}"
+
+
+def test_settings_api_include_mode_roundtrip(host_id, original_vm_selection):
+    """POST vm_selection include mode then GET must return the same list."""
+    vmid = _get_any_vmid(host_id)
+    if vmid is None:
+        pytest.skip("No VM/LXC available")
+
+    _post(f"/api/host/{host_id}/settings", {"vm_selection": {"mode": "include", "vmids": [vmid]}})
+    after = _get(f"/api/host/{host_id}/settings")["vm_selection"]
+    assert after["mode"] == "include", f"mode should be 'include', got {after['mode']!r}"
+    assert vmid in after["vmids"], f"VMID {vmid} not in vmids after save: {after['vmids']}"
+
+
+def test_settings_include_mode_written_to_pve(host_id, original_vm_selection):
+    """Include mode must set all=0 + vmid field on PVE backup job."""
+    vmid = _get_any_vmid(host_id)
+    if vmid is None:
+        pytest.skip("No VM/LXC available")
+    job_id = original_vm_selection["job_id"]
+
+    _post(f"/api/host/{host_id}/settings", {"vm_selection": {"mode": "include", "vmids": [vmid]}})
+    j = _pve_backup_job_raw(job_id)
+    assert not j.get("all"), f"PVE job should not have all=1 in include mode, got {j.get('all')}"
+    assert vmid in _pve_backup_job_vmids(job_id), \
+        f"VMID {vmid} not in PVE vmid field: {_pve_backup_job_vmids(job_id)}"
+
+
+def test_settings_switch_from_include_to_exclude(host_id, original_vm_selection):
+    """Switching from include to exclude mode must set all=1 and clear vmid field."""
+    vmid = _get_any_vmid(host_id)
+    if vmid is None:
+        pytest.skip("No VM/LXC available")
+    job_id = original_vm_selection["job_id"]
+
+    _post(f"/api/host/{host_id}/settings", {"vm_selection": {"mode": "include", "vmids": [vmid]}})
+    _post(f"/api/host/{host_id}/settings", {"vm_selection": {"mode": "exclude", "vmids": []}})
+
+    after = _get(f"/api/host/{host_id}/settings")["vm_selection"]
+    assert after["mode"] == "exclude"
+    assert after["vmids"] == []
+    j = _pve_backup_job_raw(job_id)
+    assert j.get("all") == 1, f"PVE job should have all=1 after switching to exclude: {j}"
+
+
+def test_settings_api_vm_selection_invalid_mode_returns_400(host_id, original_vm_selection):
+    """POST vm_selection with invalid mode must return 400."""
     import urllib.error
     try:
-        _post(f"/api/host/{host_id}/settings", {"excluded_vmids": "100,101"})
-        pytest.fail("Expected 400 for excluded_vmids as string")
+        _post(f"/api/host/{host_id}/settings", {"vm_selection": {"mode": "bogus", "vmids": []}})
+        pytest.fail("Expected 400 for invalid mode")
     except urllib.error.HTTPError as e:
         assert e.code == 400, f"Expected 400, got {e.code}"
 
 
-def test_settings_api_excluded_vmids_non_int_entries_returns_400(host_id, original_excluded):
-    """POST excluded_vmids with non-integer entries must return 400."""
+def test_settings_api_vm_selection_non_int_vmids_returns_400(host_id, original_vm_selection):
+    """POST vm_selection with non-integer vmids must return 400."""
     import urllib.error
     try:
-        _post(f"/api/host/{host_id}/settings", {"excluded_vmids": ["abc", 100]})
-        pytest.fail("Expected 400 for excluded_vmids with string entries")
+        _post(f"/api/host/{host_id}/settings", {"vm_selection": {"mode": "exclude", "vmids": ["abc"]}})
+        pytest.fail("Expected 400 for string vmids")
     except urllib.error.HTTPError as e:
         assert e.code == 400, f"Expected 400, got {e.code}"
 
 
-def test_settings_exclude_does_not_change_schedule(host_id, original_excluded, original_schedules):
-    """POST excluded_vmids must not affect the PBS schedule."""
+def test_settings_vm_selection_does_not_change_schedule(host_id, original_vm_selection, original_schedules):
+    """POST vm_selection must not affect the PBS schedule."""
     vmid = _get_any_vmid(host_id)
     if vmid is None:
         pytest.skip("No VM/LXC available")
-    orig_pbs = original_schedules["pbs"]
-    if not orig_pbs:
+    if not original_schedules["pbs"]:
         pytest.skip("No PBS schedule to verify")
     sched_before = _get(f"/api/host/{host_id}/settings")["pbs_schedule"]["schedule"]
 
-    _post(f"/api/host/{host_id}/settings", {"excluded_vmids": [vmid]})
+    _post(f"/api/host/{host_id}/settings", {"vm_selection": {"mode": "exclude", "vmids": [vmid]}})
     sched_after = _get(f"/api/host/{host_id}/settings")["pbs_schedule"]["schedule"]
     assert sched_before == sched_after, \
         f"PBS schedule changed unexpectedly: {sched_before!r} → {sched_after!r}"

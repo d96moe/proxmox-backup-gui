@@ -2047,12 +2047,12 @@ def settings_get():
     pbs_jobs = pve.get_backup_schedules()
     pbs_job   = pbs_jobs[0] if pbs_jobs else None
     pbs_schedule = {"id": pbs_job["id"], "schedule": pbs_job["schedule"]} if pbs_job else None
-    excluded = pve.get_backup_excluded(pbs_job["id"]) if pbs_job else []
+    vm_selection = pve.get_backup_vm_selection(pbs_job["id"]) if pbs_job else {"mode": "exclude", "vmids": []}
     return jsonify({
-        "retention":        res.get_retention(),
-        "pbs_schedule":     pbs_schedule,
-        "restic_schedule":  res.get_restic_schedule(),
-        "excluded_vmids":   excluded,
+        "retention":       res.get_retention(),
+        "pbs_schedule":    pbs_schedule,
+        "restic_schedule": res.get_restic_schedule(),
+        "vm_selection":    vm_selection,
     })
 
 
@@ -2089,18 +2089,21 @@ def settings_post():
         except Exception as exc:
             errors.append(f"pbs_schedule: {exc}")
 
-    if "excluded_vmids" in body:
-        exc_val = body["excluded_vmids"]
-        if not isinstance(exc_val, list) or not all(isinstance(v, int) for v in exc_val):
-            return jsonify({"error": "excluded_vmids must be a list of integers"}), 400
+    if "vm_selection" in body:
+        sel = body["vm_selection"]
+        mode  = sel.get("mode")  if isinstance(sel, dict) else None
+        vmids = sel.get("vmids") if isinstance(sel, dict) else None
+        if mode not in ("exclude", "include") or not isinstance(vmids, list) \
+                or not all(isinstance(v, int) for v in vmids):
+            return jsonify({"error": "vm_selection requires {mode: 'exclude'|'include', vmids: [int]}"}), 400
         try:
             pve2 = PVEClient(_host())
             jobs2 = pve2.get_backup_schedules()
             if not jobs2:
                 return jsonify({"error": "no PBS backup job found"}), 400
-            pve2.set_backup_excluded(jobs2[0]["id"], exc_val)
+            pve2.set_backup_vm_selection(jobs2[0]["id"], mode, vmids)
         except Exception as exc:
-            errors.append(f"excluded_vmids: {exc}")
+            errors.append(f"vm_selection: {exc}")
 
     if errors:
         return jsonify({"error": "; ".join(errors)}), 500
@@ -2111,14 +2114,14 @@ def settings_post():
 
     pve = PVEClient(_host())
     pbs_jobs2 = pve.get_backup_schedules()
-    pbs_job2  = pbs_jobs2[0] if pbs_jobs2 else None
+    pbs_job2   = pbs_jobs2[0] if pbs_jobs2 else None
     pbs_sched2 = {"id": pbs_job2["id"], "schedule": pbs_job2["schedule"]} if pbs_job2 else None
-    excluded2  = pve.get_backup_excluded(pbs_job2["id"]) if pbs_job2 else []
+    vm_sel2    = pve.get_backup_vm_selection(pbs_job2["id"]) if pbs_job2 else {"mode": "exclude", "vmids": []}
     return jsonify({
-        "retention":        res.get_retention(),
-        "pbs_schedule":     pbs_sched2,
-        "restic_schedule":  res.get_restic_schedule(),
-        "excluded_vmids":   excluded2,
+        "retention":       res.get_retention(),
+        "pbs_schedule":    pbs_sched2,
+        "restic_schedule": res.get_restic_schedule(),
+        "vm_selection":    vm_sel2,
     })
 
 

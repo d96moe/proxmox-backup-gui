@@ -412,7 +412,14 @@
 
       <div id="s-vm-selection-section" style="display:none">
         <div class="settings-section-title">VM / LXC Backup Selection</div>
-        <div class="settings-hint" style="margin-bottom:8px">Unchecked VMs are excluded from the nightly PBS backup.</div>
+        <div class="settings-row" style="margin-bottom:10px">
+          <div><div class="settings-label">Mode</div></div>
+          <select id="s-vm-mode" class="settings-input" style="width:140px;text-align:left" onchange="renderVmSelectionList()">
+            <option value="exclude">Backup all (exclude)</option>
+            <option value="include">Backup selected (include)</option>
+          </select>
+        </div>
+        <div class="settings-hint" id="s-vm-mode-hint" style="margin-bottom:8px"></div>
         <div class="vm-select-list" id="s-vm-list"></div>
       </div>
 
@@ -2006,28 +2013,45 @@ async function openSettingsModal() {
         schedSection.style.display = 'none';
       }
 
-      // VM selection — build from live MQTT store
-      const vmSec  = document.getElementById('s-vm-selection-section');
-      const vmList = document.getElementById('s-vm-list');
-      const ds     = MQTTBus.getDS();
-      const excluded = new Set((d.excluded_vmids || []).map(String));
+      // VM selection
+      const vmSec = document.getElementById('s-vm-selection-section');
+      const vmSel = d.vm_selection || { mode: 'exclude', vmids: [] };
+      document.getElementById('s-vm-mode').value = vmSel.mode;
+      window._vmSelectionData = vmSel;
+      const ds = MQTTBus.getDS();
       const vmEntries = Object.entries(ds)
         .map(([vmid, v]) => ({ vmid, name: v.meta?.name || `vm-${vmid}`, type: v.meta?.type || 'vm' }))
         .sort((a, b) => Number(a.vmid) - Number(b.vmid));
+      window._vmEntries = vmEntries;
       if (vmEntries.length) {
         vmSec.style.display = '';
-        vmList.innerHTML = vmEntries.map(({ vmid, name, type }) => `
-          <label class="vm-select-row">
-            <input type="checkbox" data-vmid="${vmid}" ${excluded.has(vmid) ? '' : 'checked'}>
-            <span class="vm-select-vmid">${vmid}</span>
-            <span class="vm-select-type">${type}</span>
-            <span>${name}</span>
-          </label>`).join('');
+        renderVmSelectionList();
       } else {
         vmSec.style.display = 'none';
       }
     }
   } catch (_) {}
+}
+
+function renderVmSelectionList() {
+  const mode    = document.getElementById('s-vm-mode')?.value || 'exclude';
+  const vmids   = new Set(((window._vmSelectionData || {}).vmids || []).map(String));
+  const entries = window._vmEntries || [];
+  const hint    = document.getElementById('s-vm-mode-hint');
+  const list    = document.getElementById('s-vm-list');
+  if (hint) hint.textContent = mode === 'exclude'
+    ? 'All VMs are backed up. Uncheck to exclude from nightly PBS backup.'
+    : 'No VMs are backed up by default. Check to include in nightly PBS backup.';
+  if (!list) return;
+  list.innerHTML = entries.map(({ vmid, name, type }) => {
+    const checked = mode === 'exclude' ? !vmids.has(vmid) : vmids.has(vmid);
+    return `<label class="vm-select-row">
+      <input type="checkbox" data-vmid="${vmid}" ${checked ? 'checked' : ''}>
+      <span class="vm-select-vmid">${vmid}</span>
+      <span class="vm-select-type">${type}</span>
+      <span>${name}</span>
+    </label>`;
+  }).join('');
 }
 
 function closeSettingsModal() {
@@ -2063,13 +2087,14 @@ async function saveSettings() {
     body.restic_schedule = resVal;
   }
 
-  const excludedVmids = [];
-  document.querySelectorAll('#s-vm-list input[type=checkbox]').forEach(cb => {
-    if (!cb.checked) excludedVmids.push(parseInt(cb.dataset.vmid, 10));
-  });
-  // Always send excluded_vmids if the section is visible (empty list = backup all)
   if (document.getElementById('s-vm-selection-section').style.display !== 'none') {
-    body.excluded_vmids = excludedVmids;
+    const mode = document.getElementById('s-vm-mode').value;
+    const vmids = [];
+    document.querySelectorAll('#s-vm-list input[type=checkbox]').forEach(cb => {
+      if (mode === 'exclude' && !cb.checked) vmids.push(parseInt(cb.dataset.vmid, 10));
+      if (mode === 'include' &&  cb.checked) vmids.push(parseInt(cb.dataset.vmid, 10));
+    });
+    body.vm_selection = { mode, vmids };
   }
 
   try {

@@ -89,25 +89,38 @@ class PVEClient:
         except Exception:
             return []
 
-    def get_backup_excluded(self, job_id: str) -> list[int]:
-        """Return excluded VMIDs for a vzdump backup job."""
+    def get_backup_vm_selection(self, job_id: str) -> dict:
+        """Return {mode, vmids} for the named vzdump job.
+
+        mode="exclude": job has all=1; vmids is the exclude list.
+        mode="include": job has no all; vmids is the explicit include list.
+        """
         try:
             jobs = self._get("/cluster/backup")
             for j in (jobs if isinstance(jobs, list) else []):
-                if j.get("id") == job_id:
+                if j.get("id") != job_id:
+                    continue
+                if j.get("all"):
                     raw = j.get("exclude", "")
-                    return [int(v) for v in str(raw).split(",") if v.strip().isdigit()]
+                    vmids = [int(v) for v in str(raw).split(",") if v.strip().isdigit()]
+                    return {"mode": "exclude", "vmids": vmids}
+                else:
+                    raw = j.get("vmid", "")
+                    vmids = [int(v) for v in str(raw).split(",") if v.strip().isdigit()]
+                    return {"mode": "include", "vmids": vmids}
         except Exception:
             pass
-        return []
+        return {"mode": "exclude", "vmids": []}
 
-    def set_backup_excluded(self, job_id: str, vmids: list[int]) -> None:
-        """Set the exclude list for a vzdump backup job (empty list = backup all)."""
-        if vmids:
-            self._put(f"/cluster/backup/{job_id}", exclude=",".join(str(v) for v in vmids))
+    def set_backup_vm_selection(self, job_id: str, mode: str, vmids: list[int]) -> None:
+        """Set backup VM selection mode and vmid list for a vzdump job."""
+        ids = ",".join(str(v) for v in vmids)
+        if mode == "include":
+            # Explicit include: remove all=1, set vmid list (empty = no VMs backed up)
+            self._put(f"/cluster/backup/{job_id}", all=0, vmid=ids, exclude="")
         else:
-            # PVE API: set exclude to empty string clears it
-            self._put(f"/cluster/backup/{job_id}", exclude="")
+            # Exclude mode: set all=1, set exclude list
+            self._put(f"/cluster/backup/{job_id}", all=1, exclude=ids, vmid="")
 
     def set_backup_schedule(self, job_id: str, schedule: str) -> None:
         """Update the schedule of an existing vzdump backup job."""
