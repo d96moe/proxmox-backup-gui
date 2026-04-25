@@ -1280,8 +1280,8 @@ class LocalResticClient:
                 parts += [f"--{key}", str(int(val))]
             else:
                 to_delete.append(key)
-        if to_delete:
-            parts += ["--delete", ",".join(to_delete)]
+        for key in to_delete:
+            parts += ["--delete", key]
         subprocess.run(parts, check=True, timeout=15)
 
     def get_stats(self) -> dict:

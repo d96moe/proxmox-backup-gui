@@ -116,11 +116,23 @@ class PVEClient:
         """Set backup VM selection mode and vmid list for a vzdump job."""
         ids = ",".join(str(v) for v in vmids)
         if mode == "include":
-            # Explicit include: remove all=1, set vmid list (empty = no VMs backed up)
-            self._put(f"/cluster/backup/{job_id}", all=0, vmid=ids, exclude="")
+            params: dict = {"all": 0}
+            if ids:
+                params["vmid"] = ids
+            else:
+                params["delete"] = "vmid"
+            # Always clear exclude when switching to include mode
+            params.setdefault("delete", "")
+            params["delete"] = ",".join(filter(None, [params.get("delete", ""), "exclude"]))
+            self._put(f"/cluster/backup/{job_id}", **params)
         else:
-            # Exclude mode: set all=1, set exclude list
-            self._put(f"/cluster/backup/{job_id}", all=1, exclude=ids, vmid="")
+            params = {"all": 1}
+            if ids:
+                params["exclude"] = ids
+            else:
+                params["delete"] = "exclude"
+            params["delete"] = ",".join(filter(None, [params.get("delete", ""), "vmid"]))
+            self._put(f"/cluster/backup/{job_id}", **params)
 
     def set_backup_schedule(self, job_id: str, schedule: str) -> None:
         """Update the schedule of an existing vzdump backup job."""
