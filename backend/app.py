@@ -390,7 +390,8 @@ def mqtt_proxy(ws):
 @login_required
 def get_hosts():
     return jsonify([
-        {"id": h.id, "label": h.label, "self_vmid": SELF_VMID}
+        {"id": h.id, "label": h.label, "self_vmid": SELF_VMID,
+         "agent_url": h.agent_url or ""}
         for h in HOSTS.values()
     ])
 
