@@ -2096,19 +2096,20 @@ def pbs_task_stream(upid: str):
 # Routes — settings
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _pvesh_set_backup_vm_selection(job_id: str, mode: str, vmids: list[int]) -> None:
-    """Set backup VM selection via pvesh — fallback for PVE versions that drop HTTP PUT."""
-    ids = ",".join(str(v) for v in vmids)
+def _pvesh_set_backup(job_id: str, **fields) -> None:
+    """Set backup job fields via pvesh — fallback for PVE versions that drop HTTP PUT."""
     cmd = ["pvesh", "set", f"/cluster/backup/{job_id}"]
-    if mode == "include":
-        cmd += ["--all", "0"]
-        if ids:
-            cmd += ["--vmid", ids]
-    else:
-        cmd += ["--all", "1"]
-        if ids:
-            cmd += ["--exclude", ids]
+    for k, v in fields.items():
+        cmd += [f"--{k}", str(v)]
     subprocess.run(cmd, check=True, timeout=15)
+
+
+def _pvesh_set_backup_vm_selection(job_id: str, mode: str, vmids: list[int]) -> None:
+    ids = ",".join(str(v) for v in vmids)
+    kwargs: dict = {"all": 0 if mode == "include" else 1}
+    if ids:
+        kwargs["vmid" if mode == "include" else "exclude"] = ids
+    _pvesh_set_backup(job_id, **kwargs)
 
 
 @app.route("/settings")
@@ -2164,7 +2165,10 @@ def settings_post():
         if not job_id or not schedule:
             return jsonify({"error": "pbs_schedule requires {id, schedule}"}), 400
         try:
-            PVEClient(_host()).set_backup_schedule(job_id, schedule)
+            try:
+                PVEClient(_host()).set_backup_schedule(job_id, schedule)
+            except Exception:
+                _pvesh_set_backup(job_id, schedule=schedule)
         except Exception as exc:
             errors.append(f"pbs_schedule: {exc}")
 
