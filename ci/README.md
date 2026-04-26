@@ -118,7 +118,7 @@ Playwright + `requests` against the real Flask backend. Cover:
 - **Settings — PBS prune policy** — GET/POST roundtrip, all keep-* keys, clear-key deletes from PBS live, zero=unset, empty retention clears all, unknown job id (500), non-integer (400), green path (POST→GET→live PBS verify via SSH)
 - **Settings — schedules** — PBS schedule roundtrip + verified via `pvesh` on PVE host; restic schedule roundtrip + verified in timer file via SSH; error cases
 - **Settings — VM selection** — exclude mode (all=1 + exclude field), include mode (all=0 + vmid field), mode switch, PVE verification, error cases
-- **PBS tasks** — GC, external backup, and prune triggered via SSH to PVE host; task visible in `/pbs/tasks` API; running card appears in sidebar; GUI backup suppresses duplicate PBS card for same VMID
+- **PBS tasks** — GC, external backup (`vzdump`), and prune job (`ci-prune`) triggered synchronously via SSH to PVE host; tasks appear in `/pbs/tasks` API (worker types: `garbage_collection`, `backup`, `prunejob`); GC/backup complete in <1s (PBS deduplication) — sidebar tests inject real task data directly via `page.evaluate()` to test the rendering pipeline; GUI backup suppresses duplicate PBS card for same VMID (dedup logic verified via injected `_activeJobs`)
 - **Restic nightly log** — API returns lines + running flag; seeded log file used for SSE stream tests; `__done__` emitted when no process active; `openResticLogModal()` opens job modal with log content
 
 ---
