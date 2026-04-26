@@ -248,6 +248,28 @@ class MockHandler(BaseHTTPRequestHandler):
         if path == "/api/auth/me":
             return self._json({"username": "admin", "role": "admin"})
 
+        for host_id in ("home", "cabin", "snap-test"):
+            if path == f"/api/host/{host_id}/settings":
+                return self._json({
+                    "retention": {"keep-last": 1, "keep-daily": 3, "keep-weekly": 1, "keep-monthly": 1},
+                    "restic_schedule": "02:30",
+                    "pbs_schedule": None,
+                    "pbs_prune": None,
+                    "vm_selection": {"mode": "exclude", "vmids": []},
+                })
+            if path == f"/api/host/{host_id}/connection":
+                return self._json({
+                    "pve_url": "https://192.168.0.200:8006",
+                    "pve_user": "root@pam",
+                    "pve_password": "",
+                    "pbs_url": "https://192.168.0.200:8007",
+                    "pbs_user": "backup@pbs",
+                    "pbs_password": "",
+                    "pbs_datastore": "local-store",
+                    "restic_repo": "rclone:gdrive:bu/proxmox_home",
+                    "restic_password": "",
+                })
+
         if path == "/api/jobs/active":
             return self._json([])
 
@@ -293,6 +315,9 @@ class MockHandler(BaseHTTPRequestHandler):
                 if cfg.restic_status_code != 200:
                     return self._error(cfg.restic_status_code)
                 return self._json({"job_id": "mock-job-1"})
+            if path in (f"/api/host/{host_id}/settings",
+                        f"/api/host/{host_id}/connection"):
+                return self._json({"ok": True})
 
         self._error(404)
 

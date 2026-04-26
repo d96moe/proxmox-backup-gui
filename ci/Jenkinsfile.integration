@@ -420,7 +420,7 @@ curl -sf -H "Authorization: Bearer ${AGENT_TOKEN}" http://10.10.0.1:8099/health 
 
 # Smoke-test every key endpoint — catches missing methods/attributes that only
 # blow up at runtime (not at import time), which /health alone won't catch.
-for EP in /settings /schedules /vms /items; do
+for EP in /settings /schedules /vms /items /connection; do
     CODE=$(curl -s -o /tmp/agent-ep-out.txt -w "%{http_code}" \
         -H "Authorization: Bearer ${AGENT_TOKEN}" "http://10.10.0.1:8099${EP}")
     if [ "${CODE}" != "200" ]; then
