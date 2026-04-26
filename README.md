@@ -116,7 +116,7 @@ Each agent publishes under `proxmox/<mqtt_hostname>/`. The GUI subscribes to `pr
 
 ## Deployment
 
-### First-time setup
+### Step 1 — Install the GUI (LXC)
 
 Run on your PVE host as root:
 
@@ -126,12 +126,48 @@ cd /tmp/proxmox-backup-gui
 bash setup-lxc.sh
 ```
 
-This creates LXC 199 with Debian 12, installs dependencies, deploys the app and registers a systemd service. The GUI is then available at `http://192.168.0.50:5000`.
+Creates LXC 199 with Debian 12, installs Mosquitto + Flask, deploys the app, creates an initial admin user, and registers a systemd service. The GUI is then available at `http://<lxc-ip>:5000`.
 
 Override defaults with env vars:
 
 ```bash
-LXC_ID=200 LXC_IP=192.168.0.51 bash setup-lxc.sh
+LXC_ID=200 LXC_IP=192.168.0.51/24 LXC_GW=192.168.0.1 bash setup-lxc.sh
+```
+
+The script prints login credentials (auto-generated password) and a hosts.json snippet at the end.
+
+### Step 2 — Install the agent (each PVE host)
+
+Run on each PVE host you want to monitor:
+
+```bash
+cd /tmp/proxmox-backup-gui
+bash setup-agent.sh
+```
+
+Prompts for the Mosquitto broker IP (the GUI LXC's IP) and a host ID (must match `id` in `hosts.json`). Installs the agent to `/opt/pve-agent/`, writes a config template to `/etc/pve-agent/config.json`, and registers a systemd service.
+
+Fill in your credentials, then start:
+
+```bash
+nano /etc/pve-agent/config.json   # fill in PBS/PVE passwords, pbs_datastore, etc.
+systemctl start pve-agent
+journalctl -u pve-agent -f
+```
+
+### Step 3 — Connect agent to GUI
+
+Add the agent to `hosts.json` inside the GUI LXC (`pct enter 199`, then edit `/opt/proxmox-backup-gui/backend/hosts.json`). The `setup-agent.sh` script prints the exact JSON snippet to paste.
+
+```bash
+systemctl restart proxmox-backup-gui
+```
+
+### Adding users
+
+```bash
+bash add-user.sh alice           # viewer (read-only)
+bash add-user.sh bob admin       # admin (full access)
 ```
 
 ### Updating
@@ -140,7 +176,7 @@ LXC_ID=200 LXC_IP=192.168.0.51 bash setup-lxc.sh
 bash update-lxc.sh
 ```
 
-Pushes updated backend + frontend files to the LXC and restarts the service.
+Pushes updated backend + frontend files to the LXC and restarts the service. Re-run `setup-agent.sh` on each PVE host to update the agent.
 
 ## Configuration
 
