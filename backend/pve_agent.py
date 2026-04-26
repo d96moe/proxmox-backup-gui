@@ -1049,6 +1049,10 @@ def _host():
 class LocalResticClient:
     """Run restic and related commands directly via subprocess — no SSH."""
 
+    _PBS_PRUNE_KEYS = (
+        "keep-last", "keep-daily", "keep-weekly", "keep-monthly", "keep-yearly",
+    )
+
     def __init__(self, cfg: AgentConfig) -> None:
         self._repo = cfg.restic_repo
         self._env = {
@@ -1127,6 +1131,8 @@ class LocalResticClient:
             pass
         return None
 
+    RESTIC_LOG_FILE = "/var/log/restic-backup.log"
+
     def is_running(self) -> bool:
         """Return True if a restic *backup* is currently running (not just listing)."""
         try:
@@ -1137,6 +1143,17 @@ class LocalResticClient:
             return result.returncode == 0
         except Exception:
             return False
+
+    def get_log_lines(self, tail: int = 500) -> list[str]:
+        """Return the last N lines from the restic log file."""
+        try:
+            with open(self.RESTIC_LOG_FILE) as f:
+                lines = f.readlines()
+            return [l.rstrip("\n") for l in lines[-tail:]]
+        except FileNotFoundError:
+            return []
+        except Exception:
+            return []
 
     def get_version(self) -> str:
         """Return installed restic version string, e.g. '0.16.2'."""
@@ -1172,7 +1189,7 @@ class LocalResticClient:
             k = k.strip()
             v = v.strip().strip('"').strip("'")
             if k in mapping and v:
-                result[mapping[k]] = v
+                result[mapping[k]] = int(v) if v.isdigit() else v
         return result
 
     def set_retention(self, retention: dict) -> None:
@@ -1227,6 +1244,51 @@ class LocalResticClient:
             return jobs if isinstance(jobs, list) else []
         except Exception:
             return []
+
+    _RESTIC_TIMER = "/etc/systemd/system/restic-backup.timer"
+
+    def get_restic_schedule(self) -> str | None:
+        """Return the OnCalendar value from the restic systemd timer, or None."""
+        try:
+            with open(self._RESTIC_TIMER) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("OnCalendar="):
+                        return line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+        return None
+
+    def set_restic_schedule(self, on_calendar: str) -> None:
+        """Update OnCalendar in the restic systemd timer and reload."""
+        with open(self._RESTIC_TIMER) as f:
+            lines = f.readlines()
+        with open(self._RESTIC_TIMER, "w") as f:
+            for line in lines:
+                if line.startswith("OnCalendar="):
+                    f.write(f"OnCalendar={on_calendar}\n")
+                else:
+                    f.write(line)
+        subprocess.run(["systemctl", "daemon-reload"], check=True, timeout=15)
+        try:
+            subprocess.run(["systemctl", "restart", "restic-backup.timer"],
+                           check=True, timeout=15)
+        except subprocess.CalledProcessError:
+            pass  # timer may not restart in CI/nested PVE; file is updated
+
+    def set_pbs_prune_job(self, job_id: str, retention: dict) -> None:
+        """Update a PBS prune job's retention policy via proxmox-backup-manager."""
+        parts = ["proxmox-backup-manager", "prune-job", "update", job_id]
+        to_delete = []
+        for key in self._PBS_PRUNE_KEYS:
+            val = retention.get(key)
+            if val:
+                parts += [f"--{key}", str(int(val))]
+            else:
+                to_delete.append(key)
+        for key in to_delete:
+            parts += ["--delete", key]
+        subprocess.run(parts, check=True, timeout=15)
 
     def get_stats(self) -> dict:
         """Return cloud storage usage via rclone (same repo as restic uses).
@@ -2040,6 +2102,22 @@ def pbs_task_stream(upid: str):
 # Routes — settings
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _pvesh_set_backup(job_id: str, **fields) -> None:
+    """Set backup job fields via pvesh — fallback for PVE versions that drop HTTP PUT."""
+    cmd = ["pvesh", "set", f"/cluster/backup/{job_id}"]
+    for k, v in fields.items():
+        cmd += [f"--{k}", str(v)]
+    subprocess.run(cmd, check=True, timeout=15)
+
+
+def _pvesh_set_backup_vm_selection(job_id: str, mode: str, vmids: list[int]) -> None:
+    ids = ",".join(str(v) for v in vmids)
+    kwargs: dict = {"all": 0 if mode == "include" else 1}
+    if ids:
+        kwargs["vmid" if mode == "include" else "exclude"] = ids
+    _pvesh_set_backup(job_id, **kwargs)
+
+
 @app.route("/settings")
 def settings_get():
     res = LocalResticClient(_cfg)
@@ -2051,7 +2129,7 @@ def settings_get():
     prune_jobs   = res.get_pbs_prune_jobs()
     cfg          = _cfg
     pbs_prune    = next(
-        ({"id": j["id"], "retention": {k: j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
+        ({"id": j["id"], "retention": {k: int(j[k]) if str(j[k]).isdigit() else j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
          for j in prune_jobs if j.get("store") == (cfg.pbs_datastore if cfg else "")),
         None,
     )
@@ -2067,6 +2145,10 @@ def settings_get():
 @app.route("/settings", methods=["POST"])
 def settings_post():
     body = request.get_json(silent=True) or {}
+
+    _RECOGNIZED = {"retention", "restic_schedule", "pbs_schedule", "pbs_prune", "vm_selection"}
+    if not any(k in body for k in _RECOGNIZED):
+        return jsonify({"error": "body must contain at least one recognized key"}), 400
 
     res = LocalResticClient(_cfg)
     errors = []
@@ -2093,7 +2175,10 @@ def settings_post():
         if not job_id or not schedule:
             return jsonify({"error": "pbs_schedule requires {id, schedule}"}), 400
         try:
-            PVEClient(_host()).set_backup_schedule(job_id, schedule)
+            try:
+                PVEClient(_host()).set_backup_schedule(job_id, schedule)
+            except Exception:
+                _pvesh_set_backup(job_id, schedule=schedule)
         except Exception as exc:
             errors.append(f"pbs_schedule: {exc}")
 
@@ -2123,7 +2208,12 @@ def settings_post():
             jobs2 = pve2.get_backup_schedules()
             if not jobs2:
                 return jsonify({"error": "no PBS backup job found"}), 400
-            pve2.set_backup_vm_selection(jobs2[0]["id"], mode, vmids)
+            job_id2 = jobs2[0]["id"]
+            try:
+                pve2.set_backup_vm_selection(job_id2, mode, vmids)
+            except Exception:
+                # Fall back to pvesh for PVE versions that drop HTTP PUT connections
+                _pvesh_set_backup_vm_selection(job_id2, mode, vmids)
         except Exception as exc:
             errors.append(f"vm_selection: {exc}")
 
@@ -2142,7 +2232,7 @@ def settings_post():
     prune_jobs2 = res.get_pbs_prune_jobs()
     cfg2        = _cfg
     pbs_prune2  = next(
-        ({"id": j["id"], "retention": {k: j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
+        ({"id": j["id"], "retention": {k: int(j[k]) if str(j[k]).isdigit() else j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
          for j in prune_jobs2 if j.get("store") == (cfg2.pbs_datastore if cfg2 else "")),
         None,
     )
@@ -2153,6 +2243,34 @@ def settings_post():
         "vm_selection":    vm_sel2,
         "pbs_prune":       pbs_prune2,
     })
+
+
+@app.route("/restic/log")
+def restic_log_get():
+    res = LocalResticClient(_cfg)
+    return jsonify({"lines": res.get_log_lines(), "running": res.is_running()})
+
+
+@app.route("/restic/log/stream")
+def restic_log_stream():
+    """SSE stream of the restic log file — tails while running, sends __done__ when finished."""
+    def generate() -> Iterator[str]:
+        res = LocalResticClient(_cfg)
+        sent = 0
+        while True:
+            lines = res.get_log_lines(tail=10000)
+            while sent < len(lines):
+                yield f"data: {lines[sent]}\n\n"
+                sent += 1
+            if not res.is_running():
+                yield "data: __done__\n\n"
+                return
+            time.sleep(2)
+    return Response(
+        stream_with_context(generate()),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

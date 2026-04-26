@@ -118,7 +118,8 @@ Playwright + `requests` against the real Flask backend. Cover:
 - **Settings — PBS prune policy** — GET/POST roundtrip, all keep-* keys, clear-key deletes from PBS live, zero=unset, empty retention clears all, unknown job id (500), non-integer (400), green path (POST→GET→live PBS verify via SSH)
 - **Settings — schedules** — PBS schedule roundtrip + verified via `pvesh` on PVE host; restic schedule roundtrip + verified in timer file via SSH; error cases
 - **Settings — VM selection** — exclude mode (all=1 + exclude field), include mode (all=0 + vmid field), mode switch, PVE verification, error cases
-- **PBS tasks** — GC, external backup, and prune triggered via SSH to PVE host; task visible in `/pbs/tasks` API; running card appears in sidebar; GUI backup suppresses duplicate PBS card for same VMID
+- **PBS tasks** — GC, external backup (`vzdump`), and prune job (`ci-prune`) triggered synchronously via SSH to PVE host; tasks appear in `/pbs/tasks` API (worker types: `garbage_collection`, `backup`, `prunejob`); GC/backup complete in <1s (PBS deduplication) — sidebar tests inject real task data directly via `page.evaluate()` to test the rendering pipeline; GUI backup suppresses duplicate PBS card for same VMID (dedup logic verified via injected `_activeJobs`)
+- **Restic nightly log** — API returns lines + running flag; seeded log file used for SSE stream tests; `__done__` emitted when no process active; `openResticLogModal()` opens job modal with log content
 
 ---
 
@@ -138,6 +139,10 @@ Playwright + `requests` against the real Flask backend. Cover:
 | `PVE_HOST` | Both Jenkinsfiles | `192.168.0.200` | Your PVE host IP |
 | `VM_IP` | `Jenkinsfile.integration` env block | `192.168.0.250` | Free IP for the CI VM |
 | `BACKEND_URL` | `Jenkinsfile.integration` run-tests stage | `http://10.10.0.100:5000` | Flask URL inside CI VM |
+
+### Agent endpoint smoke-tests
+
+After deploying the agent in the `Deploy latest code` stage, the pipeline smoke-tests `/settings`, `/schedules`, `/vms`, and `/items` in addition to `/health`. A 500 from any of these fails the build immediately (before any pytest runs), catching missing class attributes or methods that only blow up at runtime.
 
 ### mqtt_hostname alignment
 

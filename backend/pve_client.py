@@ -39,7 +39,7 @@ class PVEClient:
         return resp.json().get("data", {})
 
     def _put(self, path: str, **data) -> dict:
-        resp = self._session.put(f"{self._base}/api2/json{path}", json=data)
+        resp = self._session.put(f"{self._base}/api2/json{path}", data=data)
         resp.raise_for_status()
         return resp.json().get("data", {}) or {}
 
@@ -113,14 +113,21 @@ class PVEClient:
         return {"mode": "exclude", "vmids": []}
 
     def set_backup_vm_selection(self, job_id: str, mode: str, vmids: list[int]) -> None:
-        """Set backup VM selection mode and vmid list for a vzdump job."""
+        """Set backup VM selection mode and vmid list for a vzdump job.
+
+        PVE ignores the vmid field when all=1 and ignores exclude when all=0,
+        so we never need to delete the opposing field explicitly.
+        """
         ids = ",".join(str(v) for v in vmids)
         if mode == "include":
-            # Explicit include: remove all=1, set vmid list (empty = no VMs backed up)
-            self._put(f"/cluster/backup/{job_id}", all=0, vmid=ids, exclude="")
+            params: dict = {"all": 0}
+            if ids:
+                params["vmid"] = ids
         else:
-            # Exclude mode: set all=1, set exclude list
-            self._put(f"/cluster/backup/{job_id}", all=1, exclude=ids, vmid="")
+            params = {"all": 1}
+            if ids:
+                params["exclude"] = ids
+        self._put(f"/cluster/backup/{job_id}", **params)
 
     def set_backup_schedule(self, job_id: str, schedule: str) -> None:
         """Update the schedule of an existing vzdump backup job."""

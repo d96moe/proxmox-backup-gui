@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from datetime import timezone, datetime
-from flask import Flask, jsonify, send_from_directory, abort, request, redirect, url_for, session
+from flask import Flask, Response, jsonify, send_from_directory, abort, request, redirect, url_for, session, stream_with_context
 from flask_cors import CORS
 from flask_login import login_user, logout_user, login_required, current_user
 from flask_sock import Sock
@@ -390,7 +390,10 @@ def mqtt_proxy(ws):
 @login_required
 def get_hosts():
     return jsonify([
-        {"id": h.id, "label": h.label, "self_vmid": SELF_VMID}
+        {"id": h.id, "label": h.label, "self_vmid": SELF_VMID,
+         "agent_url": h.agent_url or "",
+         "pbs_datastore": h.pbs_datastore or "",
+         "pbs_storage_id": h.pbs_storage_id or ""}
         for h in HOSTS.values()
     ])
 
@@ -911,7 +914,59 @@ def post_host_settings(host_id: str):
     if not host.agent_url:
         abort(404)
     body = request.get_json(silent=True) or {}
-    return jsonify(AgentClient(host.agent_url, token=host.agent_token).set_settings(body))
+    try:
+        return jsonify(AgentClient(host.agent_url, token=host.agent_token).set_settings(body))
+    except RuntimeError as exc:
+        import re as _re
+        m = _re.search(r"→ (\d+):", str(exc))
+        if m:
+            abort(int(m.group(1)))
+        raise
+
+
+@app.get("/api/host/<host_id>/restic/log")
+@login_required
+def get_restic_log(host_id: str):
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_restic_log())
+
+
+@app.get("/api/host/<host_id>/restic/log/stream")
+@login_required
+def stream_restic_log(host_id: str):
+    """SSE stream of the nightly restic log — polls agent GET endpoint until done."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    import time as _t
+
+    def generate():
+        client = AgentClient(host.agent_url, token=host.agent_token)
+        sent = 0
+        while True:
+            try:
+                resp = client.get_restic_log()
+            except Exception:
+                yield "data: __done__\n\n"
+                return
+            lines = resp.get("lines", [])
+            while sent < len(lines):
+                yield f"data: {lines[sent]}\n\n"
+                sent += 1
+            if not resp.get("running", False):
+                yield "data: __done__\n\n"
+                return
+            _t.sleep(2)
+
+    return Response(stream_with_context(generate()),
+                    mimetype="text/event-stream",
+                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 # ──────────────────────────────────────────────

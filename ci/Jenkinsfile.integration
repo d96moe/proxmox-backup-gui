@@ -207,6 +207,57 @@ pct exec 300 -- bash -c '
     ssh-keygen -f /root/.ssh/known_hosts -R 10.10.0.1 2>/dev/null || true
     ssh-keyscan -t ed25519 10.10.0.1 >> /root/.ssh/known_hosts 2>/dev/null || true
 '
+# ── Prod-like CI environment ─────────────────────────────────────────────────
+# Settings tests check pbs_schedule, pbs_prune, and restic_schedule — all read
+# by the agent from the PVE host. Set them up to match production.
+
+# 1) PVE cluster backup job for ct/301 — provides pbs_schedule in /settings.
+#    Remove any stale jobs from the template first.
+pvesh get /cluster/backup --output-format json 2>/dev/null | \
+    python3 -c "
+import json, sys
+jobs = json.loads(sys.stdin.read()) or []
+for j in jobs:
+    print(j['id'])
+" 2>/dev/null | while read ID; do
+    pvesh delete /cluster/backup/${ID} 2>/dev/null || true
+done
+pvesh create /cluster/backup --storage pbs-local --vmid 301 \
+    --schedule "02:00" --mode stop --compress zstd 2>&1 && \
+    echo "STEP_B: PVE backup job created" || echo "STEP_B: WARNING — PVE backup job creation failed"
+
+# 2) PBS prune job for ci-pbs — provides pbs_prune in /settings.
+proxmox-backup-manager prune-job remove ci-prune 2>/dev/null || true
+proxmox-backup-manager prune-job create ci-prune --store ci-pbs \
+    --schedule daily --keep-last 7 2>&1 && \
+    echo "STEP_B: PBS prune job ci-prune created" || echo "STEP_B: WARNING — PBS prune job creation failed"
+
+# 3) restic-backup.timer on PVE host — agent reads OnCalendar from this file
+#    for restic_schedule in /settings. Also needs a stub .service so the timer
+#    can be restarted when the schedule is updated via POST /settings.
+cat > /etc/systemd/system/restic-backup.service << 'SVCEOF'
+[Unit]
+Description=Restic PBS datastore backup to cloud
+
+[Service]
+Type=oneshot
+ExecStart=/bin/true
+SVCEOF
+cat > /etc/systemd/system/restic-backup.timer << 'TIMEREOF'
+[Unit]
+Description=Restic PBS backup timer
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TIMEREOF
+systemctl daemon-reload
+systemctl enable restic-backup.timer 2>/dev/null || true
+echo "STEP_B: restic-backup.timer created"
+
 echo "STEP_B: done"
 STEP_B
                     echo "LXC 301 created, rclone/restic installed, SSH key authorised"
@@ -366,7 +417,21 @@ for i in $(seq 1 20); do
     sleep 3
 done
 curl -sf -H "Authorization: Bearer ${AGENT_TOKEN}" http://10.10.0.1:8099/health || { echo "ERROR: Agent not reachable"; exit 1; }
-echo "Agent deployed and healthy"
+
+# Smoke-test every key endpoint — catches missing methods/attributes that only
+# blow up at runtime (not at import time), which /health alone won't catch.
+for EP in /settings /schedules /vms /items; do
+    CODE=$(curl -s -o /tmp/agent-ep-out.txt -w "%{http_code}" \
+        -H "Authorization: Bearer ${AGENT_TOKEN}" "http://10.10.0.1:8099${EP}")
+    if [ "${CODE}" != "200" ]; then
+        echo "ERROR: Agent ${EP} returned HTTP ${CODE}"
+        cat /tmp/agent-ep-out.txt
+        journalctl -u pve-agent --no-pager -n 30 || true
+        exit 1
+    fi
+    echo "  ${EP} → ${CODE} OK"
+done
+echo "Agent deployed and all endpoints healthy"
 DEPLOY_AGENT
 
                     # ── Deploy backend + frontend to LXC 300 ──

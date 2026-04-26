@@ -56,6 +56,7 @@ Cloud backup, cloud restore, and ☁ sync are skipped gracefully if `restic_repo
 - **Restore** — restore from a PBS snapshot (local) or restic snapshot (cloud)
 - **Job indicator** — running jobs show a pulsing indicator on the VM card; click to reopen progress modal
 - **PBS task visibility** — running PBS operations (GC, external backup, prune) appear as clickable cards in the sidebar; click to view live log stream
+- **Restic nightly log streaming** — when the nightly restic job is running the sidebar badge is clickable; opens a modal that replays existing log lines and streams new lines live via SSE until the job finishes
 - **Settings modal** — editable per-host settings written back to the PVE host via agent:
   - Restic cloud retention (keep-last / keep-daily / keep-weekly / keep-monthly)
   - PBS prune policy (keep-last / keep-daily / keep-weekly / keep-monthly / keep-yearly)
@@ -208,6 +209,8 @@ The `id` field **must match** `mqtt_hostname` in the agent's `config.json` on ea
 | `GET /api/host/<id>/pbs/tasks` | List PBS tasks (`?running=1` for running only) |
 | `GET /api/host/<id>/pbs/tasks/<upid>/log` | Full log of a PBS task |
 | `GET /api/host/<id>/pbs/tasks/<upid>/stream` | SSE stream of a running PBS task log |
+| `GET /api/host/<id>/restic/log` | Last 500 lines of the restic nightly log + `running` bool |
+| `GET /api/host/<id>/restic/log/stream` | SSE stream of the restic nightly log; emits `__done__` when the job finishes |
 | `WS  /mqtt-ws` | MQTT proxy WebSocket — browser subscribes here instead of directly to Mosquitto; requires session cookie (login required) |
 
 ## CI & Testing
@@ -221,7 +224,7 @@ The GUI uses `rclone lsjson locks/` to check if a restic backup is in progress b
 ## Roadmap
 
 - **Delete backup (cloud)** — guided workflow to remove a specific VM's backup from the restic repo: restore full datastore → delete from PBS → re-backup → forget old snapshot. Expensive but correct given the whole-datastore restic architecture.
-- **Restic nightly log streaming** — the sidebar shows a "Restic backup running" badge when a nightly restic job is active, and clicking it reopens the last GUI-triggered job modal. However, cron/timer-triggered restic runs have no log stream in the GUI (restic has no task API like PBS). Planned: agent tails a known journal/log file and streams lines via SSE.
+- **Host/connection settings** — PBS credentials, restic repo/password, agent URL editable in GUI (currently requires editing config files on the host).
 - **Host/connection settings** — PBS credentials, restic repo/password, agent URL editable in GUI (currently requires editing config files on the host).
 
 ## Related
