@@ -116,7 +116,9 @@ Each agent publishes under `proxmox/<mqtt_hostname>/`. The GUI subscribes to `pr
 
 ## Deployment
 
-### Step 1 — Install the GUI (LXC)
+The GUI is a plain Python/Flask app — deploy it wherever makes sense for your setup. `setup-lxc.sh` is a convenience script for the common case of running it in a Proxmox LXC, but you can also run it in a VM, on bare-metal, in Docker, or anywhere else that can reach your PVE hosts over the network.
+
+### Option A — LXC (quickstart)
 
 Run on your PVE host as root:
 
@@ -126,15 +128,29 @@ cd /tmp/proxmox-backup-gui
 bash setup-lxc.sh
 ```
 
-Creates LXC 199 with Debian 12, installs Mosquitto + Flask, deploys the app, creates an initial admin user, and registers a systemd service. The GUI is then available at `http://<lxc-ip>:5000`.
-
-Override defaults with env vars:
+Creates LXC 199 with Debian 12, installs Mosquitto + Flask, deploys the app, creates an initial admin user, and registers a systemd service. Override defaults with env vars:
 
 ```bash
 LXC_ID=200 LXC_IP=192.168.0.51/24 LXC_GW=192.168.0.1 bash setup-lxc.sh
 ```
 
-The script prints login credentials (auto-generated password) and a hosts.json snippet at the end.
+The script prints the login credentials and a `hosts.json` snippet at the end.
+
+### Option B — Anywhere else
+
+Requirements: Python 3.11+, Mosquitto (or any MQTT broker), network access to your PVE hosts.
+
+```bash
+git clone https://github.com/d96moe/proxmox-backup-gui.git
+cd proxmox-backup-gui
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# Create an initial admin user
+bash add-user.sh admin admin
+
+# Edit config, then:
+PORT=5000 MQTT_WS_URL=ws://<mosquitto-host>:9001 .venv/bin/python backend/app.py
+```
 
 ### Step 2 — Install the agent (each PVE host)
 
@@ -145,9 +161,7 @@ cd /tmp/proxmox-backup-gui
 bash setup-agent.sh
 ```
 
-Prompts for the Mosquitto broker IP (the GUI LXC's IP) and a host ID (must match `id` in `hosts.json`). Installs the agent to `/opt/pve-agent/`, writes a config template to `/etc/pve-agent/config.json`, and registers a systemd service.
-
-Fill in your credentials, then start:
+Prompts for the Mosquitto broker IP and a host ID (must match `id` in `hosts.json`). Installs the agent to `/opt/pve-agent/`, writes a config template to `/etc/pve-agent/config.json`, and registers a systemd service.
 
 ```bash
 nano /etc/pve-agent/config.json   # fill in PBS/PVE passwords, pbs_datastore, etc.
@@ -157,13 +171,11 @@ journalctl -u pve-agent -f
 
 ### Step 3 — Connect agent to GUI
 
-Add the agent to `hosts.json` inside the GUI LXC (`pct enter 199`, then edit `/opt/proxmox-backup-gui/backend/hosts.json`). The `setup-agent.sh` script prints the exact JSON snippet to paste.
-
-```bash
-systemctl restart proxmox-backup-gui
-```
+Edit `hosts.json` (wherever the GUI is running) and add the agent. The `setup-agent.sh` script prints the exact JSON snippet to paste. Restart the GUI service.
 
 ### Adding users
+
+Run `add-user.sh` on the machine where the GUI is installed:
 
 ```bash
 bash add-user.sh alice           # viewer (read-only)
@@ -173,16 +185,16 @@ bash add-user.sh bob admin       # admin (full access)
 ### Updating
 
 ```bash
-bash update-lxc.sh
+bash update-lxc.sh               # if using the LXC setup
 ```
 
-Pushes updated backend + frontend files to the LXC and restarts the service. Re-run `setup-agent.sh` on each PVE host to update the agent.
+For other deployments: pull the repo, copy the changed files, restart the service. Re-run `setup-agent.sh` on each PVE host to update the agent.
 
 ## Configuration
 
-### `hosts.json` (in LXC 199)
+### `hosts.json`
 
-Edit `/opt/proxmox-backup-gui/backend/hosts.json`:
+Edit `backend/hosts.json` in your GUI install directory:
 
 ```json
 [
