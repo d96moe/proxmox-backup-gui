@@ -1020,12 +1020,32 @@ EOF
         always {
             junit allowEmptyResults: true, testResults: 'test-results/integration.xml'
 
-            // Destroy VM regardless of outcome
+            // Destroy VM and remove its PBS snapshots from the home datastore
             sh '''
                 echo "Destroying VM ${VM_ID}..."
                 ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} \
                     "qm stop ${VM_ID} 2>/dev/null; qm destroy ${VM_ID} --purge 1" \
                     || echo "WARNING: VM cleanup failed — destroy manually: qm destroy ${VM_ID} --purge 1"
+
+                echo "Cleaning up PBS snapshots for vm/${VM_ID} from home datastore..."
+                ssh ${SSH_OPTS} -i ${SSH_KEY} root@${PVE_HOST} "
+                    PBS_PASS=\$(python3 -c \"import json; print(json.load(open('/etc/pve-agent/config.json'))['pbs_password'])\")
+                    TOKEN_RESP=\$(curl -sk -X POST 'https://localhost:8007/api2/json/access/ticket' \\
+                        -d 'username=backup@pbs' --data-urlencode \"password=\$PBS_PASS\")
+                    TICKET=\$(echo \"\$TOKEN_RESP\" | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"data\"][\"ticket\"])')
+                    CSRF=\$(echo \"\$TOKEN_RESP\" | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"data\"][\"CSRFPreventionToken\"])')
+                    SNAPS=\$(curl -sk -b \"PBSAuthCookie=\$TICKET\" \\
+                        \"https://localhost:8007/api2/json/admin/datastore/local-store/snapshots?backup-type=vm&backup-id=${VM_ID}\" \\
+                        | python3 -c 'import sys,json; [print(s[\"backup-time\"]) for s in json.load(sys.stdin).get(\"data\",[])]')
+                    for TS in \$SNAPS; do
+                        curl -sk -X DELETE \\
+                            -b \"PBSAuthCookie=\$TICKET\" \\
+                            -H \"CSRFPreventionToken: \$CSRF\" \\
+                            \"https://localhost:8007/api2/json/admin/datastore/local-store/snapshots?backup-type=vm&backup-id=${VM_ID}&backup-time=\$TS\" >/dev/null
+                        echo \"  Deleted PBS snapshot vm/${VM_ID}/\$TS\"
+                    done
+                " || echo "WARNING: PBS snapshot cleanup failed for vm/${VM_ID}"
+
                 rm -f vm_ip.txt
             '''
             cleanWs()
