@@ -254,6 +254,8 @@ The `id` field **must match** `mqtt_hostname` in the agent's `config.json` on ea
 | `GET /api/host/<id>/info` | PBS and restic version info |
 | `GET /api/host/<id>/settings` | Read restic retention, PBS prune policy, schedules, VM selection |
 | `POST /api/host/<id>/settings` | Write any combination of the above settings to the PVE host |
+| `GET /api/host/<id>/connection` | Read agent connection config (passwords redacted; admin only) |
+| `POST /api/host/<id>/connection` | Write credentials to agent's config.json; empty password = unchanged (admin only) |
 | `GET /api/host/<id>/pbs/tasks` | List PBS tasks (`?running=1` for running only) |
 | `GET /api/host/<id>/pbs/tasks/<upid>/log` | Full log of a PBS task |
 | `GET /api/host/<id>/pbs/tasks/<upid>/stream` | SSE stream of a running PBS task log |

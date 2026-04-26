@@ -463,6 +463,49 @@
         </div>
       </div>
 
+      <div id="s-connection-section" style="display:none">
+        <div class="settings-section-title">Connection — Credentials</div>
+        <div class="settings-hint" style="margin-bottom:10px">Leave password fields empty to keep the current value.</div>
+        <div style="display:flex;flex-direction:column;gap:10px;">
+          <div class="settings-row">
+            <div><div class="settings-label">PVE URL</div></div>
+            <input class="settings-input" id="s-conn-pve-url" type="text" placeholder="https://…:8006" style="width:200px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">PVE user</div></div>
+            <input class="settings-input" id="s-conn-pve-user" type="text" placeholder="root@pam" style="width:140px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">PVE password</div></div>
+            <input class="settings-input" id="s-conn-pve-password" type="password" placeholder="unchanged" style="width:140px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">PBS URL</div></div>
+            <input class="settings-input" id="s-conn-pbs-url" type="text" placeholder="https://…:8007" style="width:200px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">PBS user</div></div>
+            <input class="settings-input" id="s-conn-pbs-user" type="text" placeholder="backup@pbs" style="width:140px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">PBS password</div></div>
+            <input class="settings-input" id="s-conn-pbs-password" type="password" placeholder="unchanged" style="width:140px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">PBS datastore</div></div>
+            <input class="settings-input" id="s-conn-pbs-datastore" type="text" placeholder="local-store" style="width:140px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Restic repo</div><div class="settings-hint">rclone:remote:path or leave blank</div></div>
+            <input class="settings-input" id="s-conn-restic-repo" type="text" placeholder="rclone:…" style="width:200px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Restic password</div></div>
+            <input class="settings-input" id="s-conn-restic-password" type="password" placeholder="unchanged" style="width:140px;text-align:left">
+          </div>
+        </div>
+      </div>
+
     </div>
     <div class="settings-modal-footer">
       <button class="btn-secondary" onclick="closeSettingsModal()">Cancel</button>
@@ -2128,6 +2171,29 @@ async function openSettingsModal() {
       }
     }
   } catch (_) {}
+
+  // Load connection settings (admin only — section hidden if fetch fails)
+  try {
+    const rc = await fetch(`${API_BASE}/api/host/${currentHost}/connection`);
+    const connSec = document.getElementById('s-connection-section');
+    if (rc.ok) {
+      const c = await rc.json();
+      document.getElementById('s-conn-pve-url').value         = c.pve_url       ?? '';
+      document.getElementById('s-conn-pve-user').value        = c.pve_user      ?? '';
+      document.getElementById('s-conn-pve-password').value    = '';
+      document.getElementById('s-conn-pbs-url').value         = c.pbs_url       ?? '';
+      document.getElementById('s-conn-pbs-user').value        = c.pbs_user      ?? '';
+      document.getElementById('s-conn-pbs-password').value    = '';
+      document.getElementById('s-conn-pbs-datastore').value   = c.pbs_datastore ?? '';
+      document.getElementById('s-conn-restic-repo').value     = c.restic_repo   ?? '';
+      document.getElementById('s-conn-restic-password').value = '';
+      connSec.style.display = '';
+    } else {
+      connSec.style.display = 'none';
+    }
+  } catch (_) {
+    document.getElementById('s-connection-section').style.display = 'none';
+  }
 }
 
 function renderVmSelectionList() {
@@ -2209,17 +2275,58 @@ async function saveSettings() {
     body.vm_selection = { mode, vmids };
   }
 
+  // Build connection update (only non-empty fields)
+  const connSec3 = document.getElementById('s-connection-section');
+  const connBody = {};
+  if (connSec3 && connSec3.style.display !== 'none') {
+    const connTextFields = {
+      pve_url:        's-conn-pve-url',
+      pve_user:       's-conn-pve-user',
+      pbs_url:        's-conn-pbs-url',
+      pbs_user:       's-conn-pbs-user',
+      pbs_datastore:  's-conn-pbs-datastore',
+      restic_repo:    's-conn-restic-repo',
+    };
+    for (const [k, id] of Object.entries(connTextFields)) {
+      const v = document.getElementById(id)?.value.trim();
+      if (v != null) connBody[k] = v;
+    }
+    // Passwords: only include if non-empty (empty = unchanged)
+    for (const [k, id] of [['pve_password', 's-conn-pve-password'], ['pbs_password', 's-conn-pbs-password'], ['restic_password', 's-conn-restic-password']]) {
+      const v = document.getElementById(id)?.value;
+      if (v) connBody[k] = v;
+    }
+  }
+
   try {
-    const r = await fetch(`${API_BASE}/api/host/${currentHost}/settings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (r.ok) {
+    const promises = [
+      fetch(`${API_BASE}/api/host/${currentHost}/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    ];
+    if (Object.keys(connBody).length > 0) {
+      promises.push(
+        fetch(`${API_BASE}/api/host/${currentHost}/connection`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(connBody),
+        })
+      );
+    }
+    const results = await Promise.all(promises);
+    const errors = [];
+    for (const r of results) {
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}));
+        errors.push(d.error || `HTTP ${r.status}`);
+      }
+    }
+    if (errors.length === 0) {
       closeSettingsModal();
     } else {
-      const d = await r.json().catch(() => ({}));
-      alert(d.error || 'Failed to save settings');
+      alert(errors.join('\n'));
     }
   } catch (e) {
     alert('Network error');
