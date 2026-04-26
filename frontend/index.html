@@ -912,6 +912,7 @@ function selectHost(id) {
   document.getElementById('pbs-dedup').textContent = '—';
   _schedules = null;
   _pbsTasks = [];
+  _pbsGraceTasks = {};
   renderPbsTasks();
   _activeTab = 'backups';
   document.getElementById('tab-backups').classList.add('active');
@@ -938,6 +939,7 @@ function loadData() {
 // PBS tasks — running tasks from MQTT proxmox/<host>/pbs/tasks/running
 // ─────────────────────────────────────────────
 let _pbsTasks = [];
+let _pbsGraceTasks = {}; // upid → task — tasks kept visible for 5s after completion
 
 const _PBS_TASK_LABELS = {
   backup:            'PBS backup',
@@ -963,7 +965,9 @@ function renderPbsTasks() {
     Object.keys(_activeJobs).map(k => String(k)).filter(k => !k.startsWith('_noid_'))
   );
   const GUI_TRIGGERED = new Set(['backup', 'prune']);
-  for (const t of _pbsTasks) {
+  const seenUpids = new Set(_pbsTasks.map(t => t.upid));
+  const graceTasks = Object.values(_pbsGraceTasks).filter(t => !seenUpids.has(t.upid));
+  for (const t of [..._pbsTasks, ...graceTasks]) {
     if (GUI_TRIGGERED.has(t.worker_type) && guiVmids.size > 0) {
       // Parse VMID from worker_id e.g. "local-store:vm/100" or "local-store::vm/100"
       const m = (t.worker_id || '').match(/\/(\d+)$/);
@@ -2195,7 +2199,7 @@ async function saveSettings() {
     body.pbs_prune = { id: pbsPruneSec2.dataset.jobId, retention: pbsRet };
   }
 
-  if (document.getElementById('s-vm-selection-section').style.display !== 'none') {
+  if (document.getElementById('s-vm-selection-section').style.display !== 'none' && pbsEl.dataset.jobId) {
     const mode = document.getElementById('s-vm-mode').value;
     const vmids = [];
     document.querySelectorAll('#s-vm-list input[type=checkbox]').forEach(cb => {
@@ -2560,7 +2564,16 @@ const MQTTBus = (() => {
     // proxmox/<host>/pbs/tasks/running — PBS task cards in sidebar
     if (parts[2] === 'pbs' && parts[3] === 'tasks' && parts[4] === 'running') {
       try {
-        _pbsTasks = JSON.parse(msg) || [];
+        const newTasks = JSON.parse(msg) || [];
+        const newUpids = new Set(newTasks.map(t => t.upid));
+        // Tasks leaving the running list get a 5s grace period so fast tasks remain visible
+        for (const t of _pbsTasks) {
+          if (!newUpids.has(t.upid) && !_pbsGraceTasks[t.upid]) {
+            _pbsGraceTasks[t.upid] = t;
+            setTimeout(() => { delete _pbsGraceTasks[t.upid]; renderPbsTasks(); }, 5000);
+          }
+        }
+        _pbsTasks = newTasks;
         renderPbsTasks();
       } catch (_) {}
       return;
