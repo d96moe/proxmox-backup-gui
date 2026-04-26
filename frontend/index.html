@@ -1296,9 +1296,10 @@ function renderCard(item) {
               · ${typeLabel} ${item.id}
             </span>
             <span style="color:${statusColor};font-size:10px;margin-left:4px">●</span>
-            ${item.template ? '<span class="template-badge">TMPL</span>' : ''}
           </div>
-          <div class="vm-meta">${snapCount} snapshot${snapCount !== 1 ? 's' : ''} · latest ${latestAge}</div>
+          <div class="vm-meta">
+            ${item.template ? '<span class="template-badge">TMPL</span> · ' : ''}${snapCount} snapshot${snapCount !== 1 ? 's' : ''} · latest ${latestAge}
+          </div>
         </div>
         <div style="display:flex;align-items:center;gap:8px">
           ${itemLocBadge(item)}
