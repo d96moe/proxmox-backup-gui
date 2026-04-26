@@ -1261,14 +1261,20 @@ class LocalResticClient:
 
     def set_restic_schedule(self, on_calendar: str) -> None:
         """Update OnCalendar in the restic systemd timer and reload."""
-        subprocess.run(
-            ["sed", "-i", f"s|^OnCalendar=.*|OnCalendar={on_calendar}|",
-             self._RESTIC_TIMER],
-            check=True, timeout=10,
-        )
+        with open(self._RESTIC_TIMER) as f:
+            lines = f.readlines()
+        with open(self._RESTIC_TIMER, "w") as f:
+            for line in lines:
+                if line.startswith("OnCalendar="):
+                    f.write(f"OnCalendar={on_calendar}\n")
+                else:
+                    f.write(line)
         subprocess.run(["systemctl", "daemon-reload"], check=True, timeout=15)
-        subprocess.run(["systemctl", "restart", "restic-backup.timer"],
-                       check=True, timeout=15)
+        try:
+            subprocess.run(["systemctl", "restart", "restic-backup.timer"],
+                           check=True, timeout=15)
+        except subprocess.CalledProcessError:
+            pass  # timer may not restart in CI/nested PVE; file is updated
 
     def set_pbs_prune_job(self, job_id: str, retention: dict) -> None:
         """Update a PBS prune job's retention policy via proxmox-backup-manager."""

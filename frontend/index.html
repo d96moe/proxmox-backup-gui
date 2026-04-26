@@ -939,7 +939,7 @@ function loadData() {
 // PBS tasks — running tasks from MQTT proxmox/<host>/pbs/tasks/running
 // ─────────────────────────────────────────────
 let _pbsTasks = [];
-let _pbsGraceTasks = {}; // upid → task — tasks kept visible for 5s after completion
+let _pbsGraceTasks = {}; // upid → task — tasks kept visible for 30s after completion
 
 const _PBS_TASK_LABELS = {
   backup:            'PBS backup',
@@ -2566,11 +2566,11 @@ const MQTTBus = (() => {
       try {
         const newTasks = JSON.parse(msg) || [];
         const newUpids = new Set(newTasks.map(t => t.upid));
-        // Tasks leaving the running list get a 5s grace period so fast tasks remain visible
+        // Tasks leaving the running list get a 30s grace period so fast tasks remain visible
         for (const t of _pbsTasks) {
           if (!newUpids.has(t.upid) && !_pbsGraceTasks[t.upid]) {
             _pbsGraceTasks[t.upid] = t;
-            setTimeout(() => { delete _pbsGraceTasks[t.upid]; renderPbsTasks(); }, 5000);
+            setTimeout(() => { delete _pbsGraceTasks[t.upid]; renderPbsTasks(); }, 30000);
           }
         }
         _pbsTasks = newTasks;
