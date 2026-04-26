@@ -1455,7 +1455,7 @@ function _updateGlobalJobIndicator() {
   const section = document.getElementById('global-job-section');
   const label = document.getElementById('global-job-label');
   const anyGuiJobs = Object.keys(_activeJobs).length > 0;
-  const anyPbsTasks = (_pbsTasks || []).length > 0;
+  const anyPbsTasks = (_pbsTasks || []).length > 0 || Object.keys(_pbsGraceTasks || {}).length > 0;
   const anyRunning = anyGuiJobs || anyPbsTasks;
   if (section) section.style.display = anyRunning ? '' : 'none';
   const indicator = document.getElementById('global-job-indicator');

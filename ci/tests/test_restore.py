@@ -2335,20 +2335,20 @@ def _trigger_pbs_external_backup(vmid: int, vm_type: str, storage: str = "local"
 
 
 def _trigger_pbs_prune(datastore: str, vm_type: str, vmid: int) -> None:
-    """Trigger a PBS prune for vmid on the PVE host. Waits for completion."""
+    """Trigger a PBS prune job on the PVE host. Waits for completion.
+
+    Runs the ci-prune prune job (created in STEP_B) which creates a 'prunejob' task.
+    The datastore/vm_type/vmid parameters are accepted for API compatibility but the
+    prune job covers the full store — this is sufficient for CI task visibility tests.
+    """
     result = subprocess.run(
         ["ssh", "-o", "StrictHostKeyChecking=no", "-o", "BatchMode=yes",
-         _PVE_HOST_SSH,
-         "proxmox-backup-manager", "prune",
-         "--store", datastore,
-         "--backup-type", vm_type,
-         "--backup-id", str(vmid),
-         "--keep-last", "10"],
+         _PVE_HOST_SSH, "proxmox-backup-manager", "prune", "run", "ci-prune"],
         capture_output=True, text=True, timeout=60,
     )
     if result.returncode != 0:
         raise RuntimeError(
-            f"proxmox-backup-manager prune failed (exit {result.returncode}):\n"
+            f"proxmox-backup-manager prune run ci-prune failed (exit {result.returncode}):\n"
             f"stdout: {result.stdout[-400:]}\nstderr: {result.stderr[-400:]}"
         )
 
@@ -2550,8 +2550,8 @@ def running_prune_task(host_id):
         pytest.skip("No PBS datastore configured")
     trigger_time = time.time()
     _trigger_pbs_prune(datastore, "ct", 301)
-    # prune completed — task is in PBS task list (possibly already finished)
-    task = _wait_for_recent_pbs_task(host_id, "prune", since=trigger_time, timeout=30)
+    # prunejob completed — task is in PBS task list (possibly already finished)
+    task = _wait_for_recent_pbs_task(host_id, "prunejob", since=trigger_time, timeout=30)
     yield task
     try:
         _wait_for_pbs_task_done(host_id, task["upid"], timeout=60)
@@ -2594,54 +2594,46 @@ def test_external_backup_task_card_in_sidebar(real_page, host_id, running_backup
 
 
 def test_gui_backup_no_duplicate_when_external_running(real_page, host_id, running_backup_task):
-    """When a GUI backup op runs for the same VMID, the PBS task card must be hidden (no dupes)."""
-    # Start a GUI backup for ct/301 — this creates a GUI op card for VMID 301
-    resp = _post(f"/api/host/{host_id}/backup/pbs", {"vmid": 301, "type": "ct"})
-    if "job_id" not in resp:
-        pytest.skip(f"Could not start GUI backup: {resp}")
-
-    # Navigate first so clearState() fires before we inject the external task
+    """PBS task card for a VMID must be hidden when a GUI backup op is active for that VMID."""
+    # Navigate first so clearState() fires before we inject state
     real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
     real_page.click(f"#nav-{host_id}")
     real_page.wait_for_function(
         "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
 
-    # Inject the external backup task so the dedup logic has something to hide
+    # Inject a GUI backup op for VMID 301. PBS deduplication makes real backups instant,
+    # so the WebSocket 'running' message may never arrive — inject directly to test dedup logic.
+    real_page.evaluate("""() => {
+        _activeJobs['301'] = { jobId: 'ci-dedup-test', title: 'PBS backup' };
+        _updateGlobalJobIndicator();
+    }""")
+
+    # Inject the external backup task so the dedup logic has something to consider
     real_page.evaluate(
         "(t) => { _pbsTasks = [t]; renderPbsTasks(); }",
         running_backup_task,
     )
 
-    # Wait for the GUI op indicator to appear via WebSocket
-    real_page.wait_for_function(
-        "() => document.getElementById('global-job-indicator').style.display !== 'none'",
-        timeout=15000,
-    )
-
-    # Inject again after GUI op is tracked, so renderPbsTasks applies dedup
-    real_page.evaluate(
-        "(t) => { _pbsTasks = [t]; renderPbsTasks(); }",
-        running_backup_task,
-    )
-
-    # The PBS task card for vmid 301 must be hidden (dedup logic)
+    # The PBS task card for vmid 301 must be hidden (dedup logic hides it)
     cards = real_page.locator("#pbs-task-cards .job-indicator")
     visible_texts = [c.inner_text() for c in cards.all() if c.is_visible()]
     for text in visible_texts:
-        # None of the visible PBS cards should be a backup for 301
         assert "301" not in text or "backup" not in text.lower(), \
             f"Duplicate PBS backup card shown for vmid 301 alongside GUI op: {text!r}"
 
-    # Let the backup finish
-    _poll_job(resp["job_id"], timeout=300)
-    real_page.evaluate("closeJobModal()")
+    # Clean up injected state
+    real_page.evaluate("""() => {
+        delete _activeJobs['301'];
+        _pbsTasks = [];
+        renderPbsTasks();
+    }""")
     assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
 
 
 def test_external_prune_task_appears_in_api(host_id, running_prune_task):
-    """External prune must appear in /pbs/tasks?running=1."""
+    """External prune job must appear in /pbs/tasks with worker_type 'prunejob'."""
     task = running_prune_task
-    assert task["worker_type"] == "prune"
+    assert task["worker_type"] == "prunejob"
     assert "upid" in task
     # Task may have already completed by the time we assert (prune is fast on small datastores)
 
