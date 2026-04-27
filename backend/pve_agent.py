@@ -1592,13 +1592,9 @@ def _get_pbs_tasks(running_only: bool = False, limit: int = 50) -> list[dict]:
 
 
 def _get_pbs_task_log(upid: str) -> list[str]:
-    """Fetch log lines for a PBS task by UPID."""
+    """Fetch log lines for a PBS task by UPID via PBS HTTP API (works for running tasks)."""
     try:
-        out = subprocess.run(
-            ["proxmox-backup-manager", "task", "log", upid],
-            capture_output=True, text=True, timeout=30,
-        ).stdout
-        return out.splitlines()
+        return PBSClient(_cfg).get_task_log(upid)
     except Exception:
         return []
 
@@ -2090,7 +2086,7 @@ def pbs_task_stream(upid: str):
             # Check if task is done
             tasks = _get_pbs_tasks(running_only=True)
             running_upids = {t.get("upid") for t in tasks}
-            if upid not in running_upids and seen > 0:
+            if upid not in running_upids:
                 yield f"data: {json.dumps({'done': True})}\n\n"
                 return
             time.sleep(2)

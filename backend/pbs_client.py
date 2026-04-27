@@ -50,6 +50,28 @@ class PBSClient:
         resp.raise_for_status()
         return resp.json().get("data", {})
 
+    def get_task_log(self, upid: str, start: int = 0, limit: int = 2000) -> list[str]:
+        """Fetch log lines for a PBS task by UPID — works for running and completed tasks.
+
+        PBS UPIDs contain literal \\xNN sequences (e.g. \\x2d for '-') that must be
+        passed unencoded in the URL path.  requests.get() would encode '\\' to '%5C',
+        causing a 404.  We work around this by building the URL string manually and
+        setting it on a PreparedRequest so requests never normalises the path.
+        """
+        node = upid.split(':')[1] if ':' in upid else 'localhost'
+        raw_url = (
+            f"{self._base}/api2/json/nodes/{node}/tasks/{upid}/log"
+            f"?start={start}&limit={limit}"
+        )
+        req = requests.Request('GET', raw_url)
+        prepared = self._session.prepare_request(req)
+        prepared.url = raw_url  # force raw URL — skip requests' path normalisation
+        resp = self._session.send(prepared)
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        entries = data if isinstance(data, list) else data.get("value", [])
+        return [e.get("t", "") for e in entries if isinstance(e, dict)]
+
     def start_gc(self) -> None:
         """Kick off a GC run on the datastore (async — PBS handles it in the background)."""
         self._post(f"/admin/datastore/{self._datastore}/gc")
