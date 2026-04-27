@@ -303,9 +303,14 @@ class MQTTPublisher:
                     op.append_log("PBS snapshot already gone (400/404 — check agent log for PBS response body).")
             if do_restic:
                 op.append_log("Deleting cloud (restic) copy…")
-                res = LocalResticClient(_cfg)
-                res.forget_snapshots([restic_id], op.append_log)
-                op.append_log("Cloud copy deleted.")
+                if not _restic_op_lock.acquire(blocking=False):
+                    raise RuntimeError("Another restic operation is already running — try again later")
+                try:
+                    res = LocalResticClient(_cfg)
+                    res.forget_snapshots([restic_id], op.append_log)
+                    op.append_log("Cloud copy deleted.")
+                finally:
+                    _restic_op_lock.release()
 
         _run_in_background(op, _do, rescan_restic=do_restic)
 
@@ -335,12 +340,17 @@ class MQTTPublisher:
         log.info("MQTT cmd/backup-restic corr_id=%s", corr_id)
 
         def _do(op: Operation):
-            res = LocalResticClient(_cfg)
-            pbs_snaps = _fetch_pbs_snaps(_host())
-            def _prog_restic(pct, speed, eta):
-                self.publish_progress(op.op_id, None, pct, speed, eta)
-            res.backup_datastore(_cfg.pbs_datastore_path, op.append_log, pbs_snaps,
-                                 progress_fn=_prog_restic)
+            if not _restic_op_lock.acquire(blocking=False):
+                raise RuntimeError("Another restic operation is already running — try again later")
+            try:
+                res = LocalResticClient(_cfg)
+                pbs_snaps = _fetch_pbs_snaps(_host())
+                def _prog_restic(pct, speed, eta):
+                    self.publish_progress(op.op_id, None, pct, speed, eta)
+                res.backup_datastore(_cfg.pbs_datastore_path, op.append_log, pbs_snaps,
+                                     progress_fn=_prog_restic)
+            finally:
+                _restic_op_lock.release()
 
         _run_in_background(op, _do, rescan_restic=True)
 
@@ -354,8 +364,13 @@ class MQTTPublisher:
         log.info("MQTT cmd/delete-restic id=%s", restic_id[:8])
 
         def _do(op: Operation):
-            res = LocalResticClient(_cfg)
-            res.forget_snapshots([restic_id], op.append_log)
+            if not _restic_op_lock.acquire(blocking=False):
+                raise RuntimeError("Another restic operation is already running — try again later")
+            try:
+                res = LocalResticClient(_cfg)
+                res.forget_snapshots([restic_id], op.append_log)
+            finally:
+                _restic_op_lock.release()
 
         _run_in_background(op, _do, rescan_restic=True)
 
@@ -1500,6 +1515,7 @@ class Operation:
 
 _operations: dict[str, Operation] = {}
 _ops_lock = threading.Lock()
+_restic_op_lock = threading.Lock()  # one restic process at a time
 
 
 def _pbs_type(vm_type: str) -> str:
@@ -2047,17 +2063,22 @@ def op_restic_prune():
     """Run restic prune as a tracked operation — progress visible in GUI log modal."""
     if not _cfg or not _cfg.restic_repo:
         return jsonify({"error": "restic not configured"}), 400
+    if not _restic_op_lock.acquire(blocking=False):
+        return jsonify({"error": "Another restic operation is already running — try again later"}), 409
     op = _new_op("prune", vmid=None)
 
     def _do(op: Operation):
-        res = LocalResticClient(_cfg)
-        res.run_prune(op.append_log)
-        op.append_log("Cleaning GDrive trash…")
-        subprocess.run(
-            ["rclone", "cleanup", f"{_cfg.restic_repo.split(':')[1]}:"],
-            capture_output=True, env=res._full_env,
-        )
-        op.append_log("Done.")
+        try:
+            res = LocalResticClient(_cfg)
+            res.run_prune(op.append_log)
+            op.append_log("Cleaning GDrive trash…")
+            subprocess.run(
+                ["rclone", "cleanup", f"{_cfg.restic_repo.split(':')[1]}:"],
+                capture_output=True, env=res._full_env,
+            )
+            op.append_log("Done.")
+        finally:
+            _restic_op_lock.release()
 
     _run_in_background(op, _do, rescan_restic=False)
     return jsonify({"op_id": op.op_id}), 202
