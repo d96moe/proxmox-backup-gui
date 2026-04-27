@@ -248,9 +248,10 @@
   .job-status-badge.error   { background:color-mix(in srgb, var(--red)    14%, transparent); color:var(--red); }
   .backup-btn { padding:3px 10px; border-radius:6px; border:1px solid var(--border); background:transparent; color:var(--muted); font-family:'IBM Plex Mono',monospace; font-size:10px; cursor:pointer; transition:all .15s; }
   .backup-btn:hover { border-color:var(--accent); color:var(--accent); }
-  .job-indicator { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:6px; background:color-mix(in srgb, var(--accent) 14%, transparent); border:1px solid color-mix(in srgb, var(--accent) 30%, transparent); color:var(--accent); font-family:'IBM Plex Mono',monospace; font-size:10px; cursor:pointer; transition:all .15s; white-space:nowrap; }
+  .job-indicator { display:inline-flex; align-items:center; gap:5px; padding:3px 10px; border-radius:6px; background:color-mix(in srgb, var(--accent) 14%, transparent); border:1px solid color-mix(in srgb, var(--accent) 30%, transparent); color:var(--accent); font-family:'IBM Plex Mono',monospace; font-size:10px; cursor:pointer; transition:all .15s; white-space:nowrap; position:relative; overflow:hidden; }
   .job-indicator:hover { background:color-mix(in srgb, var(--accent) 24%, transparent); }
   .job-indicator-dot { width:6px; height:6px; border-radius:50%; background:var(--accent); animation:pulse 1s infinite; flex-shrink:0; }
+  .job-indicator-progress { position:absolute; left:0; top:0; height:100%; width:0%; background:color-mix(in srgb, var(--accent) 22%, transparent); transition:width .6s ease; pointer-events:none; border-radius:6px 0 0 6px; }
 
   /* Footer */
   .footer { position:fixed; bottom:0; left:0; right:0; height:30px; background:var(--surface); border-top:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; padding:0 20px; }
@@ -547,6 +548,7 @@
     <div class="sidebar-section" id="global-job-section" style="display:none">
       <div class="sidebar-label">Running</div>
       <div id="global-job-indicator" class="job-indicator" onclick="_reopenLastJob()" style="width:100%;box-sizing:border-box">
+        <div class="job-indicator-progress" id="global-job-progress"></div>
         <div class="job-indicator-dot"></div>
         <span id="global-job-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
       </div>
@@ -1535,13 +1537,28 @@ function _setJobIndicator(vmid, running, title) {
   if (el) {
     if (running) {
       el.className = 'job-indicator';
-      el.innerHTML = `<div class="job-indicator-dot"></div>${title}`;
+      el.innerHTML = `<div class="job-indicator-progress"></div><div class="job-indicator-dot"></div>${title}`;
       el.style.display = '';
     } else {
       el.style.display = 'none';
     }
   }
   _updateGlobalJobIndicator();
+}
+
+function _setJobProgress(vmid, pct) {
+  const w = pct.toFixed(1) + '%';
+  // Per-VM badge
+  if (vmid != null) {
+    const el = document.getElementById(`vm-job-${vmid}`);
+    if (el) {
+      const bar = el.querySelector('.job-indicator-progress');
+      if (bar) bar.style.width = w;
+    }
+  }
+  // Global badge always tracks the latest progress
+  const global = document.getElementById('global-job-progress');
+  if (global) global.style.width = w;
 }
 
 function openJobModal(title, jobId, vmid) {
@@ -1682,6 +1699,7 @@ async function _pollJob(jobId, vmid) {
             if (pct > 0 && track) track.classList.remove('indeterminate');
             if (fill) fill.style.width = pct + '%';
             if (label) label.textContent = `Step ${cur}/${total} — ` + line.replace(/^Step\s+\d+\/\d+\s+[—\-]\s*/, '').split('(')[0].trim();
+            _setJobProgress(vmid, pct);
           }
           // Drive progress bar from "  42% — MB/MB @ MB/s ETA Xs" (formatted restic JSON)
           const mPct = line.match(/^\s+(\d+)%\s+[—\-]/);
@@ -1693,6 +1711,7 @@ async function _pollJob(jobId, vmid) {
             if (track) track.classList.remove('indeterminate');
             if (fill) fill.style.width = pct + '%';
             if (label) label.textContent = line.trim();
+            _setJobProgress(vmid, pct);
           }
           // Drive progress bar from restic prune --verbose=2: "[3:22] 2.50% 170 / 7645 packs repacked"
           // Repack is ~80% of total work; remaining phases (remove old packs, rebuild index) fill to 100%.
@@ -1705,7 +1724,8 @@ async function _pollJob(jobId, vmid) {
             const label = document.getElementById('job-progress-label');
             const track = fill && fill.closest('.job-progress-bar-track');
             if (track) track.classList.remove('indeterminate');
-            if (fill) fill.style.width = (repackPct * 0.8).toFixed(1) + '%';
+            const displayPct = repackPct * 0.8;
+            if (fill) fill.style.width = displayPct.toFixed(1) + '%';
             let etaStr = '';
             if (repackPct > 1 && elapsedSecs > 5) {
               // ETA for full job: repack phase + ~10% extra for remove+reindex
@@ -1713,6 +1733,7 @@ async function _pollJob(jobId, vmid) {
               etaStr = ' · ETA ~' + _fmtDuration(etaSecs);
             }
             if (label) label.textContent = `Repacking ${done}/${total} packs (${repackPct.toFixed(1)}%)${etaStr}`;
+            _setJobProgress(vmid, displayPct);
           }
           // "removing" and "rebuilding index" phases: 80–95%
           if (line.includes('removing') && line.includes('old packs')) {
@@ -1720,12 +1741,14 @@ async function _pollJob(jobId, vmid) {
             const label = document.getElementById('job-progress-label');
             if (fill) fill.style.width = '85%';
             if (label) label.textContent = 'Removing old packs…';
+            _setJobProgress(vmid, 85);
           }
           if (line.includes('rebuilding index')) {
             const fill = document.getElementById('job-progress-fill');
             const label = document.getElementById('job-progress-label');
             if (fill) fill.style.width = '92%';
             if (label) label.textContent = 'Rebuilding index…';
+            _setJobProgress(vmid, 92);
           }
           // Restic backup/forget ETA: "ETA 1:23:45" or "ETA 12:34"
           const mETA = line.match(/ETA\s+(\d+):(\d+)(?::(\d+))?/);
@@ -1769,9 +1792,11 @@ async function _pollJob(jobId, vmid) {
           fill.style.width = '100%';
           fill.style.background = 'var(--green)';
           document.getElementById('job-progress-label').textContent = 'Done';
+          _setJobProgress(vmid, 100);
         } else if (job.status === 'error' && fill) {
           fill.style.background = 'var(--red)';
           document.getElementById('job-progress-label').textContent = 'Failed';
+          _setJobProgress(vmid, 0);
         }
         if (job.status === 'done') refreshData();
       }
