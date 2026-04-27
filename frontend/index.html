@@ -1645,6 +1645,12 @@ function _escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
 
+function _fmtDuration(secs) {
+  if (secs < 60) return `${secs}s`;
+  const m = Math.floor(secs / 60), h = Math.floor(m / 60);
+  return h > 0 ? `${h}h ${m % 60}m` : `${m}m`;
+}
+
 async function _pollJob(jobId, vmid) {
   let lastLogCount = 0;
   const poll = async () => {
@@ -1690,16 +1696,23 @@ async function _pollJob(jobId, vmid) {
           }
           // Drive progress bar from restic prune --verbose=2: "[3:22] 2.50% 170 / 7645 packs repacked"
           // Repack is ~80% of total work; remaining phases (remove old packs, rebuild index) fill to 100%.
-          const mPrune = line.match(/\[\d+:\d+\]\s+([\d.]+)%\s+(\d+)\s*\/\s*(\d+)\s+packs repacked/);
+          const mPrune = line.match(/\[(\d+):(\d+)\]\s+([\d.]+)%\s+(\d+)\s*\/\s*(\d+)\s+packs repacked/);
           if (mPrune) {
-            const repackPct = parseFloat(mPrune[1]);
-            const done = parseInt(mPrune[2]), total = parseInt(mPrune[3]);
+            const elapsedSecs = parseInt(mPrune[1]) * 60 + parseInt(mPrune[2]);
+            const repackPct = parseFloat(mPrune[3]);
+            const done = parseInt(mPrune[4]), total = parseInt(mPrune[5]);
             const fill = document.getElementById('job-progress-fill');
             const label = document.getElementById('job-progress-label');
             const track = fill && fill.closest('.job-progress-bar-track');
             if (track) track.classList.remove('indeterminate');
             if (fill) fill.style.width = (repackPct * 0.8).toFixed(1) + '%';
-            if (label) label.textContent = `Repacking ${done} / ${total} packs (${repackPct.toFixed(1)}%)`;
+            let etaStr = '';
+            if (repackPct > 1 && elapsedSecs > 5) {
+              // ETA for full job: repack phase + ~10% extra for remove+reindex
+              const etaSecs = Math.round(elapsedSecs * (100 / repackPct - 1) * 1.1);
+              etaStr = ' · ETA ~' + _fmtDuration(etaSecs);
+            }
+            if (label) label.textContent = `Repacking ${done}/${total} packs (${repackPct.toFixed(1)}%)${etaStr}`;
           }
           // "removing" and "rebuilding index" phases: 80–95%
           if (line.includes('removing') && line.includes('old packs')) {
@@ -1713,6 +1726,15 @@ async function _pollJob(jobId, vmid) {
             const label = document.getElementById('job-progress-label');
             if (fill) fill.style.width = '92%';
             if (label) label.textContent = 'Rebuilding index…';
+          }
+          // Restic backup/forget ETA: "ETA 1:23:45" or "ETA 12:34"
+          const mETA = line.match(/ETA\s+(\d+):(\d+)(?::(\d+))?/);
+          if (mETA) {
+            const label = document.getElementById('job-progress-label');
+            const secs = mETA[3] != null
+              ? parseInt(mETA[1]) * 3600 + parseInt(mETA[2]) * 60 + parseInt(mETA[3])
+              : parseInt(mETA[1]) * 60 + parseInt(mETA[2]);
+            if (label) label.textContent = (label.textContent.replace(/ · ETA.*/,'')) + ' · ETA ~' + _fmtDuration(secs);
           }
           // Update label for heartbeat lines "[Xs elapsed]" without touching the bar
           const mElapsed = line.match(/^\[(\d+)s elapsed\]$/);
