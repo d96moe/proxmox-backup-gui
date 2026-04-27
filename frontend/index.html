@@ -1689,16 +1689,30 @@ async function _pollJob(jobId, vmid) {
             if (label) label.textContent = line.trim();
           }
           // Drive progress bar from restic prune --verbose=2: "[3:22] 2.50% 170 / 7645 packs repacked"
+          // Repack is ~80% of total work; remaining phases (remove old packs, rebuild index) fill to 100%.
           const mPrune = line.match(/\[\d+:\d+\]\s+([\d.]+)%\s+(\d+)\s*\/\s*(\d+)\s+packs repacked/);
           if (mPrune) {
-            const pct = parseFloat(mPrune[1]);
+            const repackPct = parseFloat(mPrune[1]);
             const done = parseInt(mPrune[2]), total = parseInt(mPrune[3]);
             const fill = document.getElementById('job-progress-fill');
             const label = document.getElementById('job-progress-label');
             const track = fill && fill.closest('.job-progress-bar-track');
             if (track) track.classList.remove('indeterminate');
-            if (fill) fill.style.width = pct + '%';
-            if (label) label.textContent = `Repacking ${done} / ${total} packs (${pct.toFixed(1)}%)`;
+            if (fill) fill.style.width = (repackPct * 0.8).toFixed(1) + '%';
+            if (label) label.textContent = `Repacking ${done} / ${total} packs (${repackPct.toFixed(1)}%)`;
+          }
+          // "removing" and "rebuilding index" phases: 80–95%
+          if (line.includes('removing') && line.includes('old packs')) {
+            const fill = document.getElementById('job-progress-fill');
+            const label = document.getElementById('job-progress-label');
+            if (fill) fill.style.width = '85%';
+            if (label) label.textContent = 'Removing old packs…';
+          }
+          if (line.includes('rebuilding index')) {
+            const fill = document.getElementById('job-progress-fill');
+            const label = document.getElementById('job-progress-label');
+            if (fill) fill.style.width = '92%';
+            if (label) label.textContent = 'Rebuilding index…';
           }
           // Update label for heartbeat lines "[Xs elapsed]" without touching the bar
           const mElapsed = line.match(/^\[(\d+)s elapsed\]$/);
