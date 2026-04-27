@@ -1688,6 +1688,18 @@ async function _pollJob(jobId, vmid) {
             if (fill) fill.style.width = pct + '%';
             if (label) label.textContent = line.trim();
           }
+          // Drive progress bar from restic prune --verbose=2: "[3:22] 2.50% 170 / 7645 packs repacked"
+          const mPrune = line.match(/\[\d+:\d+\]\s+([\d.]+)%\s+(\d+)\s*\/\s*(\d+)\s+packs repacked/);
+          if (mPrune) {
+            const pct = parseFloat(mPrune[1]);
+            const done = parseInt(mPrune[2]), total = parseInt(mPrune[3]);
+            const fill = document.getElementById('job-progress-fill');
+            const label = document.getElementById('job-progress-label');
+            const track = fill && fill.closest('.job-progress-bar-track');
+            if (track) track.classList.remove('indeterminate');
+            if (fill) fill.style.width = pct + '%';
+            if (label) label.textContent = `Repacking ${done} / ${total} packs (${pct.toFixed(1)}%)`;
+          }
           // Update label for heartbeat lines "[Xs elapsed]" without touching the bar
           const mElapsed = line.match(/^\[(\d+)s elapsed\]$/);
           if (mElapsed) {
