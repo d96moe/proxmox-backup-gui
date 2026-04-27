@@ -956,6 +956,22 @@ def post_host_connection(host_id: str):
         raise
 
 
+@app.post("/api/host/<host_id>/restic/prune")
+@login_required
+def start_restic_prune(host_id: str):
+    """Start a restic prune operation on the agent. Returns {op_id}."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        return jsonify({"error": "no agent configured for this host"}), 400
+    try:
+        result = AgentClient(host.agent_url, token=host.agent_token).start_restic_prune()
+        return jsonify(result), 202
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
 @app.get("/api/host/<host_id>/restic/log")
 @login_required
 def get_restic_log(host_id: str):

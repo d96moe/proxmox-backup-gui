@@ -159,6 +159,10 @@ class AgentClient:
     def get_restic_log(self) -> dict:
         return self._get("/restic/log")
 
+    def start_restic_prune(self) -> dict:
+        """Start a restic prune operation on the agent. Returns {op_id}."""
+        return self._post("/operations/restic-prune", {})
+
     # ── Connection settings ───────────────────────────────────────────────────
 
     def get_connection(self) -> dict:

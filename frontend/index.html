@@ -407,6 +407,10 @@
             <div><div class="settings-label">Keep monthly</div><div class="settings-hint">One snapshot per month, N months back</div></div>
             <input class="settings-input" id="s-keep-monthly" type="number" min="0" placeholder="—">
           </div>
+          <div class="settings-row" style="margin-top:6px">
+            <div><div class="settings-label">Manual prune</div><div class="settings-hint">Remove unreferenced data from cloud repo now</div></div>
+            <button class="btn-secondary" id="s-prune-now-btn" onclick="triggerResticPrune()" style="padding:4px 12px;font-size:12px">Prune now</button>
+          </div>
         </div>
       </div>
 
@@ -1476,6 +1480,25 @@ async function confirmBackup() {
 function triggerResticBackup(vmid, name) {
   if (!confirm(`Run restic cloud backup now?\n\nThis backs up the full PBS datastore. PBS will be briefly stopped.`)) return;
   MQTTBus.triggerAction('backup-restic', {}, 'Cloud Backup', vmid ?? null);
+}
+
+async function triggerResticPrune() {
+  if (!confirm('Run restic prune now?\n\nThis removes unreferenced data from the cloud repo and may take a while.')) return;
+  const btn = document.getElementById('s-prune-now-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+  try {
+    const ds = MQTTBus.getDS();
+    const hostId = ds?.hostId || currentHost;
+    const resp = await fetch(`/api/host/${hostId}/restic/prune`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    closeSettingsModal();
+    openJobModal('Restic prune', data.op_id, null);
+  } catch (e) {
+    alert(`Prune failed to start: ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Prune now'; }
+  }
 }
 
 // ─────────────────────────────────────────────
