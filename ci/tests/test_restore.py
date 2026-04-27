@@ -2987,14 +2987,15 @@ def test_connection_post_updates_non_secret_field(host_id):
         pytest.skip("Host has no agent_url")
     before = _get(f"/api/host/{host_id}/connection")
     original_user = before["pbs_user"]
-    new_user = original_user  # keep same value — just verify roundtrip works without error
+    new_user = original_user + "-ci-test"
     result = _post(f"/api/host/{host_id}/connection", {"pbs_user": new_user})
     assert result.get("ok") is True, f"POST /connection failed: {result}"
     after = _get(f"/api/host/{host_id}/connection")
     assert after["pbs_user"] == new_user, \
         f"pbs_user not persisted: expected {new_user!r}, got {after['pbs_user']!r}"
     # Restore original
-    _post(f"/api/host/{host_id}/connection", {"pbs_user": original_user})
+    restore = _post(f"/api/host/{host_id}/connection", {"pbs_user": original_user})
+    assert restore.get("ok") is True, f"failed to restore original pbs_user: {restore}"
 
 
 def test_connection_section_visible_in_settings_modal(real_page, host_id):
