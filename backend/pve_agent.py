@@ -1182,7 +1182,8 @@ class LocalResticClient:
             "RESTIC_RETENTION_KEEP_MONTHLY": "keep-monthly",
             "RESTIC_RETENTION_KEEP_YEARLY":  "keep-yearly",
         }
-        result = {}
+        # Seed with 0 for all keys so GUI shows empty fields for unset vars.
+        result: dict = {label: 0 for label in mapping.values()}
         for line in content.splitlines():
             line = line.strip()
             if not line or line.startswith("#") or "=" not in line:
@@ -1213,20 +1214,25 @@ class LocalResticClient:
         except OSError:
             lines = []
 
-        env_updates = {mapping[k]: str(v) for k, v in retention.items() if k in mapping}
+        # Value of 0 or "" means "remove this key" — backup script skips unset vars.
+        env_set    = {mapping[k]: str(v) for k, v in retention.items() if k in mapping and str(v) not in ("", "0")}
+        env_remove = {mapping[k] for k, v in retention.items() if k in mapping and str(v) in ("", "0")}
         written = set()
         new_lines = []
         for line in lines:
             stripped = line.strip()
             if stripped and not stripped.startswith("#") and "=" in stripped:
                 key = stripped.split("=", 1)[0].strip()
-                if key in env_updates:
-                    new_lines.append(f'{key}={env_updates[key]}\n')
+                if key in env_remove:
+                    written.add(key)
+                    continue  # drop the line
+                if key in env_set:
+                    new_lines.append(f'{key}={env_set[key]}\n')
                     written.add(key)
                     continue
             new_lines.append(line)
-        # Append any keys not already present
-        for key, val in env_updates.items():
+        # Append any keys not already present (only for non-zero values)
+        for key, val in env_set.items():
             if key not in written:
                 new_lines.append(f'{key}={val}\n')
 
