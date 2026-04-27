@@ -1361,7 +1361,7 @@ class LocalResticClient:
         """Prune unreferenced data from the restic repo (no forget — only removes orphaned packs)."""
         log_fn("Starting restic prune…")
         proc = subprocess.Popen(
-            ["restic", "prune", "--verbose"],
+            ["restic", "prune", "--verbose=2"],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, env=self._full_env,
         )
