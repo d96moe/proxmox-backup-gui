@@ -924,6 +924,38 @@ def post_host_settings(host_id: str):
         raise
 
 
+@app.get("/api/host/<host_id>/connection")
+@login_required
+@admin_required
+def get_host_connection(host_id: str):
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_connection())
+
+
+@app.post("/api/host/<host_id>/connection")
+@login_required
+@admin_required
+def post_host_connection(host_id: str):
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    if not host.agent_url:
+        abort(404)
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(AgentClient(host.agent_url, token=host.agent_token).set_connection(body))
+    except RuntimeError as exc:
+        import re as _re
+        m = _re.search(r"→ (\d+):", str(exc))
+        if m:
+            abort(int(m.group(1)))
+        raise
+
+
 @app.get("/api/host/<host_id>/restic/log")
 @login_required
 def get_restic_log(host_id: str):

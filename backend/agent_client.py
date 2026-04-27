@@ -158,3 +158,11 @@ class AgentClient:
 
     def get_restic_log(self) -> dict:
         return self._get("/restic/log")
+
+    # ── Connection settings ───────────────────────────────────────────────────
+
+    def get_connection(self) -> dict:
+        return self._get("/connection")
+
+    def set_connection(self, settings: dict) -> dict:
+        return self._post("/connection", settings)

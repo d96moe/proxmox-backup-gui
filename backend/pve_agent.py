@@ -1033,6 +1033,8 @@ class AgentConfig:
 
 # Module-level config — replaced by tests via patch("pve_agent._cfg", ...)
 _cfg: AgentConfig | None = None
+# Path to the config file on disk — set at startup; used by /connection POST to write back
+_config_path: str = "/etc/pve-agent/config.json"
 
 
 def _host():
@@ -2274,6 +2276,62 @@ def restic_log_stream():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Connection settings — read/write the agent's own config.json
+# ─────────────────────────────────────────────────────────────────────────────
+
+_SENSITIVE = {"pve_password", "pbs_password", "restic_password", "agent_token", "mqtt_password"}
+
+@app.route("/connection")
+def connection_get():
+    try:
+        with open(_config_path) as f:
+            raw = json.load(f)
+    except Exception as exc:
+        return jsonify({"error": f"cannot read config: {exc}"}), 500
+    for key in _SENSITIVE:
+        if key in raw:
+            raw[key] = ""   # redact — UI shows placeholder, only sends back if changed
+    return jsonify(raw)
+
+
+@app.route("/connection", methods=["POST"])
+def connection_post():
+    body = request.get_json(silent=True) or {}
+    if not body:
+        return jsonify({"error": "empty body"}), 400
+
+    # Read current config
+    try:
+        with open(_config_path) as f:
+            current = json.load(f)
+    except Exception as exc:
+        return jsonify({"error": f"cannot read config: {exc}"}), 500
+
+    # Merge: skip sensitive fields if posted as empty (means "unchanged")
+    for k, v in body.items():
+        if k in _SENSITIVE and v == "":
+            continue
+        current[k] = v
+
+    # Write back
+    try:
+        with open(_config_path, "w") as f:
+            json.dump(current, f, indent=2)
+            f.write("\n")
+    except Exception as exc:
+        return jsonify({"error": f"cannot write config: {exc}"}), 500
+
+    # Reload in-process config
+    global _cfg
+    try:
+        _cfg = AgentConfig(**current)
+    except Exception as exc:
+        return jsonify({"error": f"config written but reload failed: {exc}"}), 500
+
+    return jsonify({"ok": True})
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2291,6 +2349,7 @@ if __name__ == "__main__":
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
     cfg_path = sys.argv[1] if len(sys.argv) > 1 else "/etc/pve-agent/config.json"
+    _config_path = cfg_path
     _cfg = _load_config(cfg_path)
 
     # Start MQTT publisher if configured

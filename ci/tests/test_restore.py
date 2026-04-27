@@ -2922,3 +2922,100 @@ def test_restic_log_badge_opens_modal(real_page, host_id, seeded_restic_log):
         timeout=3000,
     )
     assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONNECTION SETTINGS — GET/POST /api/host/<id>/connection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_connection_get_returns_config(host_id):
+    """GET /connection must return the agent config with passwords redacted."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    data = _get(f"/api/host/{host_id}/connection")
+    assert "pve_url" in data,      f"Missing pve_url: {data}"
+    assert "pve_user" in data,     f"Missing pve_user: {data}"
+    assert "pbs_url" in data,      f"Missing pbs_url: {data}"
+    assert "pbs_user" in data,     f"Missing pbs_user: {data}"
+    assert "pbs_datastore" in data, f"Missing pbs_datastore: {data}"
+    assert "restic_repo" in data,  f"Missing restic_repo: {data}"
+    # Passwords must be redacted (empty string, not the real value)
+    for key in ("pve_password", "pbs_password", "restic_password"):
+        assert data.get(key) == "", \
+            f"{key} must be redacted (empty string), got: {data.get(key)!r}"
+
+
+def test_connection_get_urls_are_valid(host_id):
+    """pve_url and pbs_url must look like https URLs."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    data = _get(f"/api/host/{host_id}/connection")
+    assert data["pve_url"].startswith("https://"), \
+        f"pve_url should be https, got: {data['pve_url']!r}"
+    assert data["pbs_url"].startswith("https://"), \
+        f"pbs_url should be https, got: {data['pbs_url']!r}"
+
+
+def test_connection_post_noop_roundtrip(host_id):
+    """POST /connection with empty passwords must not change the stored config."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    before = _get(f"/api/host/{host_id}/connection")
+    # Post the non-password fields back unchanged, passwords empty (= unchanged)
+    payload = {
+        "pve_url":       before["pve_url"],
+        "pve_user":      before["pve_user"],
+        "pve_password":  "",
+        "pbs_url":       before["pbs_url"],
+        "pbs_user":      before["pbs_user"],
+        "pbs_password":  "",
+        "pbs_datastore": before["pbs_datastore"],
+        "restic_repo":   before.get("restic_repo", ""),
+        "restic_password": "",
+    }
+    result = _post(f"/api/host/{host_id}/connection", payload)
+    assert result.get("ok") is True, f"POST /connection failed: {result}"
+    after = _get(f"/api/host/{host_id}/connection")
+    assert after["pve_url"] == before["pve_url"], "pve_url changed unexpectedly"
+    assert after["pbs_user"] == before["pbs_user"], "pbs_user changed unexpectedly"
+    assert after["pbs_datastore"] == before["pbs_datastore"], "pbs_datastore changed unexpectedly"
+
+
+def test_connection_post_updates_non_secret_field(host_id):
+    """POST /connection with a changed pbs_user must persist and be readable back."""
+    if not _host_has_agent(host_id):
+        pytest.skip("Host has no agent_url")
+    before = _get(f"/api/host/{host_id}/connection")
+    original_user = before["pbs_user"]
+    new_user = original_user + "-ci-test"
+    result = _post(f"/api/host/{host_id}/connection", {"pbs_user": new_user})
+    assert result.get("ok") is True, f"POST /connection failed: {result}"
+    after = _get(f"/api/host/{host_id}/connection")
+    assert after["pbs_user"] == new_user, \
+        f"pbs_user not persisted: expected {new_user!r}, got {after['pbs_user']!r}"
+    # Restore original
+    restore = _post(f"/api/host/{host_id}/connection", {"pbs_user": original_user})
+    assert restore.get("ok") is True, f"failed to restore original pbs_user: {restore}"
+
+
+def test_connection_section_visible_in_settings_modal(real_page, host_id):
+    """Settings modal must show the Connection section when logged in as admin."""
+    real_page.wait_for_selector(f"#nav-{host_id}", timeout=5000)
+    real_page.click(f"#nav-{host_id}")
+    real_page.wait_for_function(
+        "() => document.querySelectorAll('.vm-card').length > 0", timeout=20000)
+
+    real_page.click("#settings-btn")
+    real_page.wait_for_selector(".settings-overlay.open", timeout=5000)
+    # Connection section should become visible after the async fetch
+    real_page.wait_for_function(
+        "() => document.getElementById('s-connection-section').style.display !== 'none'",
+        timeout=5000,
+    )
+    pve_url = real_page.input_value("#s-conn-pve-url")
+    assert pve_url.startswith("https://"), \
+        f"PVE URL field should be pre-filled, got: {pve_url!r}"
+
+    real_page.click("#settings-btn") if False else None  # suppress lint
+    real_page.evaluate("closeSettingsModal()")
+    assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
