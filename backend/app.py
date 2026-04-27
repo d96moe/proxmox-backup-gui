@@ -1562,8 +1562,29 @@ def get_job_status(job_id: str):
 @app.get("/api/jobs/active")
 @login_required
 def get_active_jobs_endpoint():
-    """Return all currently running or pending jobs."""
-    return jsonify(get_active_jobs())
+    """Return all currently running jobs — Flask jobs + agent operations."""
+    flask_jobs = get_active_jobs()
+    # Also include running operations from each agent so the page-reload
+    # restore logic picks up agent-ops (e.g. restic prune) as active jobs.
+    agent_ops = []
+    for host in HOSTS.values():
+        if not host.agent_url:
+            continue
+        try:
+            ops = AgentClient(host.agent_url, token=host.agent_token).get_operations()
+            for op in ops:
+                if op.get("status") == "running":
+                    agent_ops.append({
+                        "id":      op["op_id"],
+                        "label":   op.get("type", "operation"),
+                        "status":  "running",
+                        "logs":    op.get("log", []),
+                        "started": op.get("created_at"),
+                        "ended":   None,
+                    })
+        except Exception:
+            pass
+    return jsonify(flask_jobs + agent_ops)
 
 
 # ──────────────────────────────────────────────
