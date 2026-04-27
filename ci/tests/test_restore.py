@@ -2737,7 +2737,7 @@ def test_settings_modal_opens_and_closes(real_page, host_id):
     real_page.click("#settings-btn")
     real_page.wait_for_selector(".settings-overlay.open", timeout=5000)
 
-    real_page.click("button.btn-secondary")  # Cancel
+    real_page.click("#s-cancel-btn")
     real_page.wait_for_function(
         "() => !document.querySelector('.settings-overlay').classList.contains('open')",
         timeout=3000,
