@@ -1357,6 +1357,23 @@ class LocalResticClient:
             raise RuntimeError(f"restic forget failed (rc={proc.returncode})")
         log_fn("Forget + prune complete.")
 
+    def run_prune(self, log_fn) -> None:
+        """Prune unreferenced data from the restic repo (no forget — only removes orphaned packs)."""
+        log_fn("Starting restic prune…")
+        proc = subprocess.Popen(
+            ["restic", "prune", "--verbose"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, env=self._full_env,
+        )
+        for line in proc.stdout:
+            line = line.rstrip()
+            if line:
+                log_fn(line)
+        proc.wait()
+        if proc.returncode != 0:
+            raise RuntimeError(f"restic prune failed (rc={proc.returncode})")
+        log_fn("Prune complete.")
+
     def backup_datastore(self, datastore_path: str, log_fn,
                          pbs_snapshots: list = None,
                          progress_fn=None) -> None:
@@ -2022,6 +2039,27 @@ def op_restore():
         op.append_log(f"Started {vm_type}/{vmid}")
 
     _run_in_background(op, _do)
+    return jsonify({"op_id": op.op_id}), 202
+
+
+@app.route("/operations/restic-prune", methods=["POST"])
+def op_restic_prune():
+    """Run restic prune as a tracked operation — progress visible in GUI log modal."""
+    if not _cfg or not _cfg.restic_repo:
+        return jsonify({"error": "restic not configured"}), 400
+    op = _new_op("prune", vmid=None)
+
+    def _do(op: Operation):
+        res = LocalResticClient(_cfg)
+        res.run_prune(op.append_log)
+        op.append_log("Cleaning GDrive trash…")
+        subprocess.run(
+            ["rclone", "cleanup", f"{_cfg.restic_repo.split(':')[1]}:"],
+            capture_output=True, env=res._full_env,
+        )
+        op.append_log("Done.")
+
+    _run_in_background(op, _do, rescan_restic=False)
     return jsonify({"op_id": op.op_id}), 202
 
 
