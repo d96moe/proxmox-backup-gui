@@ -452,6 +452,11 @@
         </div>
         <div class="settings-hint" id="s-vm-mode-hint" style="margin-bottom:8px"></div>
         <div class="vm-select-list" id="s-vm-list"></div>
+        <div style="margin-top:10px">
+          <div class="settings-label" id="s-vm-extra-label" style="margin-bottom:3px">Extra VMIDs to exclude / ranges</div>
+          <div class="settings-hint" id="s-vm-extra-hint" style="margin-bottom:5px">VMIDs not in the list above to exclude — supports ranges, e.g. <code>9100-9199, 975</code></div>
+          <input type="text" id="s-vm-extra-ids" class="settings-input" style="width:100%;text-align:left;box-sizing:border-box" placeholder="e.g. 9100-9199, 950">
+        </div>
       </div>
 
       <div id="s-schedules-section" style="display:none">
@@ -470,8 +475,16 @@
 
       <div id="s-connection-section" style="display:none">
         <div class="settings-section-title">Connection — Credentials</div>
-        <div class="settings-hint" style="margin-bottom:10px">Leave password fields empty to keep the current value.</div>
+        <div class="settings-hint" style="margin-bottom:10px">Leave password/token fields empty to keep the current value.</div>
         <div style="display:flex;flex-direction:column;gap:10px;">
+          <div class="settings-row">
+            <div><div class="settings-label">Agent URL</div><div class="settings-hint">http://&lt;host&gt;:8099</div></div>
+            <input class="settings-input" id="s-conn-agent-url" type="text" placeholder="http://…:8099" style="width:200px;text-align:left">
+          </div>
+          <div class="settings-row">
+            <div><div class="settings-label">Agent token</div></div>
+            <input class="settings-input" id="s-conn-agent-token" type="password" placeholder="unchanged" style="width:140px;text-align:left">
+          </div>
           <div class="settings-row">
             <div><div class="settings-label">PVE URL</div></div>
             <input class="settings-input" id="s-conn-pve-url" type="text" placeholder="https://…:8006" style="width:200px;text-align:left">
@@ -515,6 +528,34 @@
     <div class="settings-modal-footer">
       <button class="btn-secondary" id="s-cancel-btn" onclick="closeSettingsModal()">Cancel</button>
       <button class="btn-primary" id="settings-save-btn" onclick="saveSettings()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add Host modal -->
+<div class="settings-overlay" id="add-host-overlay">
+  <div class="settings-modal" style="max-width:420px">
+    <div class="settings-modal-header">
+      <span>Add Host</span>
+      <button class="icon-btn" onclick="closeAddHostModal()">✕</button>
+    </div>
+    <div class="settings-modal-body" style="padding:20px;display:flex;flex-direction:column;gap:14px;">
+      <div class="settings-row">
+        <div><div class="settings-label">Label</div><div class="settings-hint">Display name</div></div>
+        <input class="settings-input" id="ah-label" type="text" placeholder="Home" style="width:160px;text-align:left">
+      </div>
+      <div class="settings-row">
+        <div><div class="settings-label">Agent URL</div><div class="settings-hint">http://&lt;host&gt;:8099</div></div>
+        <input class="settings-input" id="ah-agent-url" type="text" placeholder="http://10.10.0.1:8099" style="width:200px;text-align:left">
+      </div>
+      <div class="settings-row">
+        <div><div class="settings-label">Agent token</div></div>
+        <input class="settings-input" id="ah-agent-token" type="password" placeholder="secret" style="width:140px;text-align:left">
+      </div>
+    </div>
+    <div class="settings-modal-footer">
+      <button class="btn-secondary" onclick="closeAddHostModal()">Cancel</button>
+      <button class="btn-primary" id="ah-save-btn" onclick="saveNewHost()">Add</button>
     </div>
   </div>
 </div>
@@ -915,11 +956,54 @@ async function init() {
 
 function renderHostNav() {
   const section = document.getElementById('hosts-section');
-  section.innerHTML = `<div class="sidebar-label">Hosts</div>` +
+  const addBtn = _currentUser?.role === 'admin'
+    ? `<button class="icon-btn" onclick="openAddHostModal()" title="Add host" style="padding:2px 6px;font-size:14px;line-height:1">+</button>`
+    : '';
+  section.innerHTML = `<div class="sidebar-label" style="display:flex;align-items:center;justify-content:space-between;width:100%">Hosts ${addBtn}</div>` +
     hosts.map(h => `
       <div class="nav-item host-item" id="nav-${h.id}" onclick="selectHost('${h.id}')">
         <span class="nav-icon">⬡</span> ${h.label}
       </div>`).join('');
+}
+
+function openAddHostModal() {
+  document.getElementById('ah-label').value = '';
+  document.getElementById('ah-agent-url').value = '';
+  document.getElementById('ah-agent-token').value = '';
+  document.getElementById('add-host-overlay').classList.add('open');
+}
+
+function closeAddHostModal() {
+  document.getElementById('add-host-overlay').classList.remove('open');
+}
+
+async function saveNewHost() {
+  const label     = document.getElementById('ah-label').value.trim();
+  const agentUrl  = document.getElementById('ah-agent-url').value.trim();
+  const agentToken = document.getElementById('ah-agent-token').value;
+  if (!label) { alert('Label is required'); return; }
+  if (!agentUrl) { alert('Agent URL is required'); return; }
+  const btn = document.getElementById('ah-save-btn');
+  btn.disabled = true; btn.textContent = 'Adding…';
+  try {
+    const r = await fetch(`${API_BASE}/api/hosts`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ label, agent_url: agentUrl, agent_token: agentToken }),
+    });
+    if (r.ok) {
+      const newHost = await r.json();
+      hosts.push(newHost);
+      renderHostNav();
+      closeAddHostModal();
+      selectHost(newHost.id);
+    } else {
+      const d = await r.json().catch(() => ({}));
+      alert(d.error || `HTTP ${r.status}`);
+    }
+  } finally {
+    btn.disabled = false; btn.textContent = 'Add';
+  }
 }
 
 function refreshData() {
@@ -2260,7 +2344,10 @@ async function openSettingsModal() {
         .map(([vmid, v]) => ({ vmid, name: v.meta?.name || `vm-${vmid}`, type: v.meta?.type || 'vm' }))
         .sort((a, b) => Number(a.vmid) - Number(b.vmid));
       window._vmEntries = vmEntries;
-      if (vmEntries.length) {
+      const knownVmids = new Set(vmEntries.map(e => parseInt(e.vmid, 10)));
+      const extraVmids = (vmSel.vmids || []).filter(id => !knownVmids.has(id));
+      document.getElementById('s-vm-extra-ids').value = collapseToRanges(extraVmids);
+      if (vmEntries.length || extraVmids.length) {
         vmSec.style.display = '';
         renderVmSelectionList();
       } else {
@@ -2269,21 +2356,31 @@ async function openSettingsModal() {
     }
   } catch (_) {}
 
-  // Load connection settings (admin only — section hidden if fetch fails)
+  // Load connection settings (admin only — section hidden if both fetches fail)
   try {
-    const rc = await fetch(`${API_BASE}/api/host/${currentHost}/connection`);
+    const [rc, rl] = await Promise.all([
+      fetch(`${API_BASE}/api/host/${currentHost}/connection`),
+      fetch(`${API_BASE}/api/host/${currentHost}/local`),
+    ]);
     const connSec = document.getElementById('s-connection-section');
-    if (rc.ok) {
-      const c = await rc.json();
-      document.getElementById('s-conn-pve-url').value         = c.pve_url       ?? '';
-      document.getElementById('s-conn-pve-user').value        = c.pve_user      ?? '';
-      document.getElementById('s-conn-pve-password').value    = '';
-      document.getElementById('s-conn-pbs-url').value         = c.pbs_url       ?? '';
-      document.getElementById('s-conn-pbs-user').value        = c.pbs_user      ?? '';
-      document.getElementById('s-conn-pbs-password').value    = '';
-      document.getElementById('s-conn-pbs-datastore').value   = c.pbs_datastore ?? '';
-      document.getElementById('s-conn-restic-repo').value     = c.restic_repo   ?? '';
-      document.getElementById('s-conn-restic-password').value = '';
+    if (rc.ok || rl.ok) {
+      if (rc.ok) {
+        const c = await rc.json();
+        document.getElementById('s-conn-pve-url').value         = c.pve_url       ?? '';
+        document.getElementById('s-conn-pve-user').value        = c.pve_user      ?? '';
+        document.getElementById('s-conn-pve-password').value    = '';
+        document.getElementById('s-conn-pbs-url').value         = c.pbs_url       ?? '';
+        document.getElementById('s-conn-pbs-user').value        = c.pbs_user      ?? '';
+        document.getElementById('s-conn-pbs-password').value    = '';
+        document.getElementById('s-conn-pbs-datastore').value   = c.pbs_datastore ?? '';
+        document.getElementById('s-conn-restic-repo').value     = c.restic_repo   ?? '';
+        document.getElementById('s-conn-restic-password').value = '';
+      }
+      if (rl.ok) {
+        const l = await rl.json();
+        document.getElementById('s-conn-agent-url').value   = l.agent_url   ?? '';
+        document.getElementById('s-conn-agent-token').value = '';
+      }
       connSec.style.display = '';
     } else {
       connSec.style.display = 'none';
@@ -2293,15 +2390,36 @@ async function openSettingsModal() {
   }
 }
 
+function collapseToRanges(ids) {
+  if (!ids.length) return '';
+  const sorted = [...new Set(ids)].map(Number).sort((a, b) => a - b);
+  const parts = [];
+  let start = sorted[0], end = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i] === end + 1) { end = sorted[i]; }
+    else { parts.push(start === end ? `${start}` : `${start}-${end}`); start = end = sorted[i]; }
+  }
+  parts.push(start === end ? `${start}` : `${start}-${end}`);
+  return parts.join(', ');
+}
+
 function renderVmSelectionList() {
   const mode    = document.getElementById('s-vm-mode')?.value || 'exclude';
   const vmids   = new Set(((window._vmSelectionData || {}).vmids || []).map(String));
   const entries = window._vmEntries || [];
   const hint    = document.getElementById('s-vm-mode-hint');
   const list    = document.getElementById('s-vm-list');
+  const extraLabel = document.getElementById('s-vm-extra-label');
+  const extraHint  = document.getElementById('s-vm-extra-hint');
   if (hint) hint.textContent = mode === 'exclude'
     ? 'All VMs are backed up. Uncheck to exclude from nightly PBS backup.'
     : 'No VMs are backed up by default. Check to include in nightly PBS backup.';
+  if (extraLabel) extraLabel.textContent = mode === 'exclude'
+    ? 'Extra VMIDs to exclude / ranges'
+    : 'Extra VMIDs to include / ranges';
+  if (extraHint) extraHint.innerHTML = mode === 'exclude'
+    ? 'VMIDs not in the list above to exclude — supports ranges, e.g. <code>9100-9199, 975</code>'
+    : 'VMIDs not in the list above to include — supports ranges, e.g. <code>9100-9199, 975</code>';
   if (!list) return;
   list.innerHTML = entries.map(({ vmid, name, type }) => {
     const checked = mode === 'exclude' ? !vmids.has(vmid) : vmids.has(vmid);
@@ -2312,6 +2430,22 @@ function renderVmSelectionList() {
       <span>${name}</span>
     </label>`;
   }).join('');
+}
+
+function parseVmidRanges(str) {
+  const result = [];
+  for (const part of str.split(',')) {
+    const p = part.trim();
+    if (!p) continue;
+    const range = p.match(/^(\d+)-(\d+)$/);
+    if (range) {
+      const lo = parseInt(range[1], 10), hi = parseInt(range[2], 10);
+      for (let i = lo; i <= hi; i++) result.push(i);
+    } else if (/^\d+$/.test(p)) {
+      result.push(parseInt(p, 10));
+    }
+  }
+  return result;
 }
 
 function closeSettingsModal() {
@@ -2369,7 +2503,10 @@ async function saveSettings() {
       if (mode === 'exclude' && !cb.checked) vmids.push(parseInt(cb.dataset.vmid, 10));
       if (mode === 'include' &&  cb.checked) vmids.push(parseInt(cb.dataset.vmid, 10));
     });
-    body.vm_selection = { mode, vmids };
+    const extraRaw = document.getElementById('s-vm-extra-ids')?.value || '';
+    const extraIds = parseVmidRanges(extraRaw);
+    const merged = [...new Set([...vmids, ...extraIds])].sort((a, b) => a - b);
+    body.vm_selection = { mode, vmids: merged };
   }
 
   // Build connection update (only non-empty fields)
@@ -2409,6 +2546,21 @@ async function saveSettings() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(connBody),
+        })
+      );
+    }
+    // Local (Flask-side) fields: agent_url + agent_token
+    const localBody = {};
+    const agentUrl = document.getElementById('s-conn-agent-url')?.value.trim();
+    const agentTok = document.getElementById('s-conn-agent-token')?.value;
+    if (agentUrl != null) localBody.agent_url = agentUrl;
+    if (agentTok) localBody.agent_token = agentTok;
+    if (Object.keys(localBody).length > 0) {
+      promises.push(
+        fetch(`${API_BASE}/api/host/${currentHost}/local`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(localBody),
         })
       );
     }

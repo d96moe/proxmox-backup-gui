@@ -585,8 +585,134 @@ class MQTTPublisher:
         })
 
 
-# Module-level publisher — None when MQTT is not configured
+# ─────────────────────────────────────────────────────────────────────────────
+# HA MQTT publisher — curated subset of topics to HA's Mosquitto broker
+# ─────────────────────────────────────────────────────────────────────────────
+
+class HAMQTTPublisher:
+    """Publishes a curated subset of state + HA Discovery to HA's Mosquitto.
+
+    Only these topics are ever sent to HA's broker:
+      homeassistant/*/config  — discovery (retained, on connect)
+      proxmox/<hn>/agent/status  — LWT online/offline
+      proxmox/<hn>/summary        — all_protected, unprotected_count
+      proxmox/<hn>/storage        — local/cloud usage
+
+    All other topics (progress, per-VM raw, ops logs, …) stay on the GUI broker.
+    """
+
+    def __init__(self, host: str, port: int = 1883,
+                 user: str = "", password: str = "",
+                 hostname: str = "") -> None:
+        import paho.mqtt.client as mqtt
+
+        self._hostname = hostname or socket.gethostname()
+        self._base     = f"proxmox/{self._hostname}"
+
+        self._client = mqtt.Client(client_id=f"pve-agent-ha-{self._hostname}")
+        self._client.will_set(f"{self._base}/agent/status", "offline",
+                              retain=True, qos=1)
+        if user:
+            self._client.username_pw_set(user, password)
+
+        self._client.on_connect    = self._on_connect
+        self._client.on_disconnect = self._on_disconnect
+
+        try:
+            self._client.connect_async(host, port, keepalive=60)
+            self._client.loop_start()
+        except Exception as exc:
+            log.warning("HA MQTT connect_async failed: %s", exc)
+
+    def _on_connect(self, client, userdata, flags, rc):
+        if rc == 0:
+            log.info("HA MQTT connected — publishing discovery + online status")
+            client.publish(f"{self._base}/agent/status", "online",
+                           retain=True, qos=1)
+            self.publish_discovery()
+        else:
+            log.warning("HA MQTT connect failed rc=%s", rc)
+
+    def _on_disconnect(self, client, userdata, rc):
+        if rc != 0:
+            log.warning("HA MQTT unexpected disconnect rc=%s — will auto-reconnect", rc)
+
+    def publish(self, topic_suffix: str, data: dict) -> None:
+        """Publish a state topic to HA's broker (always retained QoS 1)."""
+        payload = json.dumps(data, separators=(",", ":"), sort_keys=True)
+        self._client.publish(f"{self._base}/{topic_suffix}", payload,
+                             retain=True, qos=1)
+
+    def publish_discovery(self) -> None:
+        hn  = self._hostname
+        dev = {"identifiers": [f"proxmox_{hn}"], "name": f"Proxmox {hn}",
+               "manufacturer": "Proxmox"}
+
+        def _pub(component: str, obj_id: str, cfg: dict) -> None:
+            topic = f"homeassistant/{component}/proxmox_{hn}_{obj_id}/config"
+            self._client.publish(topic, json.dumps(cfg), retain=True, qos=1)
+
+        _pub("binary_sensor", "agent", {
+            "name": f"Proxmox {hn} Agent",
+            "state_topic": f"{self._base}/agent/status",
+            "payload_on": "online", "payload_off": "offline",
+            "unique_id": f"proxmox_{hn}_agent_status",
+            "device_class": "connectivity",
+            "device": dev,
+        })
+
+        storage_topic = f"{self._base}/storage"
+        for obj_id, name, tpl, unit, icon in [
+            ("storage_local_used_gb",  "Storage Local Used",   "{{ value_json.local_used }}",     "GB", "mdi:harddisk"),
+            ("storage_local_total_gb", "Storage Local Total",  "{{ value_json.local_total }}",    "GB", "mdi:harddisk"),
+            ("storage_local_used_pct", "Storage Local Used %", "{{ value_json.local_used_pct }}", "%",  "mdi:percent"),
+            ("storage_cloud_used_gb",   "Storage Cloud Used",       "{{ value_json.cloud_quota_used }}","GB", "mdi:harddisk"),
+            ("storage_cloud_total_gb",  "Storage Cloud Total",      "{{ value_json.cloud_total }}",     "GB", "mdi:harddisk"),
+            ("storage_cloud_used_pct",  "Storage Cloud Used %",     "{{ value_json.cloud_used_pct }}",  "%",  "mdi:percent"),
+            ("storage_restic_used_gb",  "Storage Restic Repo",      "{{ value_json.cloud_used }}",      "GB", "mdi:backup-restore"),
+        ]:
+            _pub("sensor", obj_id, {
+                "name": name,
+                "state_topic": storage_topic,
+                "value_template": tpl,
+                "unit_of_measurement": unit,
+                "unique_id": f"proxmox_{hn}_{obj_id}",
+                "icon": icon,
+                "device": dev,
+            })
+
+        summary_topic = f"{self._base}/summary"
+        _pub("binary_sensor", "all_protected", {
+            "name": "All VMs Protected",
+            "state_topic": summary_topic,
+            "value_template": "{{ value_json.all_protected }}",
+            "payload_on": "True", "payload_off": "False",
+            "unique_id": f"proxmox_{hn}_all_protected",
+            "icon": "mdi:shield-check",
+            "device": dev,
+        })
+        _pub("sensor", "unprotected_count", {
+            "name": "Unprotected VM Count",
+            "state_topic": summary_topic,
+            "value_template": "{{ value_json.unprotected_count }}",
+            "unique_id": f"proxmox_{hn}_unprotected_count",
+            "icon": "mdi:shield-alert",
+            "device": dev,
+        })
+
+    def shutdown(self) -> None:
+        try:
+            self._client.publish(f"{self._base}/agent/status", "offline",
+                                 retain=True, qos=1)
+            time.sleep(0.2)
+        finally:
+            self._client.loop_stop()
+            self._client.disconnect()
+
+
+# Module-level publishers — None when not configured
 _mqtt: MQTTPublisher | None = None
+_ha_mqtt: HAMQTTPublisher | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -616,10 +742,12 @@ class StatePoller:
 
     PBS_TASK_TYPES = {"backup", "prune", "prunejob", "garbage_collection", "verify"}
 
-    def __init__(self, cfg: "AgentConfig", mqtt: MQTTPublisher) -> None:
-        self._cfg   = cfg
-        self._mqtt  = mqtt
-        self._base  = mqtt._base
+    def __init__(self, cfg: "AgentConfig", mqtt: MQTTPublisher,
+                 ha_mqtt: "HAMQTTPublisher | None" = None) -> None:
+        self._cfg     = cfg
+        self._mqtt    = mqtt
+        self._ha_mqtt = ha_mqtt
+        self._base    = mqtt._base
         self._stop  = threading.Event()
         self._hashes: dict[str, str] = {}  # topic_suffix → last published payload
         self._hash_lock = threading.Lock()
@@ -764,9 +892,13 @@ class StatePoller:
         # ── PVE: get all VMs/LXCs ────────────────────────────────────────────
         pve_meta: dict = {}
         pve_ok = True
+        vm_selection: dict = {"mode": "exclude", "vmids": []}
         try:
             pve = PVEClient(_host())
             pve_meta = pve.get_vms_and_lxcs()
+            pbs_jobs = pve.get_backup_schedules()
+            if pbs_jobs:
+                vm_selection = pve.get_backup_vm_selection(pbs_jobs[0]["id"])
         except Exception as exc:
             log.warning("PVE fetch failed: %s", exc)
             pve_ok = False
@@ -952,9 +1084,20 @@ class StatePoller:
         })
 
         # Host-level summary for HA MQTT Discovery
+        # Derive excluded VMIDs from the PVE backup job's vm_selection.
+        # mode=exclude → explicitly listed vmids are not backed up
+        # mode=include → only listed vmids are backed up; all others excluded
+        vm_sel_mode  = vm_selection.get("mode", "exclude")
+        vm_sel_vmids = set(str(v) for v in vm_selection.get("vmids", []))
+        if vm_sel_mode == "include":
+            excluded = all_vmids - vm_sel_vmids
+        else:
+            excluded = vm_sel_vmids
+        # Allow additional overrides via config (e.g. VMs created after last settings save)
+        excluded |= set(str(v) for v in (self._cfg.exclude_from_protection or []))
         unprotected = [
             v for v in all_vmids
-            if not (pbs_groups.get(v) and restic_by_vm_pbstime.get(v))
+            if v not in excluded and not (pbs_groups.get(v) and restic_by_vm_pbstime.get(v))
         ]
         self._pub_if_changed("summary", {
             "all_protected":    len(unprotected) == 0,
@@ -983,7 +1126,8 @@ class StatePoller:
                 lt = data.get("local_total") or 0
                 data["local_used_pct"] = round(data.get("local_used", 0) / lt * 100) if lt else None
                 ct = data.get("cloud_total") or 0
-                data["cloud_used_pct"] = round(data.get("cloud_used", 0) / ct * 100) if ct else None
+                cq = data.get("cloud_quota_used") or 0
+                data["cloud_used_pct"] = round(cq / ct * 100) if ct else None
             self._pub_if_changed("storage", data)
         except Exception as exc:
             log.warning("Storage scan failed: %s", exc)
@@ -1000,7 +1144,8 @@ class StatePoller:
             lt = data.get("local_total") or 0
             data["local_used_pct"] = round(data.get("local_used", 0) / lt * 100) if lt else None
             ct = cloud_total or 0
-            data["cloud_used_pct"] = round(cloud_used / ct * 100) if ct else None
+            cq = cloud_quota_used or 0
+            data["cloud_used_pct"] = round(cq / ct * 100) if ct else None
         self._pub_if_changed("storage", data)
 
     def _scan_info(self) -> None:
@@ -1077,6 +1222,9 @@ class StatePoller:
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
+    # Topics mirrored to HA's Mosquitto broker (all others stay on GUI broker)
+    _HA_MIRROR_TOPICS = frozenset({"summary", "storage"})
+
     def _pub_if_changed(self, topic_suffix: str,
                         data: dict | list) -> None:
         payload = json.dumps(data, separators=(",", ":"), sort_keys=True)
@@ -1087,6 +1235,8 @@ class StatePoller:
         full = f"{self._base}/{topic_suffix}"
         self._mqtt._client.publish(full, payload, retain=True, qos=1)
         log.debug("MQTT publish %s (%d B)", full, len(payload))
+        if self._ha_mqtt and topic_suffix in self._HA_MIRROR_TOPICS:
+            self._ha_mqtt.publish(topic_suffix, data)
 
 
 def _build_restic_index(snaps: list[dict]) -> dict[str, dict[int, dict]]:
@@ -1136,12 +1286,18 @@ class AgentConfig:
     verify_ssl: bool = False
     restic_env: dict = field(default_factory=dict)
     agent_token: str = ""        # if set, all requests must present "Authorization: Bearer <token>"
-    # MQTT (all optional — omit mqtt_host to disable)
+    # MQTT — GUI broker (all optional — omit mqtt_host to disable)
     mqtt_host: str = ""
     mqtt_port: int = 1883
     mqtt_user: str = ""
     mqtt_password: str = ""
-    mqtt_hostname: str = ""      # MQTT topic prefix override (defaults to socket.gethostname())
+    mqtt_hostname: str = ""      # topic prefix override (defaults to socket.gethostname())
+    # MQTT — HA broker (optional — set mqtt_ha_host to enable HA MQTT Discovery)
+    mqtt_ha_host: str = ""
+    mqtt_ha_port: int = 1883
+    mqtt_ha_user: str = ""
+    mqtt_ha_password: str = ""
+    exclude_from_protection: list = field(default_factory=list)  # VMIDs that don't need backups
     pve_node: str = ""           # PVE node name for API calls (defaults to mqtt_hostname then socket.gethostname())
 
     def to_host_config(self):
@@ -2558,7 +2714,20 @@ if __name__ == "__main__":
             hostname=_cfg.mqtt_hostname,
         )
         _mqtt.setup_message_handler()
-        _poller = StatePoller(_cfg, _mqtt)
+
+        if _cfg.mqtt_ha_host:
+            log.info("HA MQTT publisher starting → %s:%s (discovery + summary/storage only)",
+                     _cfg.mqtt_ha_host, _cfg.mqtt_ha_port)
+            _ha_mqtt = HAMQTTPublisher(
+                host=_cfg.mqtt_ha_host,
+                port=_cfg.mqtt_ha_port,
+                user=_cfg.mqtt_ha_user,
+                password=_cfg.mqtt_ha_password,
+                hostname=_cfg.mqtt_hostname,
+            )
+            atexit.register(_ha_mqtt.shutdown)
+
+        _poller = StatePoller(_cfg, _mqtt, ha_mqtt=_ha_mqtt)
 
         def _on_mqtt_ready():
             """Called 2s after startup — MQTT connection should be up."""
