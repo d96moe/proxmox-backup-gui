@@ -497,14 +497,43 @@ class MQTTPublisher:
             "icon": "mdi:progress-upload",
             "device": dev,
         })
+        _pub("sensor", f"vm{vmid}_age_hours", {
+            "name": f"VM {vmid} Backup Age",
+            "state_topic": f"{self._base}/vm/{vmid}/summary",
+            "value_template": "{{ value_json.age_hours }}",
+            "unit_of_measurement": "h",
+            "unique_id": f"proxmox_{hn}_vm{vmid}_age_hours",
+            "icon": "mdi:clock-outline",
+            "device": dev,
+        })
+        _pub("sensor", f"vm{vmid}_snapshot_count", {
+            "name": f"VM {vmid} Snapshot Count",
+            "state_topic": f"{self._base}/vm/{vmid}/summary",
+            "value_template": "{{ value_json.snapshot_count }}",
+            "unique_id": f"proxmox_{hn}_vm{vmid}_snapshot_count",
+            "icon": "mdi:database",
+            "device": dev,
+        })
+        _pub("sensor", f"vm{vmid}_protection_status", {
+            "name": f"VM {vmid} Protection Status",
+            "state_topic": f"{self._base}/vm/{vmid}/summary",
+            "value_template": "{{ value_json.status }}",
+            "unique_id": f"proxmox_{hn}_vm{vmid}_protection_status",
+            "icon": "mdi:shield-check",
+            "device": dev,
+        })
 
     def publish_agent_discovery(self) -> None:
-        """Publish agent-level HA Discovery (online/offline binary sensor)."""
+        """Publish agent-level and host-level HA Discovery entities."""
         hn  = self._hostname
         dev = {"identifiers": [f"proxmox_{hn}"], "name": f"Proxmox {hn}",
                "manufacturer": "Proxmox"}
-        topic = f"homeassistant/binary_sensor/proxmox_{hn}_agent/config"
-        self._client.publish(topic, json.dumps({
+
+        def _pub(component: str, obj_id: str, cfg: dict) -> None:
+            topic = f"homeassistant/{component}/proxmox_{hn}_{obj_id}/config"
+            self._client.publish(topic, json.dumps(cfg), retain=True, qos=1)
+
+        _pub("binary_sensor", "agent", {
             "name": f"Proxmox {hn} Agent",
             "state_topic": f"{self._base}/agent/status",
             "payload_on": "online",
@@ -512,7 +541,48 @@ class MQTTPublisher:
             "unique_id": f"proxmox_{hn}_agent_status",
             "device_class": "connectivity",
             "device": dev,
-        }), retain=True, qos=1)
+        })
+
+        # ── Storage sensors ───────────────────────────────────────────────────
+        storage_topic = f"{self._base}/storage"
+        for obj_id, name, tpl, unit, icon in [
+            ("storage_local_used_gb",  "Storage Local Used",   "{{ value_json.local_used }}",       "GB", "mdi:harddisk"),
+            ("storage_local_total_gb", "Storage Local Total",  "{{ value_json.local_total }}",      "GB", "mdi:harddisk"),
+            ("storage_local_used_pct", "Storage Local Used %", "{{ value_json.local_used_pct }}",   "%",  "mdi:percent"),
+            ("storage_cloud_used_gb",  "Storage Cloud Used",   "{{ value_json.cloud_used }}",       "GB", "mdi:harddisk"),
+            ("storage_cloud_total_gb", "Storage Cloud Total",  "{{ value_json.cloud_total }}",      "GB", "mdi:harddisk"),
+            ("storage_cloud_used_pct", "Storage Cloud Used %", "{{ value_json.cloud_used_pct }}",   "%",  "mdi:percent"),
+        ]:
+            _pub("sensor", obj_id, {
+                "name": name,
+                "state_topic": storage_topic,
+                "value_template": tpl,
+                "unit_of_measurement": unit,
+                "unique_id": f"proxmox_{hn}_{obj_id}",
+                "icon": icon,
+                "device": dev,
+            })
+
+        # ── Summary sensors ───────────────────────────────────────────────────
+        summary_topic = f"{self._base}/summary"
+        _pub("binary_sensor", "all_protected", {
+            "name": "All VMs Protected",
+            "state_topic": summary_topic,
+            "value_template": "{{ value_json.all_protected }}",
+            "payload_on": "True",
+            "payload_off": "False",
+            "unique_id": f"proxmox_{hn}_all_protected",
+            "icon": "mdi:shield-check",
+            "device": dev,
+        })
+        _pub("sensor", "unprotected_count", {
+            "name": "Unprotected VM Count",
+            "state_topic": summary_topic,
+            "value_template": "{{ value_json.unprotected_count }}",
+            "unique_id": f"proxmox_{hn}_unprotected_count",
+            "icon": "mdi:shield-alert",
+            "device": dev,
+        })
 
 
 # Module-level publisher — None when MQTT is not configured
@@ -828,6 +898,27 @@ class StatePoller:
             # HA Discovery + per-VM backup status (idle unless job running)
             self._mqtt._ensure_discovery(vmid)
 
+            # Per-VM summary for HA MQTT Discovery sensors
+            has_local = bool(local_times)
+            has_cloud = bool(vm_restic)
+            newest_bt = annotated[0].get("backup_time") if annotated else None
+            age_hours = round((time.time() - newest_bt) / 3600, 1) if newest_bt else None
+            if has_local and has_cloud:
+                vm_status = "ok"
+            elif has_local:
+                vm_status = "local_only"
+            elif has_cloud:
+                vm_status = "cloud_only"
+            else:
+                vm_status = "none"
+            self._pub_if_changed(f"vm/{vmid}/summary", {
+                "snapshot_count": len(annotated),
+                "age_hours":      age_hours,
+                "has_local":      has_local,
+                "has_cloud":      has_cloud,
+                "status":         vm_status,
+            })
+
         # Clear retained topics for VMIDs that have disappeared since the last scan
         # (e.g. a restic-only VM whose snapshots were all deleted).  Publishing an
         # empty payload with retain=True removes the retained message from the broker.
@@ -847,6 +938,7 @@ class StatePoller:
                 f"vm/{gvmid}/backup/status",
                 f"vm/{gvmid}/backup/last_ok",
                 f"vm/{gvmid}/backup/progress",
+                f"vm/{gvmid}/summary",
             ):
                 self._mqtt._client.publish(f"{self._base}/{suffix}", b"", retain=True, qos=1)
                 self._hashes.pop(suffix, None)
@@ -858,6 +950,18 @@ class StatePoller:
         self._pub_if_changed("state/ready", {
             "ts": time.time(), "pve_ok": pve_ok, "pbs_ok": pbs_ok,
         })
+
+        # Host-level summary for HA MQTT Discovery
+        unprotected = [
+            v for v in all_vmids
+            if not (pbs_groups.get(v) and restic_by_vm_pbstime.get(v))
+        ]
+        self._pub_if_changed("summary", {
+            "all_protected":    len(unprotected) == 0,
+            "unprotected_count": len(unprotected),
+            "vm_count":         len(all_vmids),
+        })
+
         # Storage stats change whenever snapshots change — scan in same cycle
         self._scan_storage()
 
@@ -875,6 +979,11 @@ class StatePoller:
                 data.setdefault("cloud_used", 0)
                 data.setdefault("cloud_total", None)
                 data.setdefault("cloud_quota_used", None)
+                # computed pct fields for MQTT Discovery sensors
+                lt = data.get("local_total") or 0
+                data["local_used_pct"] = round(data.get("local_used", 0) / lt * 100) if lt else None
+                ct = data.get("cloud_total") or 0
+                data["cloud_used_pct"] = round(data.get("cloud_used", 0) / ct * 100) if ct else None
             self._pub_if_changed("storage", data)
         except Exception as exc:
             log.warning("Storage scan failed: %s", exc)
@@ -888,6 +997,10 @@ class StatePoller:
             self._local_storage["cloud_total"]      = cloud_total
             self._local_storage["cloud_quota_used"] = cloud_quota_used
             data = dict(self._local_storage)
+            lt = data.get("local_total") or 0
+            data["local_used_pct"] = round(data.get("local_used", 0) / lt * 100) if lt else None
+            ct = cloud_total or 0
+            data["cloud_used_pct"] = round(cloud_used / ct * 100) if ct else None
         self._pub_if_changed("storage", data)
 
     def _scan_info(self) -> None:
