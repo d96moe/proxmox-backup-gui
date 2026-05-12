@@ -23,7 +23,7 @@ from flask_login import login_user, logout_user, login_required, current_user
 from flask_sock import Sock
 import paho.mqtt.client as paho_mqtt
 
-from config import load_hosts, HostConfig
+from config import load_hosts, save_hosts, HostConfig
 from pbs_client import PBSClient
 from restic_client import ResticClient
 from pve_client import PVEClient
@@ -44,6 +44,7 @@ _MQTT_HOST   = os.environ.get("MQTT_BROKER_HOST", "localhost")
 _MQTT_PORT   = int(os.environ.get("MQTT_BROKER_PORT", "1883"))
 _MQTT_PREFIX = os.environ.get("MQTT_TOPIC_PREFIX", "proxmox")
 
+_hosts_path = Path(__file__).parent / "hosts.json"
 HOSTS: dict[str, HostConfig] = {h.id: h for h in load_hosts()}
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend"
 
@@ -170,6 +171,17 @@ def _cached(key: str, fn):
 @app.get("/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+# ──────────────────────────────────────────────
+# Prevent browser caching of API responses
+# ──────────────────────────────────────────────
+
+@app.after_request
+def no_cache_api(response: Response) -> Response:
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 # ──────────────────────────────────────────────
@@ -396,6 +408,41 @@ def get_hosts():
          "pbs_storage_id": h.pbs_storage_id or ""}
         for h in HOSTS.values()
     ])
+
+
+@app.post("/api/hosts")
+@login_required
+@admin_required
+def add_host():
+    """Add a new host entry to hosts.json."""
+    import re as _re
+    body = request.get_json(silent=True) or {}
+    label = body.get("label", "").strip()
+    if not label:
+        return jsonify({"error": "label is required"}), 400
+    agent_url = body.get("agent_url", "").strip()
+    if not agent_url:
+        return jsonify({"error": "agent_url is required"}), 400
+    # Generate a URL-safe id from the label
+    host_id = _re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-")
+    if host_id in HOSTS:
+        host_id = f"{host_id}-{len(HOSTS)}"
+    new_host = HostConfig(
+        id=host_id, label=label,
+        agent_url=agent_url, agent_token=body.get("agent_token", ""),
+    )
+    HOSTS[host_id] = new_host
+    try:
+        save_hosts(list(HOSTS.values()), _hosts_path)
+    except Exception as exc:
+        del HOSTS[host_id]
+        return jsonify({"error": f"cannot write hosts.json: {exc}"}), 500
+    return jsonify({
+        "id": new_host.id, "label": new_host.label,
+        "agent_url": new_host.agent_url,
+        "pbs_datastore": "", "pbs_storage_id": new_host.pbs_storage_id,
+        "self_vmid": SELF_VMID,
+    }), 201
 
 
 @app.get("/api/host/<host_id>/items")
@@ -954,6 +1001,40 @@ def post_host_connection(host_id: str):
         if m:
             abort(int(m.group(1)))
         raise
+
+
+@app.get("/api/host/<host_id>/local")
+@login_required
+@admin_required
+def get_host_local(host_id: str):
+    """Return local (Flask-side) host config fields: agent_url and agent_token."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    return jsonify({
+        "agent_url": host.agent_url or "",
+        "agent_token": "●●●●" if host.agent_token else "",
+    })
+
+
+@app.post("/api/host/<host_id>/local")
+@login_required
+@admin_required
+def post_host_local(host_id: str):
+    """Update agent_url / agent_token in hosts.json and reload in-process config."""
+    host = HOSTS.get(host_id)
+    if not host:
+        abort(404)
+    body = request.get_json(silent=True) or {}
+    if "agent_url" in body:
+        host.agent_url = body["agent_url"].strip()
+    if body.get("agent_token"):
+        host.agent_token = body["agent_token"]
+    try:
+        save_hosts(list(HOSTS.values()), _hosts_path)
+    except Exception as exc:
+        return jsonify({"error": f"cannot write hosts.json: {exc}"}), 500
+    return jsonify({"ok": True})
 
 
 @app.post("/api/host/<host_id>/restic/prune")

@@ -46,6 +46,14 @@ app = Flask(__name__)
 log = logging.getLogger(__name__)
 
 
+@app.after_request
+def no_cache(response: "Response") -> "Response":
+    # Streaming responses set their own Cache-Control; leave them alone.
+    if not response.is_streamed:
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MQTT publisher (optional — only active when mqtt_host is configured)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2283,8 +2291,10 @@ def settings_post():
     if errors:
         return jsonify({"error": "; ".join(errors)}), 500
 
-    # Republish updated schedules via MQTT
+    # Republish updated schedules via MQTT (invalidate hash so publish always fires)
     if _poller:
+        with _poller._hash_lock:
+            _poller._hashes.pop("schedules", None)
         _poller._scan_schedules()
 
     pve = PVEClient(_host())
@@ -2455,4 +2465,19 @@ if __name__ == "__main__":
     # actual bridge IP (e.g. 192.168.0.200) or 0.0.0.0 for all interfaces.
     bind_host = os.environ.get("AGENT_BIND", "10.10.0.1")
     bind_port = int(os.environ.get("AGENT_PORT", "8099"))
-    app.run(host=bind_host, port=bind_port, threaded=True)
+
+    # SSL: use PVE cert by default; override via env or disable with SSL_CERT=""
+    _default_cert = "/etc/pve/local/pve-ssl.pem"
+    _default_key  = "/etc/pve/local/pve-ssl.key"
+    ssl_cert = os.environ.get("SSL_CERT", _default_cert)
+    ssl_key  = os.environ.get("SSL_KEY",  _default_key)
+    ssl_ctx  = None
+    if ssl_cert and ssl_key and os.path.exists(ssl_cert) and os.path.exists(ssl_key):
+        import ssl as _ssl
+        ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(ssl_cert, ssl_key)
+        log.info("SSL enabled — cert: %s", ssl_cert)
+    else:
+        log.info("SSL not configured — running plain HTTP")
+
+    app.run(host=bind_host, port=bind_port, threaded=True, ssl_context=ssl_ctx)
