@@ -1,7 +1,7 @@
 """Host configuration loaded from environment or config file."""
 import os
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from pathlib import Path
 
 
@@ -9,13 +9,13 @@ from pathlib import Path
 class HostConfig:
     id: str
     label: str
-    pve_url: str           # e.g. https://192.168.0.200:8006
-    pve_user: str          # e.g. root@pam
-    pve_password: str
-    pbs_url: str           # e.g. https://192.168.0.200:8007
-    pbs_user: str          # e.g. backup@pbs  or  user!tokenid for API token
-    pbs_password: str
-    pbs_datastore: str     # e.g. local-store
+    pve_url: str = ""      # e.g. https://192.168.0.200:8006
+    pve_user: str = ""     # e.g. root@pam
+    pve_password: str = ""
+    pbs_url: str = ""      # e.g. https://192.168.0.200:8007
+    pbs_user: str = ""     # e.g. backup@pbs  or  user!tokenid for API token
+    pbs_password: str = ""
+    pbs_datastore: str = "" # e.g. local-store
     pbs_storage_id: str = "pbs-local"   # PVE storage ID for PBS (used in vzdump/restore)
     pbs_datastore_path: str = "/mnt/pbs" # Local path to PBS datastore (for restic restore target)
     pve_ssh_host: str = ""              # SSH host for PVE node; if empty, extracted from pve_url
@@ -40,3 +40,8 @@ def load_hosts() -> list[HostConfig]:
 
     data = json.loads(raw)
     return [HostConfig(**h) for h in data]
+
+
+def save_hosts(hosts: list[HostConfig], path: Path) -> None:
+    """Write host list back to hosts.json."""
+    path.write_text(json.dumps([asdict(h) for h in hosts], indent=2) + "\n")

@@ -777,6 +777,62 @@ _ha_mqtt: HAMQTTPublisher | None = None
 # State poller — maintains current VM/PBS/restic state, publishes diffs
 # ─────────────────────────────────────────────────────────────────────────────
 
+
+def _compute_host_summary(
+    all_vmids: set,
+    pbs_groups: dict,
+    restic_snaps: list,
+    restic_by_vm_pbstime: dict,
+    vm_selection: dict,
+    exclude_from_protection: list,
+    now: float,
+) -> dict:
+    """Pure function: compute host-level summary fields for MQTT publication."""
+    vm_sel_mode  = vm_selection.get("mode", "exclude")
+    vm_sel_vmids = set(str(v) for v in vm_selection.get("vmids", []))
+    if vm_sel_mode == "include":
+        excluded = all_vmids - vm_sel_vmids
+    else:
+        excluded = vm_sel_vmids
+    excluded |= set(str(v) for v in (exclude_from_protection or []))
+
+    unprotected = [
+        v for v in all_vmids
+        if v not in excluded and not (pbs_groups.get(v) and restic_by_vm_pbstime.get(v))
+    ]
+    protected_count = len(all_vmids) - len(unprotected) - len(excluded & all_vmids)
+
+    all_pbs_times = [
+        s.get("backup_time", 0)
+        for snaps in pbs_groups.values()
+        for s in snaps
+        if s.get("backup_time")
+    ]
+    last_pbs_ts  = max(all_pbs_times) if all_pbs_times else None
+    last_pbs_age = round(max(0.0, now - last_pbs_ts) / 3600, 1) if last_pbs_ts else None
+
+    restic_ts_list = [s.get("ts", 0) for s in restic_snaps if s.get("ts")]
+    last_restic_ts  = max(restic_ts_list) if restic_ts_list else None
+    last_restic_age = round(max(0.0, now - last_restic_ts) / 3600, 1) if last_restic_ts else None
+
+    def _iso(ts: float | None) -> str | None:
+        if ts is None:
+            return None
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    return {
+        "all_protected":            len(unprotected) == 0,
+        "unprotected_count":        len(unprotected),
+        "vm_count":                 len(all_vmids),
+        "protected_vm_count":       max(0, protected_count),
+        "last_pbs_backup_iso":      _iso(last_pbs_ts),
+        "last_pbs_backup_age_h":    last_pbs_age,
+        "restic_snapshot_count":    len(restic_snaps),
+        "last_restic_backup_iso":   _iso(last_restic_ts),
+        "last_restic_backup_age_h": last_restic_age,
+    }
+
+
 class StatePoller:
     """Background poller that keeps MQTT broker state up to date.
 
@@ -1142,55 +1198,16 @@ class StatePoller:
         })
 
         # Host-level summary for HA MQTT Discovery
-        # Derive excluded VMIDs from the PVE backup job's vm_selection.
-        # mode=exclude → explicitly listed vmids are not backed up
-        # mode=include → only listed vmids are backed up; all others excluded
-        vm_sel_mode  = vm_selection.get("mode", "exclude")
-        vm_sel_vmids = set(str(v) for v in vm_selection.get("vmids", []))
-        if vm_sel_mode == "include":
-            excluded = all_vmids - vm_sel_vmids
-        else:
-            excluded = vm_sel_vmids
-        # Allow additional overrides via config (e.g. VMs created after last settings save)
-        excluded |= set(str(v) for v in (self._cfg.exclude_from_protection or []))
-        unprotected = [
-            v for v in all_vmids
-            if v not in excluded and not (pbs_groups.get(v) and restic_by_vm_pbstime.get(v))
-        ]
-        protected_count = len(all_vmids) - len(unprotected) - len(excluded & all_vmids)
-
-        # Newest PBS snapshot across all VMs
         now = time.time()
-        all_pbs_times = [
-            s.get("backup_time", 0)
-            for snaps in pbs_groups.values()
-            for s in snaps
-            if s.get("backup_time")
-        ]
-        last_pbs_ts  = max(all_pbs_times) if all_pbs_times else None
-        last_pbs_age = round((now - last_pbs_ts) / 3600, 1) if last_pbs_ts else None
-
-        # Newest + count of restic snapshots
-        restic_ts_list = [s.get("ts", 0) for s in restic_snaps if s.get("ts")]
-        last_restic_ts  = max(restic_ts_list) if restic_ts_list else None
-        last_restic_age = round((now - last_restic_ts) / 3600, 1) if last_restic_ts else None
-
-        def _iso(ts: float | None) -> str | None:
-            if ts is None:
-                return None
-            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
-
-        self._pub_if_changed("summary", {
-            "all_protected":          len(unprotected) == 0,
-            "unprotected_count":      len(unprotected),
-            "vm_count":               len(all_vmids),
-            "protected_vm_count":     max(0, protected_count),
-            "last_pbs_backup_iso":    _iso(last_pbs_ts),
-            "last_pbs_backup_age_h":  last_pbs_age,
-            "restic_snapshot_count":  len(restic_snaps),
-            "last_restic_backup_iso": _iso(last_restic_ts),
-            "last_restic_backup_age_h": last_restic_age,
-        })
+        self._pub_if_changed("summary", _compute_host_summary(
+            all_vmids,
+            pbs_groups,
+            restic_snaps,
+            restic_by_vm_pbstime,
+            vm_selection,
+            self._cfg.exclude_from_protection,
+            now,
+        ))
 
         # Storage stats change whenever snapshots change — scan in same cycle
         self._scan_storage()

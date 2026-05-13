@@ -13,6 +13,7 @@ Tests cover every change and corner case found during manual testing:
   SCHEDULES     — _schedule_left, get_retention, get_pbs_prune_jobs, /schedules endpoint
   AGENT         — pve_agent HTTP API: health, vms, snapshots, operations, schedules, delete
   AGENT_CLIENT  — AgentClient: all methods, error handling, app.py integration
+  HOST_MGMT     — POST /api/hosts (add host), GET/POST /api/host/<id>/local, HostConfig defaults
 """
 from __future__ import annotations
 
@@ -2852,3 +2853,292 @@ class TestAppAgentIntegration:
         args = ac.restore.call_args[0]
         assert args[0] == 301           # vmid
         assert args[2] == "pve"         # node
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HOST_MGMT — POST /api/hosts, GET/POST /api/host/<id>/local, HostConfig defaults
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestHostMgmt:
+
+    # ── HostConfig defaults ──────────────────────────────────────────────────
+
+    def test_hostconfig_minimal_fields(self):
+        """HostConfig can be created with only id + label + agent_url."""
+        from config import HostConfig
+        h = HostConfig(id="x", label="X", agent_url="http://1.2.3.4:8099")
+        assert h.pve_url == ""
+        assert h.pbs_url == ""
+        assert h.pbs_datastore == ""
+        assert h.agent_url == "http://1.2.3.4:8099"
+
+    # ── POST /api/hosts ──────────────────────────────────────────────────────
+
+    def test_add_host_happy_path(self, flask_client, tmp_path):
+        new = {"label": "Pi5", "agent_url": "http://192.168.1.1:8099", "agent_token": "tok"}
+        with patch.dict(_app.HOSTS, {}, clear=True), \
+             patch("app._hosts_path", tmp_path / "hosts.json"), \
+             patch("app.save_hosts") as save_mock:
+            resp = flask_client.post("/api/hosts", json=new,
+                                     content_type="application/json")
+        assert resp.status_code == 201
+        data = json.loads(resp.data)
+        assert data["id"] == "pi5"
+        assert data["label"] == "Pi5"
+        save_mock.assert_called_once()
+
+    def test_add_host_missing_label_returns_400(self, flask_client):
+        with patch.dict(_app.HOSTS, {}, clear=True), \
+             patch("app.save_hosts"):
+            resp = flask_client.post("/api/hosts",
+                                     json={"agent_url": "http://x:8099"},
+                                     content_type="application/json")
+        assert resp.status_code == 400
+
+    def test_add_host_missing_agent_url_returns_400(self, flask_client):
+        with patch.dict(_app.HOSTS, {}, clear=True), \
+             patch("app.save_hosts"):
+            resp = flask_client.post("/api/hosts",
+                                     json={"label": "Test"},
+                                     content_type="application/json")
+        assert resp.status_code == 400
+
+    def test_add_host_duplicate_id_gets_suffix(self, flask_client):
+        from config import HostConfig
+        existing = HostConfig(id="pi5", label="Pi5 old", agent_url="http://old:8099")
+        with patch.dict(_app.HOSTS, {"pi5": existing}), \
+             patch("app.save_hosts"):
+            resp = flask_client.post("/api/hosts",
+                                     json={"label": "Pi5", "agent_url": "http://new:8099"},
+                                     content_type="application/json")
+        assert resp.status_code == 201
+        data = json.loads(resp.data)
+        assert data["id"] != "pi5"
+
+    def test_add_host_viewer_gets_403(self, flask_client):
+        # Log in as viewer and try to add a host
+        with _app.app.test_client() as vc:
+            vc.post("/api/auth/login",
+                    json={"username": "viewer", "password": "viewpass123"},
+                    content_type="application/json")
+            resp = vc.post("/api/hosts",
+                           json={"label": "X", "agent_url": "http://x:8099"},
+                           content_type="application/json")
+        assert resp.status_code == 403
+
+    # ── GET /api/host/<id>/local ─────────────────────────────────────────────
+
+    def test_get_local_returns_agent_url_and_redacted_token(self, flask_client, mock_host):
+        mock_host.agent_url = "http://10.0.0.1:8099"
+        mock_host.agent_token = "supersecret"
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}):
+            resp = flask_client.get(f"/api/host/{HOST_ID}/local")
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        assert data["agent_url"] == "http://10.0.0.1:8099"
+        assert data["agent_token"] != "supersecret"   # redacted
+        assert data["agent_token"] != ""              # not empty either
+
+    def test_get_local_unknown_host_returns_404(self, flask_client):
+        with patch.dict(_app.HOSTS, {}, clear=True):
+            resp = flask_client.get("/api/host/nobody/local")
+        assert resp.status_code == 404
+
+    def test_get_local_viewer_gets_403(self, flask_client):
+        with _app.app.test_client() as vc:
+            vc.post("/api/auth/login",
+                    json={"username": "viewer", "password": "viewpass123"},
+                    content_type="application/json")
+            resp = vc.get(f"/api/host/{HOST_ID}/local")
+        assert resp.status_code == 403
+
+    # ── POST /api/host/<id>/local ────────────────────────────────────────────
+
+    def test_post_local_updates_agent_url(self, flask_client, mock_host):
+        mock_host.agent_url = "http://old:8099"
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}), \
+             patch("app.save_hosts") as save_mock:
+            resp = flask_client.post(f"/api/host/{HOST_ID}/local",
+                                     json={"agent_url": "http://new:8099"},
+                                     content_type="application/json")
+        assert resp.status_code == 200
+        assert mock_host.agent_url == "http://new:8099"
+        save_mock.assert_called_once()
+
+    def test_post_local_empty_token_leaves_token_unchanged(self, flask_client, mock_host):
+        mock_host.agent_token = "original-token"
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}), \
+             patch("app.save_hosts"):
+            flask_client.post(f"/api/host/{HOST_ID}/local",
+                              json={"agent_token": ""},
+                              content_type="application/json")
+        assert mock_host.agent_token == "original-token"
+
+    def test_post_local_non_empty_token_updates_token(self, flask_client, mock_host):
+        mock_host.agent_token = "old"
+        with patch.dict(_app.HOSTS, {HOST_ID: mock_host}), \
+             patch("app.save_hosts"):
+            flask_client.post(f"/api/host/{HOST_ID}/local",
+                              json={"agent_token": "new-token"},
+                              content_type="application/json")
+        assert mock_host.agent_token == "new-token"
+
+    def test_post_local_viewer_gets_403(self, flask_client, mock_host):
+        with _app.app.test_client() as vc, \
+             patch.dict(_app.HOSTS, {HOST_ID: mock_host}):
+            vc.post("/api/auth/login",
+                    json={"username": "viewer", "password": "viewpass123"},
+                    content_type="application/json")
+            resp = vc.post(f"/api/host/{HOST_ID}/local",
+                           json={"agent_url": "http://x:8099"},
+                           content_type="application/json")
+        assert resp.status_code == 403
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HOST SUMMARY — _compute_host_summary() pure-function edge cases
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestComputeHostSummary:
+    """Tests for pve_agent._compute_host_summary (pure function)."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        import pve_agent as _pa
+        self._fn = _pa._compute_host_summary
+        self._build_idx = _pa._build_restic_index
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _call(self, all_vmids, pbs_groups, restic_snaps, vm_selection=None,
+              exclude=None, now=10_000.0):
+        idx = self._build_idx(restic_snaps)
+        return self._fn(
+            all_vmids=set(str(v) for v in all_vmids),
+            pbs_groups=pbs_groups,
+            restic_snaps=restic_snaps,
+            restic_by_vm_pbstime=idx,
+            vm_selection=vm_selection or {},
+            exclude_from_protection=exclude or [],
+            now=now,
+        )
+
+    # ── no data at all ───────────────────────────────────────────────────────
+
+    def test_empty_everything_returns_nulls(self):
+        s = self._call(set(), {}, [])
+        assert s["vm_count"] == 0
+        assert s["protected_vm_count"] == 0
+        assert s["unprotected_count"] == 0
+        assert s["all_protected"] is True   # vacuously true
+        assert s["last_pbs_backup_iso"] is None
+        assert s["last_pbs_backup_age_h"] is None
+        assert s["restic_snapshot_count"] == 0
+        assert s["last_restic_backup_iso"] is None
+        assert s["last_restic_backup_age_h"] is None
+
+    # ── PBS timestamps ────────────────────────────────────────────────────────
+
+    def test_last_pbs_iso_format(self):
+        pbs_groups = {"100": [{"backup_time": 0}]}   # ts=0 filtered out
+        s = self._call({"100"}, pbs_groups, [])
+        assert s["last_pbs_backup_iso"] is None       # 0 filtered
+
+    def test_last_pbs_picks_newest_across_vms(self):
+        now = 10_000.0
+        pbs_groups = {
+            "100": [{"backup_time": 9000}],
+            "101": [{"backup_time": 9500}, {"backup_time": 8000}],
+        }
+        s = self._call({"100", "101"}, pbs_groups, [], now=now)
+        # 9500 seconds since epoch = 1970-01-01T02:38:20+00:00
+        assert s["last_pbs_backup_iso"] == "1970-01-01T02:38:20+00:00"
+        assert s["last_pbs_backup_age_h"] == round((now - 9500) / 3600, 1)
+
+    def test_pbs_age_floor_at_zero_on_clock_skew(self):
+        # backup_time in the future → age must be 0.0, not negative
+        now = 5000.0
+        pbs_groups = {"100": [{"backup_time": 9000}]}
+        s = self._call({"100"}, pbs_groups, [], now=now)
+        assert s["last_pbs_backup_age_h"] == 0.0
+
+    # ── restic timestamps ─────────────────────────────────────────────────────
+
+    def test_restic_snapshot_count(self):
+        restic_snaps = [
+            {"ts": 8000, "covers": []},
+            {"ts": 9000, "covers": []},
+            {"ts": 7000, "covers": []},
+        ]
+        s = self._call(set(), {}, restic_snaps)
+        assert s["restic_snapshot_count"] == 3
+        assert s["last_restic_backup_iso"] is not None
+        # newest is 9000
+        assert "1970" in s["last_restic_backup_iso"]
+
+    def test_restic_ts_zero_filtered(self):
+        restic_snaps = [{"ts": 0, "covers": []}]
+        s = self._call(set(), {}, restic_snaps)
+        assert s["last_restic_backup_iso"] is None
+        assert s["last_restic_backup_age_h"] is None
+        assert s["restic_snapshot_count"] == 1   # count still includes it
+
+    def test_restic_age_floor_at_zero_on_clock_skew(self):
+        now = 5000.0
+        restic_snaps = [{"ts": 9000, "covers": []}]
+        s = self._call(set(), {}, restic_snaps, now=now)
+        assert s["last_restic_backup_age_h"] == 0.0
+
+    # ── protected / unprotected counts ───────────────────────────────────────
+
+    def test_all_protected_when_pbs_and_restic_present(self):
+        restic_snaps = [{"ts": 9000, "covers": [{"vmid": 100, "pbs_time": 9000}]}]
+        pbs_groups   = {"100": [{"backup_time": 9000}]}
+        s = self._call({"100"}, pbs_groups, restic_snaps)
+        assert s["all_protected"] is True
+        assert s["protected_vm_count"] == 1
+        assert s["unprotected_count"] == 0
+
+    def test_unprotected_when_restic_missing(self):
+        pbs_groups = {"100": [{"backup_time": 9000}]}
+        s = self._call({"100"}, pbs_groups, [])
+        assert s["all_protected"] is False
+        assert s["unprotected_count"] == 1
+        assert s["protected_vm_count"] == 0
+
+    def test_excluded_vms_not_counted_as_unprotected(self):
+        # VM 100 excluded from backup job → not unprotected, not protected
+        pbs_groups = {}
+        s = self._call(
+            {"100", "101"},
+            pbs_groups,
+            [],
+            vm_selection={"mode": "exclude", "vmids": [100]},
+        )
+        # 101 has no pbs/restic → unprotected; 100 excluded
+        assert s["unprotected_count"] == 1
+        assert s["protected_vm_count"] == 0
+        assert s["vm_count"] == 2
+
+    def test_include_mode_excludes_unlisted_vms(self):
+        # Only VM 101 is in include list → 100 excluded
+        restic_snaps = [{"ts": 9000, "covers": [{"vmid": 101, "pbs_time": 9000}]}]
+        pbs_groups   = {"101": [{"backup_time": 9000}]}
+        s = self._call(
+            {"100", "101"},
+            pbs_groups,
+            restic_snaps,
+            vm_selection={"mode": "include", "vmids": [101]},
+        )
+        assert s["protected_vm_count"] == 1
+        assert s["unprotected_count"] == 0   # 100 is excluded, not unprotected
+
+    def test_protected_count_never_negative(self):
+        # Pathological: more excluded than total (shouldn't happen, but guard it)
+        s = self._call(
+            {"100"},
+            {},
+            [],
+            exclude=["100", "999"],  # 999 not in all_vmids
+        )
+        assert s["protected_vm_count"] >= 0

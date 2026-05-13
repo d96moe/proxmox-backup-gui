@@ -20,6 +20,7 @@ class AgentClient:
         self._base = base_url.rstrip("/")
         self._timeout = timeout
         self._session = requests.Session()
+        self._session.verify = False  # agent uses PVE self-signed cert
         if token:
             self._session.headers["Authorization"] = f"Bearer {token}"
 

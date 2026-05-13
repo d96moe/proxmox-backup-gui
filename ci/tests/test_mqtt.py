@@ -1205,3 +1205,151 @@ class TestStaleVmidCleanup:
         empty_for_101 = [t for t, p, kw in calls if "vm/101" in t and p == b""]
         assert not empty_for_101, \
             f"Active VMID 101 must not be cleared, but got: {empty_for_101}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HA MQTT MIRRORING — summary and storage forwarded to secondary broker
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestHaMqttMirroring:
+    """_pub_if_changed must forward 'summary' and 'storage' to ha_mqtt, but
+    not per-VM topics.  HA broker is optional — absent ha_mqtt must not crash."""
+
+    def _run_scan(self, poller, pve_vms, pbs_groups_dict, restic_snaps=None):
+        poller._restic_snaps = restic_snaps or []
+        poller._mqtt._bootstrap_vmids = set()
+        pbs_list = [
+            {"pve_id": int(vid), "snapshots": snaps}
+            for vid, snaps in pbs_groups_dict.items()
+        ]
+        with patch("pve_agent.PVEClient") as pve_cls, \
+             patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent._host", return_value=MagicMock()):
+            pve_cls.return_value.get_vms_and_lxcs.return_value = pve_vms
+            pbs_cls.return_value.get_snapshots.return_value = pbs_list
+            poller._scan_pve_pbs()
+
+    def _make_poller_with_ha(self, agent_cfg):
+        mqtt_mock = MagicMock()
+        mqtt_mock._base = "proxmox/gui-ci"
+        mqtt_mock._client = MagicMock()
+        mqtt_mock._ensure_discovery = MagicMock()
+        mqtt_mock._bootstrap_vmids = set()
+        ha_mock = MagicMock()
+        poller = ag.StatePoller(agent_cfg, mqtt_mock, ha_mqtt=ha_mock)
+        return poller, mqtt_mock, ha_mock
+
+    def _vm(self, vmid, name="vm", status="stopped"):
+        return {vmid: {"name": name, "type": "vm", "status": status,
+                       "os": "linux", "template": False}}
+
+    def test_summary_forwarded_to_ha_mqtt(self, agent_cfg):
+        """'summary' topic must be published to ha_mqtt broker."""
+        poller, _, ha_mock = self._make_poller_with_ha(agent_cfg)
+        self._run_scan(poller, self._vm(100), {})
+        ha_calls = [call[0][0] for call in ha_mock.publish.call_args_list]
+        assert "summary" in ha_calls, \
+            f"ha_mqtt.publish was not called with 'summary'; calls: {ha_calls}"
+
+    def test_storage_forwarded_to_ha_mqtt(self, agent_cfg):
+        """'storage' topic must be forwarded to ha_mqtt."""
+        poller, _, ha_mock = self._make_poller_with_ha(agent_cfg)
+        with patch("pve_agent.PBSClient") as pbs_cls, \
+             patch("pve_agent._host", return_value=MagicMock()):
+            pbs_cls.return_value.get_datastore_usage.return_value = {
+                "used": 1024, "total": 2048,
+            }
+            pbs_cls.return_value.get_snapshots.return_value = []
+            poller._scan_storage()
+        ha_calls = [call[0][0] for call in ha_mock.publish.call_args_list]
+        assert "storage" in ha_calls, \
+            f"ha_mqtt.publish was not called with 'storage'; calls: {ha_calls}"
+
+    def test_vm_topics_not_forwarded_to_ha_mqtt(self, agent_cfg):
+        """Per-VM topics (vm/<id>/pbs etc.) must NOT go to the HA broker."""
+        poller, _, ha_mock = self._make_poller_with_ha(agent_cfg)
+        pbs_groups = {"100": [{"backup_time": 9000, "size_bytes": 1024}]}
+        self._run_scan(poller, self._vm(100), pbs_groups)
+        ha_calls = [call[0][0] for call in ha_mock.publish.call_args_list]
+        vm_calls = [t for t in ha_calls if t.startswith("vm/")]
+        assert not vm_calls, \
+            f"Per-VM topics must not be forwarded to ha_mqtt, got: {vm_calls}"
+
+    def test_no_ha_mqtt_does_not_crash(self, agent_cfg):
+        """StatePoller without ha_mqtt must not raise when publishing."""
+        poller, _ = _make_poller(agent_cfg)   # no ha_mqtt
+        assert poller._ha_mqtt is None
+        self._run_scan(poller, self._vm(100), {})   # must complete without error
+
+    def test_summary_payload_contains_new_fields(self, agent_cfg):
+        """ha_mqtt.publish('summary', ...) payload must include new sensor fields."""
+        poller, _, ha_mock = self._make_poller_with_ha(agent_cfg)
+        pbs_groups = {"100": [{"backup_time": 9000, "size_bytes": 1024}]}
+        self._run_scan(poller, self._vm(100), pbs_groups)
+        summary_payloads = [
+            data for topic, data in
+            (call[0] for call in ha_mock.publish.call_args_list)
+            if topic == "summary"
+        ]
+        assert summary_payloads, "ha_mqtt never received a 'summary' publish"
+        payload = summary_payloads[-1]
+        for field in ("vm_count", "protected_vm_count", "restic_snapshot_count",
+                      "last_pbs_backup_iso", "last_pbs_backup_age_h",
+                      "last_restic_backup_iso", "last_restic_backup_age_h"):
+            assert field in payload, f"summary payload missing field '{field}'"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HA MQTT CONFIG — AgentConfig stores and exposes ha-broker settings
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestHaMqttConfig:
+    """AgentConfig must persist the secondary-broker fields used by GUI settings."""
+
+    def _base_cfg_kwargs(self, **extra):
+        return dict(
+            pve_url="https://pve:8006", pve_user="root@pam", pve_password="pw",
+            pbs_url="https://pbs:8007", pbs_user="backup@pbs", pbs_password="pw",
+            pbs_datastore="ds", pbs_storage_id="s", pbs_datastore_path="/p",
+            pve_ssh_host="pve", restic_repo="rclone:gdrive:test", restic_password="rp",
+            **extra,
+        )
+
+    def test_defaults_are_empty(self):
+        cfg = ag.AgentConfig(**self._base_cfg_kwargs())
+        assert cfg.mqtt_ha_host == ""
+        assert cfg.mqtt_ha_port == 1883
+        assert cfg.mqtt_ha_user == ""
+        assert cfg.mqtt_ha_password == ""
+
+    def test_ha_mqtt_fields_accepted(self):
+        cfg = ag.AgentConfig(**self._base_cfg_kwargs(
+            mqtt_ha_host="192.168.0.196",
+            mqtt_ha_port=1883,
+            mqtt_ha_user="hauser",
+            mqtt_ha_password="hapw",
+        ))
+        assert cfg.mqtt_ha_host == "192.168.0.196"
+        assert cfg.mqtt_ha_port == 1883
+        assert cfg.mqtt_ha_user == "hauser"
+        assert cfg.mqtt_ha_password == "hapw"
+
+    def test_mqtt_ha_password_in_sensitive_set(self):
+        import pve_agent as _pa
+        assert "mqtt_ha_password" in _pa._SENSITIVE
+
+    def test_ha_mqtt_publisher_created_when_host_set(self, agent_cfg):
+        """StatePoller.ha_mqtt must be a HAMQTTPublisher (or None) based on cfg."""
+        # When mqtt_ha_host is empty (default fixture), poller._ha_mqtt is None
+        poller, _ = _make_poller(agent_cfg)
+        assert poller._ha_mqtt is None
+
+    def test_ha_poller_receives_ha_mqtt_object(self, agent_cfg):
+        """Passing ha_mqtt explicitly to StatePoller wires it correctly."""
+        ha_mock = MagicMock()
+        mqtt_mock = MagicMock()
+        mqtt_mock._base = "proxmox/test"
+        mqtt_mock._client = MagicMock()
+        mqtt_mock._ensure_discovery = MagicMock()
+        poller = ag.StatePoller(agent_cfg, mqtt_mock, ha_mqtt=ha_mock)
+        assert poller._ha_mqtt is ha_mock
