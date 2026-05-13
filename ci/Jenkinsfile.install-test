@@ -158,10 +158,11 @@ pct exec 199 -- systemctl start proxmox-backup-gui || true
 sleep 5
 
 # Check GUI login page is served
-pct exec 199 -- curl -sf http://localhost:5000/ | grep -q "login\|Login\|proxmox" \
+pct exec 199 -- curl -sf http://localhost:5000/ | grep -qiE "login|proxmox" \
     && echo "GUI login page: OK" \
-    || { echo "ERROR: GUI did not serve login page"; \
-         pct exec 199 -- journalctl -u proxmox-backup-gui -n 20 --no-pager; exit 1; }
+    || { echo "ERROR: GUI did not serve login page"
+         pct exec 199 -- journalctl -u proxmox-backup-gui -n 20 --no-pager
+         exit 1; }
 
 # Check Mosquitto is running
 pct exec 199 -- systemctl is-active mosquitto \
