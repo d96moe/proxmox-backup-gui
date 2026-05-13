@@ -39,11 +39,14 @@ if [ -z "${AGENT_TOKEN:-}" ]; then
     _GENERATED_TOKEN=1
 fi
 
-# ── Install Python 3 + pip if missing ─────────────────────────────────────────
+# ── Install Python 3 + venv if missing ────────────────────────────────────────
 echo "=== Checking Python ==="
 if ! command -v python3 &>/dev/null; then
     apt-get update -qq
     apt-get install -y -qq python3 python3-pip python3-venv
+elif ! python3 -c "import ensurepip" &>/dev/null 2>&1; then
+    # python3 is present (e.g. shipped with Proxmox VE) but venv support is missing
+    apt-get install -y -qq python3-venv
 fi
 
 # ── Create directories ─────────────────────────────────────────────────────────
