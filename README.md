@@ -65,6 +65,7 @@ Cloud backup, cloud restore, and ☁ sync are skipped gracefully if `restic_repo
 - **Authentication** — login page with bcrypt-hashed credentials; role system (admin / viewer)
 - **Multi-host** — monitor multiple PVE/PBS hosts simultaneously in one UI
 - **Real-time updates** — browser receives live data via MQTT WebSocket; no polling
+- **Home Assistant sensors** — when `mqtt_ha_host` is set in the agent config, host-level summary and storage data are forwarded to HA via MQTT Discovery; sensors appear automatically without a custom component
 
 ## Architecture
 
@@ -97,6 +98,7 @@ Each agent publishes under `proxmox/<mqtt_hostname>/`. The GUI subscribes to `pr
 | `vm/<id>/restic` | yes | `{snapshots: [{id, short_id, time, covers: [{vmid, pbs_time, pbs_date, local, cloud}]}]}` |
 | `vm/<id>/backup/progress` | no | `{line: "…"}` — live log lines during a backup job |
 | `storage` | yes | `{local_used, local_total, cloud_used, cloud_total, cloud_quota_used, dedup_factor}` |
+| `summary` | yes | `{vm_count, protected_vm_count, unprotected_count, all_protected, last_pbs_backup_iso, last_pbs_backup_age_h, restic_snapshot_count, last_restic_backup_iso, last_restic_backup_age_h}` — host-level protection summary; also forwarded to HA MQTT if configured |
 | `info` | yes | `{pbs: "4.1.4", pve: "9.0.0", restic: "0.18.0"}` — version strings |
 | `schedules` | yes | `{pbs_jobs, pbs_running, restic_next, restic_running, pbs_retention, restic_retention}` |
 | `pbs/tasks/running` | yes | `[{upid, worker_type, worker_id, starttime}]` — running PBS tasks (GC, backup, prune); polled every 15 s |
@@ -237,11 +239,18 @@ The `id` field **must match** `mqtt_hostname` in the agent's `config.json` on ea
   "mqtt_port":        1883,
   "mqtt_hostname":    "home",
   "agent_token":      "your-token",
-  "verify_ssl":       false
+  "verify_ssl":       false,
+
+  "mqtt_ha_host":     "192.168.0.10",
+  "mqtt_ha_port":     1883,
+  "mqtt_ha_user":     "ha-user",
+  "mqtt_ha_password": "your-ha-mqtt-password"
 }
 ```
 
 > `mqtt_hostname` must match the `id` in `hosts.json`. The agent logs the effective hostname at startup — check `journalctl -u pve-agent` if the GUI shows "Connecting…".
+
+The `mqtt_ha_*` fields are optional. When `mqtt_ha_host` is set, the agent publishes `summary` and `storage` topics to a second MQTT broker (e.g. Home Assistant's built-in broker) with MQTT Discovery prefixes, making host sensors appear automatically in Home Assistant.
 
 ## API Endpoints
 
@@ -274,7 +283,6 @@ The GUI uses `rclone lsjson locks/` to check if a restic backup is in progress b
 ## Roadmap
 
 - **Delete backup (cloud)** — guided workflow to remove a specific VM's backup from the restic repo: restore full datastore → delete from PBS → re-backup → forget old snapshot. Expensive but correct given the whole-datastore restic architecture.
-- **Host/connection settings** — PBS credentials, restic repo/password, agent URL editable in GUI (currently requires editing config files on the host).
 - **Host/connection settings** — PBS credentials, restic repo/password, agent URL editable in GUI (currently requires editing config files on the host).
 
 ## Related

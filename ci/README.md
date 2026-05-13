@@ -104,6 +104,9 @@ Pure Python unit tests (no VM, no network). Run in both the fast pipeline and as
 - **CLOUD_ONLY** — PBS entries with `local=False, cloud=True` appear for pruned-locally times
 - **TIMESTAMP_FIELDS** — cloud-only entries have `date`; restic covers have `pbs_date` for tooltips
 - **RESTIC_ONLY_VM** — VM deleted from PVE+PBS but still in restic appears as cloud-only (regression: was invisible because `all_vmids` excluded restic-only VMIDs)
+- **HOST_SUMMARY** — `_compute_host_summary` pure-function tests: empty data, ISO format, newest-across-VMs selection, clock-skew floor (age never negative), restic count, ts=0 filtered, all_protected flag, unprotected detection, exclude list, include-mode, protected_count floor at zero
+- **HA_MQTT_MIRRORING** — `summary` and `storage` topics forwarded to secondary HA broker; VM-level topics not forwarded; no crash when `ha_mqtt` is None; payload contains all new summary fields
+- **HA_MQTT_CONFIG** — `AgentConfig` accepts `mqtt_ha_*` fields with empty-string defaults; `mqtt_ha_password` is in `_SENSITIVE`; `HAMQTTPublisher` created when `mqtt_ha_host` is set and injected into the poller
 
 ### Integration tests (`ci/tests/test_restore.py` + `ci/tests/test_frontend.py`)
 
