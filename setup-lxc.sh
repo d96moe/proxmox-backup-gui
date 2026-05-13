@@ -92,18 +92,10 @@ pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/index.html" "/opt/proxmox-backup-gu
 pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/login.html" "/opt/proxmox-backup-gui/frontend/login.html"
 pct push "${LXC_ID}" "${SCRIPT_DIR}/frontend/mqtt.min.js" "/opt/proxmox-backup-gui/frontend/mqtt.min.js"
 
-# Copy example hosts.json if no real one exists yet
-if [ ! -f "${SCRIPT_DIR}/backend/hosts.json" ]; then
-    pct push "${LXC_ID}" "${SCRIPT_DIR}/backend/hosts.json.example" \
-        "/opt/proxmox-backup-gui/backend/hosts.json"
-    echo ""
-    echo "  !! Edit /opt/proxmox-backup-gui/backend/hosts.json inside the LXC"
-    echo "     with your real credentials before starting the service."
-    echo ""
-else
-    pct push "${LXC_ID}" "${SCRIPT_DIR}/backend/hosts.json" \
-        "/opt/proxmox-backup-gui/backend/hosts.json"
-fi
+# Copy example hosts.json — will be overwritten later if user provides host details
+pct push "${LXC_ID}" "${SCRIPT_DIR}/backend/hosts.json.example" \
+    "/opt/proxmox-backup-gui/backend/hosts.json"
+_NEED_HOSTS_CONFIG=1
 
 # ── Python venv + pip ─────────────────────────────────────────────────────────
 echo "=== Installing Python packages ==="
@@ -161,26 +153,69 @@ systemctl daemon-reload
 systemctl enable proxmox-backup-gui
 "
 
+# ── Configure first host ──────────────────────────────────────────────────────
+if [ "${_NEED_HOSTS_CONFIG:-0}" = "1" ]; then
+    PVE_SELF_IP=$(ip -4 addr show scope global | awk '/inet/{print $2}' | cut -d/ -f1 | head -1)
+    echo ""
+    echo "=== Configure first host ==="
+    echo "  (press Enter to skip — edit hosts.json inside the LXC manually later)"
+    echo ""
+    read -rp "  Host ID (must match mqtt_hostname in agent config, e.g. 'home') [skip]: " _HOST_ID
+    if [ -n "${_HOST_ID}" ]; then
+        # Auto-detect agent token from local agent install
+        _HOST_TOKEN=""
+        if [ -f /etc/pve-agent/config.json ]; then
+            _HOST_TOKEN=$(python3 -c \
+                "import json; print(json.load(open('/etc/pve-agent/config.json')).get('agent_token',''))" \
+                2>/dev/null || true)
+            [ -n "${_HOST_TOKEN}" ] && echo "  Agent token auto-detected from /etc/pve-agent/config.json"
+        fi
+        if [ -z "${_HOST_TOKEN}" ]; then
+            read -rp "  Agent token: " _HOST_TOKEN
+        fi
+
+        read -rp "  Agent URL [http://${PVE_SELF_IP}:8099]: " _HOST_URL_INPUT
+        _HOST_URL="${_HOST_URL_INPUT:-http://${PVE_SELF_IP}:8099}"
+
+        _HOSTS_TMP=$(mktemp /tmp/hosts.json.XXXXXX)
+        HOST_ID="${_HOST_ID}" HOST_URL="${_HOST_URL}" HOST_TOKEN="${_HOST_TOKEN}" \
+        python3 -c "
+import json, os
+print(json.dumps([{
+    'id': os.environ['HOST_ID'],
+    'label': 'pve - ' + os.environ['HOST_ID'],
+    'agent_url': os.environ['HOST_URL'],
+    'agent_token': os.environ['HOST_TOKEN'],
+}], indent=2))
+" > "${_HOSTS_TMP}"
+        pct push "${LXC_ID}" "${_HOSTS_TMP}" "/opt/proxmox-backup-gui/backend/hosts.json"
+        rm -f "${_HOSTS_TMP}"
+        echo "  hosts.json written — LXC is ready to use after starting the agent."
+    else
+        echo "  Skipped — edit hosts.json manually before use:"
+        echo "    pct enter ${LXC_ID}"
+        echo "    nano /opt/proxmox-backup-gui/backend/hosts.json"
+    fi
+fi
+
 # ── Done ──────────────────────────────────────────────────────────────────────
 LXC_ADDR=$(pct exec "${LXC_ID}" -- hostname -I 2>/dev/null | awk '{print $1}' || echo "?")
 
 echo ""
-echo "=== Setup complete ==="
+echo "============================================================"
+echo "  Setup complete"
+echo "============================================================"
 echo ""
-echo "  LXC ${LXC_ID} IP: ${LXC_ADDR}"
-echo ""
-echo "  Next steps:"
-echo "  1. Enter LXC:  pct enter ${LXC_ID}"
-echo "  2. Edit creds: nano /opt/proxmox-backup-gui/backend/hosts.json"
-echo "  3. Start:      systemctl start proxmox-backup-gui"
-echo "  4. Open:       http://${LXC_ADDR}:${APP_PORT}"
-echo ""
-echo "  Logs: journalctl -u proxmox-backup-gui -f"
-echo ""
-echo "  Login credentials:"
-echo "    Username: ${GUI_USER}"
+echo "  GUI URL:  http://${LXC_ADDR}:${APP_PORT}"
+echo "  Username: ${GUI_USER}"
 if [ -n "${_GENERATED_PW:-}" ]; then
-    echo "    Password: ${GUI_PASSWORD}  ← SAVE THIS, it won't be shown again"
+    echo "  Password: ${GUI_PASSWORD}  ← SAVE THIS"
 else
-    echo "    Password: (as provided)"
+    echo "  Password: (as provided)"
 fi
+echo ""
+echo "  Start the GUI:   systemctl start proxmox-backup-gui"
+echo "  Logs:            pct enter ${LXC_ID} && journalctl -u proxmox-backup-gui -f"
+echo ""
+echo "  Next: run setup-agent.sh on each PVE host you want to monitor."
+echo "============================================================"

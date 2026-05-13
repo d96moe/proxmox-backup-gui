@@ -2,33 +2,13 @@
   {
     "id": "home",
     "label": "pve · home",
-    "pve_url": "https://192.168.0.200:8006",
-    "pve_user": "root@pam",
-    "pve_password": "YOUR_ROOT_PASSWORD",
-    "pbs_url": "https://192.168.0.200:8007",
-    "pbs_user": "backup@pbs",
-    "pbs_password": "YOUR_PBS_PASSWORD",
-    "pbs_datastore": "local-store",
-    "restic_repo": "rclone:gdrive:bu/proxmox_home",
-    "restic_password": "YOUR_RESTIC_PASSWORD",
-    "restic_env": {
-      "RCLONE_CONFIG": "/root/.config/rclone/rclone.conf"
-    },
-    "verify_ssl": false
+    "agent_url": "http://192.168.0.200:8099",
+    "agent_token": "YOUR_AGENT_TOKEN"
   },
   {
     "id": "cabin",
-    "label": "raspmox · cabin",
-    "pve_url": "https://CABIN_IP:8006",
-    "pve_user": "root@pam",
-    "pve_password": "YOUR_ROOT_PASSWORD",
-    "pbs_url": "https://CABIN_IP:8007",
-    "pbs_user": "backup@pbs",
-    "pbs_password": "YOUR_PBS_PASSWORD",
-    "pbs_datastore": "local-store",
-    "restic_repo": "rclone:gdrive:bu/proxmox_cabin",
-    "restic_password": "YOUR_RESTIC_PASSWORD",
-    "restic_env": {},
-    "verify_ssl": false
+    "label": "pve · cabin",
+    "agent_url": "http://192.168.1.200:8099",
+    "agent_token": "YOUR_AGENT_TOKEN"
   }
 ]

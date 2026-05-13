@@ -89,7 +89,12 @@ else
   "mqtt_hostname":      "${MQTT_HOSTNAME}",
   "agent_token":        "${AGENT_TOKEN}",
   "agent_port":         ${AGENT_PORT},
-  "verify_ssl":         false
+  "verify_ssl":         false,
+
+  "mqtt_ha_host":       "",
+  "mqtt_ha_port":       1883,
+  "mqtt_ha_user":       "",
+  "mqtt_ha_password":   ""
 }
 EOF
     chmod 600 "${CONFIG_DIR}/config.json"
