@@ -386,6 +386,8 @@ Type=simple
 WorkingDirectory=/opt/pve-agent
 Environment=HOME=/root
 Environment=PYTHONPATH=/opt/pve-agent
+Environment=SSL_CERT=
+Environment=SSL_KEY=
 ExecStart=/opt/pve-agent/venv/bin/python /opt/pve-agent/pve_agent.py /etc/pve-agent/config.json
 Restart=on-failure
 RestartSec=5
