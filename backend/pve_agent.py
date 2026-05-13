@@ -727,9 +727,9 @@ class HAMQTTPublisher:
         _pub("sensor", "last_pbs_backup_ts", {
             "name": "Last PBS Backup",
             "state_topic": summary_topic,
-            "value_template": "{% if value_json.last_pbs_backup_ts %}{{ value_json.last_pbs_backup_ts | timestamp_local }}{% else %}unknown{% endif %}",
+            "value_template": "{{ value_json.last_pbs_backup_iso }}",
             "unique_id": f"proxmox_{hn}_last_pbs_backup_ts",
-            "icon": "mdi:calendar-clock",
+            "device_class": "timestamp",
             "device": dev,
         })
         _pub("sensor", "restic_snapshot_count", {
@@ -752,9 +752,9 @@ class HAMQTTPublisher:
         _pub("sensor", "last_restic_backup_ts", {
             "name": "Last Restic Backup",
             "state_topic": summary_topic,
-            "value_template": "{% if value_json.last_restic_backup_ts %}{{ value_json.last_restic_backup_ts | timestamp_local }}{% else %}unknown{% endif %}",
+            "value_template": "{{ value_json.last_restic_backup_iso }}",
             "unique_id": f"proxmox_{hn}_last_restic_backup_ts",
-            "icon": "mdi:calendar-clock",
+            "device_class": "timestamp",
             "device": dev,
         })
 
@@ -1175,15 +1175,20 @@ class StatePoller:
         last_restic_ts  = max(restic_ts_list) if restic_ts_list else None
         last_restic_age = round((now - last_restic_ts) / 3600, 1) if last_restic_ts else None
 
+        def _iso(ts: float | None) -> str | None:
+            if ts is None:
+                return None
+            return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
         self._pub_if_changed("summary", {
             "all_protected":          len(unprotected) == 0,
             "unprotected_count":      len(unprotected),
             "vm_count":               len(all_vmids),
             "protected_vm_count":     max(0, protected_count),
-            "last_pbs_backup_ts":     last_pbs_ts,
+            "last_pbs_backup_iso":    _iso(last_pbs_ts),
             "last_pbs_backup_age_h":  last_pbs_age,
             "restic_snapshot_count":  len(restic_snaps),
-            "last_restic_backup_ts":  last_restic_ts,
+            "last_restic_backup_iso": _iso(last_restic_ts),
             "last_restic_backup_age_h": last_restic_age,
         })
 
