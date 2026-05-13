@@ -699,6 +699,64 @@ class HAMQTTPublisher:
             "icon": "mdi:shield-alert",
             "device": dev,
         })
+        _pub("sensor", "protected_vm_count", {
+            "name": "Protected VM Count",
+            "state_topic": summary_topic,
+            "value_template": "{{ value_json.protected_vm_count }}",
+            "unique_id": f"proxmox_{hn}_protected_vm_count",
+            "icon": "mdi:shield-check",
+            "device": dev,
+        })
+        _pub("sensor", "vm_count", {
+            "name": "Total VM Count",
+            "state_topic": summary_topic,
+            "value_template": "{{ value_json.vm_count }}",
+            "unique_id": f"proxmox_{hn}_vm_count",
+            "icon": "mdi:server",
+            "device": dev,
+        })
+        _pub("sensor", "last_pbs_backup_age_h", {
+            "name": "Last PBS Backup Age",
+            "state_topic": summary_topic,
+            "value_template": "{{ value_json.last_pbs_backup_age_h }}",
+            "unit_of_measurement": "h",
+            "unique_id": f"proxmox_{hn}_last_pbs_backup_age_h",
+            "icon": "mdi:clock-outline",
+            "device": dev,
+        })
+        _pub("sensor", "last_pbs_backup_ts", {
+            "name": "Last PBS Backup",
+            "state_topic": summary_topic,
+            "value_template": "{% if value_json.last_pbs_backup_ts %}{{ value_json.last_pbs_backup_ts | timestamp_local }}{% else %}unknown{% endif %}",
+            "unique_id": f"proxmox_{hn}_last_pbs_backup_ts",
+            "icon": "mdi:calendar-clock",
+            "device": dev,
+        })
+        _pub("sensor", "restic_snapshot_count", {
+            "name": "Restic Snapshot Count",
+            "state_topic": summary_topic,
+            "value_template": "{{ value_json.restic_snapshot_count }}",
+            "unique_id": f"proxmox_{hn}_restic_snapshot_count",
+            "icon": "mdi:backup-restore",
+            "device": dev,
+        })
+        _pub("sensor", "last_restic_backup_age_h", {
+            "name": "Last Restic Backup Age",
+            "state_topic": summary_topic,
+            "value_template": "{{ value_json.last_restic_backup_age_h }}",
+            "unit_of_measurement": "h",
+            "unique_id": f"proxmox_{hn}_last_restic_backup_age_h",
+            "icon": "mdi:clock-outline",
+            "device": dev,
+        })
+        _pub("sensor", "last_restic_backup_ts", {
+            "name": "Last Restic Backup",
+            "state_topic": summary_topic,
+            "value_template": "{% if value_json.last_restic_backup_ts %}{{ value_json.last_restic_backup_ts | timestamp_local }}{% else %}unknown{% endif %}",
+            "unique_id": f"proxmox_{hn}_last_restic_backup_ts",
+            "icon": "mdi:calendar-clock",
+            "device": dev,
+        })
 
     def shutdown(self) -> None:
         try:
@@ -1099,10 +1157,34 @@ class StatePoller:
             v for v in all_vmids
             if v not in excluded and not (pbs_groups.get(v) and restic_by_vm_pbstime.get(v))
         ]
+        protected_count = len(all_vmids) - len(unprotected) - len(excluded & all_vmids)
+
+        # Newest PBS snapshot across all VMs
+        now = time.time()
+        all_pbs_times = [
+            s.get("backup_time", 0)
+            for snaps in pbs_groups.values()
+            for s in snaps
+            if s.get("backup_time")
+        ]
+        last_pbs_ts  = max(all_pbs_times) if all_pbs_times else None
+        last_pbs_age = round((now - last_pbs_ts) / 3600, 1) if last_pbs_ts else None
+
+        # Newest + count of restic snapshots
+        restic_ts_list = [s.get("ts", 0) for s in restic_snaps if s.get("ts")]
+        last_restic_ts  = max(restic_ts_list) if restic_ts_list else None
+        last_restic_age = round((now - last_restic_ts) / 3600, 1) if last_restic_ts else None
+
         self._pub_if_changed("summary", {
-            "all_protected":    len(unprotected) == 0,
-            "unprotected_count": len(unprotected),
-            "vm_count":         len(all_vmids),
+            "all_protected":          len(unprotected) == 0,
+            "unprotected_count":      len(unprotected),
+            "vm_count":               len(all_vmids),
+            "protected_vm_count":     max(0, protected_count),
+            "last_pbs_backup_ts":     last_pbs_ts,
+            "last_pbs_backup_age_h":  last_pbs_age,
+            "restic_snapshot_count":  len(restic_snaps),
+            "last_restic_backup_ts":  last_restic_ts,
+            "last_restic_backup_age_h": last_restic_age,
         })
 
         # Storage stats change whenever snapshots change — scan in same cycle
