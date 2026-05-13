@@ -2715,6 +2715,7 @@ if __name__ == "__main__":
         )
         _mqtt.setup_message_handler()
 
+        _ha_mqtt = None
         if _cfg.mqtt_ha_host:
             log.info("HA MQTT publisher starting → %s:%s (discovery + summary/storage only)",
                      _cfg.mqtt_ha_host, _cfg.mqtt_ha_port)
