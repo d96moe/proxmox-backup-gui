@@ -2619,7 +2619,7 @@ def restic_log_stream():
 # Connection settings — read/write the agent's own config.json
 # ─────────────────────────────────────────────────────────────────────────────
 
-_SENSITIVE = {"pve_password", "pbs_password", "restic_password", "agent_token", "mqtt_password"}
+_SENSITIVE = {"pve_password", "pbs_password", "restic_password", "agent_token", "mqtt_password", "mqtt_ha_password"}
 
 @app.route("/connection")
 def connection_get():
