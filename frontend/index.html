@@ -523,32 +523,7 @@
           </div>
         </div>
 
-        <div class="settings-section-title" style="margin-top:16px">MQTT — GUI Broker</div>
-        <div class="settings-hint" style="margin-bottom:10px">Broker used for live updates in this GUI. Leave Host empty to disable.</div>
-        <div style="display:flex;flex-direction:column;gap:10px;margin-bottom:20px;">
-          <div class="settings-row">
-            <div><div class="settings-label">Host</div><div class="settings-hint">e.g. 192.168.0.200</div></div>
-            <input class="settings-input" id="s-mqtt-host" type="text" placeholder="192.168.0.200" style="width:180px;text-align:left">
-          </div>
-          <div class="settings-row">
-            <div><div class="settings-label">Port</div></div>
-            <input class="settings-input" id="s-mqtt-port" type="number" placeholder="1883" style="width:80px">
-          </div>
-          <div class="settings-row">
-            <div><div class="settings-label">User</div></div>
-            <input class="settings-input" id="s-mqtt-user" type="text" placeholder="" style="width:140px;text-align:left">
-          </div>
-          <div class="settings-row">
-            <div><div class="settings-label">Password</div></div>
-            <input class="settings-input" id="s-mqtt-password" type="password" placeholder="unchanged" style="width:140px;text-align:left">
-          </div>
-          <div class="settings-row">
-            <div><div class="settings-label">Hostname</div><div class="settings-hint">Topic prefix (default: OS hostname)</div></div>
-            <input class="settings-input" id="s-mqtt-hostname" type="text" placeholder="" style="width:160px;text-align:left">
-          </div>
-        </div>
-
-        <div class="settings-section-title">MQTT — HA Discovery Broker</div>
+        <div class="settings-section-title" style="margin-top:16px">MQTT — HA Discovery Broker</div>
         <div class="settings-hint" style="margin-bottom:10px">Second broker for Home Assistant MQTT Discovery. Leave Host empty to disable.</div>
         <div style="display:flex;flex-direction:column;gap:10px;">
           <div class="settings-row">
@@ -2421,12 +2396,6 @@ async function openSettingsModal() {
         document.getElementById('s-conn-pbs-datastore').value   = c.pbs_datastore ?? '';
         document.getElementById('s-conn-restic-repo').value     = c.restic_repo   ?? '';
         document.getElementById('s-conn-restic-password').value = '';
-        // MQTT — GUI broker
-        document.getElementById('s-mqtt-host').value     = c.mqtt_host     ?? '';
-        document.getElementById('s-mqtt-port').value     = c.mqtt_port     ?? 1883;
-        document.getElementById('s-mqtt-user').value     = c.mqtt_user     ?? '';
-        document.getElementById('s-mqtt-password').value = '';
-        document.getElementById('s-mqtt-hostname').value = c.mqtt_hostname ?? '';
         // MQTT — HA Discovery broker
         document.getElementById('s-mqtt-ha-host').value     = c.mqtt_ha_host     ?? '';
         document.getElementById('s-mqtt-ha-port').value     = c.mqtt_ha_port     ?? 1883;
@@ -2587,16 +2556,6 @@ async function saveSettings() {
       const v = document.getElementById(id)?.value;
       if (v) connBody[k] = v;
     }
-    // MQTT — GUI broker
-    const mqttTextFields = { mqtt_host: 's-mqtt-host', mqtt_user: 's-mqtt-user', mqtt_hostname: 's-mqtt-hostname' };
-    for (const [k, id] of Object.entries(mqttTextFields)) {
-      const v = document.getElementById(id)?.value.trim();
-      if (v != null) connBody[k] = v;
-    }
-    const mqttPort = parseInt(document.getElementById('s-mqtt-port')?.value, 10);
-    if (!isNaN(mqttPort)) connBody.mqtt_port = mqttPort;
-    const mqttPw = document.getElementById('s-mqtt-password')?.value;
-    if (mqttPw) connBody.mqtt_password = mqttPw;
     // MQTT — HA Discovery broker
     const mqttHaTextFields = { mqtt_ha_host: 's-mqtt-ha-host', mqtt_ha_user: 's-mqtt-ha-user' };
     for (const [k, id] of Object.entries(mqttHaTextFields)) {
