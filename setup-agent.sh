@@ -39,13 +39,26 @@ if [ -z "${AGENT_TOKEN:-}" ]; then
     _GENERATED_TOKEN=1
 fi
 
+# ── Wait for apt lock (cloud-init / unattended-upgrades may still be running) ──
+_wait_apt() {
+    local waited=0
+    while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
+          >/dev/null 2>&1; do
+        [ $waited -eq 0 ] && echo "  Waiting for apt lock to be released..."
+        waited=1
+        sleep 5
+    done
+}
+
 # ── Install Python 3 + venv if missing ────────────────────────────────────────
 echo "=== Checking Python ==="
 if ! command -v python3 &>/dev/null; then
+    _wait_apt
     apt-get update -qq
     apt-get install -y -qq python3 python3-pip python3-venv
 elif ! python3 -c "import ensurepip" &>/dev/null 2>&1; then
     # python3 is present (e.g. shipped with Proxmox VE) but venv support is missing
+    _wait_apt
     apt-get install -y -qq python3-venv
 fi
 

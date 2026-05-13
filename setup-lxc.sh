@@ -56,6 +56,9 @@ sleep 5
 # ── Install dependencies ───────────────────────────────────────────────────────
 echo "=== Installing Python + dependencies ==="
 pct exec "${LXC_ID}" -- bash -c "
+    while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1; do
+        echo '  Waiting for apt lock...'; sleep 5
+    done
     apt-get update -qq
     apt-get install -y -qq python3 python3-pip python3-venv restic rclone curl mosquitto 2>/dev/null
 "
