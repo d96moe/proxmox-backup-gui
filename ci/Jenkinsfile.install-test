@@ -1,0 +1,221 @@
+// =============================================================================
+// Jenkinsfile.install-test  —  GUI Installation Story CI Pipeline
+//
+// Weekly (Saturday ~21:00) + manual trigger.
+// Tests setup-agent.sh, setup-lxc.sh, and add-user.sh from scratch on a
+// fresh PVE VM (template 9001: Debian Bookworm + Proxmox VE, no GUI).
+//
+// 1. Clone template 9001
+// 2. Copy repo to VM
+// 3. Run setup-agent.sh — verify pve-agent starts and HTTP health responds
+// 4. Run setup-lxc.sh  — verify LXC 199 created, GUI service starts, login page served
+// 5. Run add-user.sh   — verify user creation works
+//
+// Post-always: destroys the cloned VM.
+// =============================================================================
+
+pipeline {
+    agent any
+
+    options {
+        disableConcurrentBuilds()
+        timestamps()
+        timeout(time: 40, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    triggers {
+        cron('H 21 * * 6')  // Saturday ~21:00
+    }
+
+    parameters {
+        string(name: 'BRANCH', defaultValue: 'main',
+               description: 'Branch to test')
+    }
+
+    environment {
+        VM_ID       = "93${String.format('%02d', BUILD_NUMBER.toInteger() % 100)}"
+        VM_IP       = "192.168.0.251"
+        PVE_HOST    = "192.168.0.200"
+        TEMPLATE_ID = "9001"
+        SSH_KEY     = "/var/lib/jenkins/.ssh/id_ed25519"
+        SSH_OPTS    = "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -i /var/lib/jenkins/.ssh/id_ed25519"
+        REPO_DIR    = "/tmp/proxmox-backup-gui"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scmGit(
+                    branches: [[name: "${params.BRANCH}"]],
+                    userRemoteConfigs: scm.userRemoteConfigs
+                )
+            }
+        }
+
+        stage('Run') {
+            options { lock('ci-vm-x86') }
+            stages {
+
+        stage('Clone VM') {
+            steps {
+                echo "Cloning template ${TEMPLATE_ID} -> VM ${VM_ID}"
+                sh """
+                    ssh ${SSH_OPTS} root@${PVE_HOST} \
+                        "qm clone ${TEMPLATE_ID} ${VM_ID} --name install-ci --full 1"
+                """
+            }
+        }
+
+        stage('Start VM + wait for SSH') {
+            steps {
+                sh "ssh ${SSH_OPTS} root@${PVE_HOST} 'qm start ${VM_ID}'"
+                echo "Waiting for SSH at ${VM_IP} (max 150s)..."
+                sh """
+                    for i in \$(seq 1 30); do
+                        ssh ${SSH_OPTS} root@${VM_IP} true 2>/dev/null && echo "SSH ready" && exit 0
+                        echo "  attempt \$i/30..."
+                        sleep 5
+                    done
+                    echo "ERROR: VM did not become reachable within 150 seconds"
+                    exit 1
+                """
+                sh """
+                    ssh ${SSH_OPTS} root@${VM_IP} bash -s << 'ENDSSH'
+grep -qF "192.168.0.251 install-ci" /etc/hosts || echo "192.168.0.251 install-ci.local install-ci" >> /etc/hosts
+systemctl reset-failed pve-cluster 2>/dev/null || true
+systemctl restart pve-cluster
+sleep 5
+systemctl is-active pve-cluster && echo "pve-cluster: OK" || { journalctl -u pve-cluster -n 10 --no-pager; exit 1; }
+ENDSSH
+                """
+            }
+        }
+
+        stage('Copy repo to VM') {
+            steps {
+                echo "Copying proxmox-backup-gui checkout to VM..."
+                sh """
+                    ssh ${SSH_OPTS} root@${VM_IP} "rm -rf ${REPO_DIR} && mkdir -p ${REPO_DIR}"
+                    scp ${SSH_OPTS} -r ${WORKSPACE}/. root@${VM_IP}:${REPO_DIR}/
+                """
+            }
+        }
+
+        stage('Test setup-agent.sh') {
+            steps {
+                echo "Running setup-agent.sh on VM — verifying agent installs and starts..."
+                sh """
+                    ssh ${SSH_OPTS} root@${VM_IP} bash -s << 'ENDSSH'
+set -euo pipefail
+cd ${REPO_DIR}
+# Use loopback as MQTT host — agent will fail to connect but HTTP API stays up
+MQTT_HOST=127.0.0.1 MQTT_HOSTNAME=install-ci AGENT_TOKEN=ci-install-test-token \
+    bash setup-agent.sh
+ENDSSH
+                """
+                echo "Verifying pve-agent service is active..."
+                sh """
+                    ssh ${SSH_OPTS} root@${VM_IP} bash -s << 'ENDSSH'
+set -euo pipefail
+sleep 3
+systemctl is-active pve-agent \
+    && echo "pve-agent: active" \
+    || { echo "ERROR: pve-agent not running"; journalctl -u pve-agent -n 30 --no-pager; exit 1; }
+curl -sf -H "Authorization: Bearer ci-install-test-token" http://127.0.0.1:8099/health \
+    && echo "Agent HTTP health: OK" \
+    || { echo "ERROR: Agent /health failed"; journalctl -u pve-agent -n 20 --no-pager; exit 1; }
+ENDSSH
+                """
+            }
+        }
+
+        stage('Test setup-lxc.sh') {
+            steps {
+                echo "Running setup-lxc.sh — creates LXC 199 with GUI + Mosquitto..."
+                sh """
+                    ssh ${SSH_OPTS} root@${VM_IP} bash -s << 'ENDSSH'
+set -euo pipefail
+cd ${REPO_DIR}
+# Use DHCP — LXC gets an IP on the local network (vmbr0 is bridged on template 9001)
+# Skip first-host prompt by passing empty FIRST_HOST_ID
+FIRST_HOST_ID="" GUI_USER=ci-admin GUI_PASSWORD=ci-install-test-pw \
+    bash setup-lxc.sh
+ENDSSH
+                """
+                echo "Verifying LXC 199 is running and GUI responds..."
+                sh """
+                    ssh ${SSH_OPTS} root@${VM_IP} bash -s << 'ENDSSH'
+set -euo pipefail
+# Check LXC is running
+pct status 199 | grep -q running \
+    && echo "LXC 199: running" \
+    || { echo "ERROR: LXC 199 not running"; pct status 199; exit 1; }
+
+# Start the GUI service (setup-lxc.sh enables but does not start it since hosts.json needs editing)
+pct exec 199 -- systemctl start proxmox-backup-gui || true
+sleep 5
+
+# Check GUI login page is served
+pct exec 199 -- curl -sf http://localhost:5000/ | grep -q "login\|Login\|proxmox" \
+    && echo "GUI login page: OK" \
+    || { echo "ERROR: GUI did not serve login page"; \
+         pct exec 199 -- journalctl -u proxmox-backup-gui -n 20 --no-pager; exit 1; }
+
+# Check Mosquitto is running
+pct exec 199 -- systemctl is-active mosquitto \
+    && echo "Mosquitto: active" \
+    || { echo "ERROR: Mosquitto not running inside LXC"; exit 1; }
+ENDSSH
+                """
+            }
+        }
+
+        stage('Test add-user.sh') {
+            steps {
+                echo "Running add-user.sh — verifying user creation works..."
+                sh """
+                    ssh ${SSH_OPTS} root@${VM_IP} bash -s << 'ENDSSH'
+set -euo pipefail
+# Push add-user.sh into the LXC
+pct push 199 ${REPO_DIR}/add-user.sh /tmp/add-user.sh
+
+# Add a viewer and an admin (non-interactive: pass password via env)
+GUI_PASSWORD=test-viewer-pw pct exec 199 -- bash /tmp/add-user.sh viewerci viewer \
+    && echo "add-user.sh viewer: OK"
+GUI_PASSWORD=test-admin-pw pct exec 199 -- bash /tmp/add-user.sh adminextra admin \
+    && echo "add-user.sh admin: OK"
+
+# Verify duplicate user is rejected
+GUI_PASSWORD=x pct exec 199 -- bash /tmp/add-user.sh viewerci viewer 2>&1 | grep -q "already exists" \
+    && echo "Duplicate user rejection: OK" \
+    || { echo "ERROR: duplicate user was not rejected"; exit 1; }
+ENDSSH
+                """
+            }
+        }
+
+            } // inner stages
+        } // stage Run
+
+    } // stages
+
+    post {
+        always {
+            echo "=== Cleanup ==="
+            sh """
+                ssh ${SSH_OPTS} root@${PVE_HOST} \
+                    "qm stop ${VM_ID} 2>/dev/null || true; sleep 5; qm destroy ${VM_ID} --purge 1" \
+                    || true
+            """
+            echo "VM ${VM_ID} destroyed"
+        }
+        success {
+            echo "install-test PASSED — setup-agent.sh, setup-lxc.sh, add-user.sh all verified"
+        }
+        failure {
+            echo "install-test FAILED — check logs above"
+        }
+    }
+}

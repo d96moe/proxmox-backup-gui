@@ -156,11 +156,16 @@ systemctl enable proxmox-backup-gui
 # ── Configure first host ──────────────────────────────────────────────────────
 if [ "${_NEED_HOSTS_CONFIG:-0}" = "1" ]; then
     PVE_SELF_IP=$(ip -4 addr show scope global | awk '/inet/{print $2}' | cut -d/ -f1 | head -1)
-    echo ""
-    echo "=== Configure first host ==="
-    echo "  (press Enter to skip — edit hosts.json inside the LXC manually later)"
-    echo ""
-    read -rp "  Host ID (must match mqtt_hostname in agent config, e.g. 'home') [skip]: " _HOST_ID
+    # Non-interactive mode: FIRST_HOST_ID="" skips the prompt entirely
+    if [ "${FIRST_HOST_ID+set}" = "set" ]; then
+        _HOST_ID="${FIRST_HOST_ID}"
+    else
+        echo ""
+        echo "=== Configure first host ==="
+        echo "  (press Enter to skip — edit hosts.json inside the LXC manually later)"
+        echo ""
+        read -rp "  Host ID (must match mqtt_hostname in agent config, e.g. 'home') [skip]: " _HOST_ID
+    fi
     if [ -n "${_HOST_ID}" ]; then
         # Auto-detect agent token from local agent install
         _HOST_TOKEN=""
