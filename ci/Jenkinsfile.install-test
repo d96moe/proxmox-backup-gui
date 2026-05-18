@@ -127,8 +127,8 @@ sleep 3
 systemctl is-active pve-agent \
     && echo "pve-agent: active" \
     || { echo "ERROR: pve-agent not running"; journalctl -u pve-agent -n 30 --no-pager; exit 1; }
-curl -sf -H "Authorization: Bearer ci-install-test-token" http://127.0.0.1:8099/health \
-    && echo "Agent HTTP health: OK" \
+curl -sfk -H "Authorization: Bearer ci-install-test-token" https://127.0.0.1:8099/health \
+    && echo "Agent HTTPS health: OK" \
     || { echo "ERROR: Agent /health failed"; journalctl -u pve-agent -n 20 --no-pager; exit 1; }
 ENDSSH
                 """
