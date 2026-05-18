@@ -1385,8 +1385,8 @@ class AgentConfig:
     pbs_storage_id: str
     pbs_datastore_path: str
     pve_ssh_host: str = ""
-    restic_repo: str
-    restic_password: str
+    restic_repo: str = ""
+    restic_password: str = ""
     verify_ssl: bool = False
     restic_env: dict = field(default_factory=dict)
     agent_token: str = ""        # if set, all requests must present "Authorization: Bearer <token>"
