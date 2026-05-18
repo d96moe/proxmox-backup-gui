@@ -15,7 +15,9 @@ LXC_ID="${LXC_ID:-199}"
 LXC_NAME="proxmox-backup-gui"
 LXC_MEMORY=256          # MB
 LXC_DISK="2"            # GB
-LXC_STORAGE="local-lvm" # Storage pool for rootfs
+# Storage pool for rootfs: env override → auto-detect first rootdir-capable storage → local-lvm
+LXC_STORAGE="${LXC_STORAGE:-$(pvesm status --content rootdir 2>/dev/null | awk 'NR>1 {print $1; exit}')}"
+LXC_STORAGE="${LXC_STORAGE:-local-lvm}"
 LXC_BRIDGE="vmbr0"
 LXC_IP="${LXC_IP:-dhcp}" # e.g. "192.168.0.199/24" or "dhcp"
 LXC_GW="${LXC_GW:-}"     # Gateway, only needed for static IP
