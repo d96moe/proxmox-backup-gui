@@ -72,6 +72,7 @@ echo "=== Installing agent files ==="
 cp "${SCRIPT_DIR}/backend/pve_agent.py"  "${AGENT_DIR}/pve_agent.py"
 cp "${SCRIPT_DIR}/backend/pbs_client.py" "${AGENT_DIR}/pbs_client.py"
 cp "${SCRIPT_DIR}/backend/pve_client.py" "${AGENT_DIR}/pve_client.py"
+cp "${SCRIPT_DIR}/backend/config.py"     "${AGENT_DIR}/config.py"
 
 # ── Python venv + deps ─────────────────────────────────────────────────────────
 echo "=== Installing Python dependencies ==="
