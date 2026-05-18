@@ -119,6 +119,10 @@ ENDSSH
                 sh """
                     ssh ${SSH_OPTS} root@${VM_IP} bash -s << 'ENDSSH'
 set -euo pipefail
+# setup-agent.sh does not auto-start when config has CHANGE_ME placeholders
+# (correct for real installs — users must fill credentials first).
+# Start explicitly here to verify the service unit and HTTP API work.
+systemctl start pve-agent
 sleep 3
 systemctl is-active pve-agent \
     && echo "pve-agent: active" \
