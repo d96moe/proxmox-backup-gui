@@ -1384,7 +1384,7 @@ class AgentConfig:
     pbs_datastore: str
     pbs_storage_id: str
     pbs_datastore_path: str
-    pve_ssh_host: str
+    pve_ssh_host: str = ""
     restic_repo: str
     restic_password: str
     verify_ssl: bool = False
