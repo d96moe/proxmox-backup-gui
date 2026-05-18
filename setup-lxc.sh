@@ -21,13 +21,16 @@ LXC_IP="${LXC_IP:-dhcp}" # e.g. "192.168.0.199/24" or "dhcp"
 LXC_GW="${LXC_GW:-}"     # Gateway, only needed for static IP
 APP_PORT=5000
 
-# Find debian-12 template — pick the newest one available
-TEMPLATE=$(pveam list local 2>/dev/null | awk '/debian-12/ {print $1}' | sort -V | tail -1)
+# Find debian-12 template — pick the newest one available locally
+TEMPLATE=$(pveam list local 2>/dev/null | awk '/debian-12.*amd64/ {print $1}' | sort -V | tail -1)
 if [ -z "${TEMPLATE}" ]; then
     echo "No debian-12 template found. Downloading..."
     pveam update
-    pveam download local debian-12-standard_12.7-1_amd64.tar.zst
-    TEMPLATE="local:vztmpl/debian-12-standard_12.7-1_amd64.tar.zst"
+    TMPL_NAME=$(pveam available --section system 2>/dev/null \
+        | awk '/debian-12.*standard.*amd64/ {print $2}' | sort -V | tail -1)
+    [ -z "${TMPL_NAME}" ] && { echo "ERROR: no debian-12 template available in pveam"; exit 1; }
+    pveam download local "${TMPL_NAME}"
+    TEMPLATE="local:vztmpl/${TMPL_NAME}"
 fi
 
 echo "=== Creating LXC ${LXC_ID} (${LXC_NAME}) ==="
