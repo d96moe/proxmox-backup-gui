@@ -43,6 +43,7 @@ fi
 _wait_apt() {
     local waited=0
     while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock \
+                /var/lib/apt/lists/lock \
           >/dev/null 2>&1; do
         [ $waited -eq 0 ] && echo "  Waiting for apt lock to be released..."
         waited=1
