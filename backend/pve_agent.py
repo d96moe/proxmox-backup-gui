@@ -1403,6 +1403,7 @@ class AgentConfig:
     mqtt_ha_password: str = ""
     exclude_from_protection: list = field(default_factory=list)  # VMIDs that don't need backups
     pve_node: str = ""           # PVE node name for API calls (defaults to mqtt_hostname then socket.gethostname())
+    agent_port: int = 8099       # HTTP API listen port (used by setup-agent.sh)
 
     def to_host_config(self):
         """Return a HostConfig-compatible object for existing clients."""
@@ -2850,8 +2851,8 @@ if __name__ == "__main__":
     # Bind address: AGENT_BIND env overrides the default 10.10.0.1.
     # On a nested CI VM, vmbr0 is 10.10.0.1. On a real PVE host, use the
     # actual bridge IP (e.g. 192.168.0.200) or 0.0.0.0 for all interfaces.
-    bind_host = os.environ.get("AGENT_BIND", "10.10.0.1")
-    bind_port = int(os.environ.get("AGENT_PORT", "8099"))
+    bind_host = os.environ.get("AGENT_BIND", "0.0.0.0")
+    bind_port = int(os.environ.get("AGENT_PORT", str(_cfg.agent_port)))
 
     # SSL: use PVE cert by default; override via env or disable with SSL_CERT=""
     _default_cert = "/etc/pve/local/pve-ssl.pem"
