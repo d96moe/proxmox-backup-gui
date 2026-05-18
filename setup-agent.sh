@@ -59,6 +59,7 @@ if ! command -v python3 &>/dev/null; then
 elif ! python3 -c "import ensurepip" &>/dev/null 2>&1; then
     # python3 is present (e.g. shipped with Proxmox VE) but venv support is missing
     _wait_apt
+    apt-get update -qq
     apt-get install -y -qq python3-venv
 fi
 
