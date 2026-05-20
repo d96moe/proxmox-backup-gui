@@ -50,6 +50,7 @@ pct create "${LXC_ID}" "${TEMPLATE}" \
     --memory "${LXC_MEMORY}" \
     --rootfs "${LXC_STORAGE}:${LXC_DISK}" \
     --net0 "${NET_ARG}" \
+    --nameserver "1.1.1.1 8.8.8.8" \
     --unprivileged 1 \
     --features nesting=0 \
     --start 1 \
