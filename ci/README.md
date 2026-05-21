@@ -13,12 +13,13 @@
 
 ## Overview
 
-Two Jenkins pipelines test the GUI at different levels:
+Three Jenkins pipelines test the GUI at different levels:
 
 | Pipeline | Jenkins job | Jenkinsfile | Trigger | What it tests |
 |---|---|---|---|---|
 | Mock / fast | `proxmox-backup-gui` | `ci/Jenkinsfile` | Every push (webhook) | Playwright against mock server + MQTT unit tests, ~60s, no VM |
 | Integration | `proxmox-backup-gui-integration` | `ci/Jenkinsfile.integration` | Nightly ~23:00 + manual | Playwright against real Flask + PBS + Google Drive + MQTT unit tests, ~20 min |
+| Install story | `proxmox-backup-gui-install-test` | `ci/Jenkinsfile.install-test` | Weekly Saturday ~21:00 + manual | `setup-agent.sh`, `setup-lxc.sh`, `add-user.sh` from scratch on a fresh PVE VM, ~40 min |
 
 **Integration test suites** (selectable via `TEST_SUITE` parameter):
 
@@ -35,6 +36,21 @@ The fast pipeline gives rapid feedback on every push. The integration pipeline v
 ---
 
 ## How It Works
+
+### Install-story pipeline
+
+Tests the full fresh-install story weekly (Saturday ~21:00) and on demand. No template setup required beyond template 9001 (Debian Bookworm + Proxmox VE, no GUI pre-installed).
+
+1. Clones template 9001 to a fresh VM
+2. Starts the VM, waits for SSH, sets up pve-cluster and NAT (vmbr0 → uplink masquerade so LXC containers can reach the internet)
+3. Copies the current repo checkout to the VM
+4. Runs `setup-agent.sh` with `MQTT_HOST=127.0.0.1` and a test token; verifies the `pve-agent` systemd unit starts and `/health` responds (HTTPS then HTTP fallback)
+5. Verifies token rejection: no token → 401, wrong token → 401
+6. Runs `setup-lxc.sh` with a static IP on the NAT'd subnet (`10.10.0.100/24`) and a test admin password; verifies LXC 199 is running, the GUI serves the login page, and Mosquitto is active
+7. Verifies GUI login: correct credentials return 200 + `role` field; wrong password is rejected
+8. Runs `add-user.sh` inside the LXC (viewer + admin); verifies duplicate user rejection
+
+Post-always: destroys the cloned VM.
 
 ### Fast pipeline
 
@@ -108,6 +124,16 @@ Pure Python unit tests (no VM, no network). Run in both the fast pipeline and as
 - **HA_MQTT_MIRRORING** — `summary` and `storage` topics forwarded to secondary HA broker; VM-level topics not forwarded; no crash when `ha_mqtt` is None; payload contains all new summary fields
 - **HA_MQTT_CONFIG** — `AgentConfig` accepts `mqtt_ha_*` fields with empty-string defaults; `mqtt_ha_password` is in `_SENSITIVE`; `HAMQTTPublisher` created when `mqtt_ha_host` is set and injected into the poller
 
+### Install-story tests (`ci/Jenkinsfile.install-test`)
+
+Shell-level tests that verify the fresh-install scripts work end-to-end on a clean VM. Cover:
+
+- **setup-agent.sh** — agent installs, `pve-agent` systemd unit starts, `/health` responds (HTTPS or HTTP)
+- **Agent token auth** — no-token request rejected (401), wrong-token request rejected (401)
+- **setup-lxc.sh** — LXC 199 created and running, login page served at `:5000`, Mosquitto active
+- **GUI login auth** — correct credentials return 200 + `role` field; wrong password rejected (401)
+- **add-user.sh** — viewer and admin users created; duplicate user rejected with "already exists"
+
 ### Integration tests (`ci/tests/test_restore.py` + `ci/tests/test_frontend.py`)
 
 Playwright + `requests` against the real Flask backend. Cover:
@@ -175,6 +201,18 @@ Set the **Script Path** in each Jenkins job:
 |---|---|
 | `proxmox-backup-gui` | `ci/Jenkinsfile` |
 | `proxmox-backup-gui-integration` | `ci/Jenkinsfile.integration` |
+| `proxmox-backup-gui-install-test` | `ci/Jenkinsfile.install-test` |
+
+### Template 9001
+
+The install-story pipeline clones template 9001 for each build. It must have:
+
+- Proxmox VE installed (Debian Bookworm base)
+- No GUI pre-installed (the pipeline installs everything from scratch)
+- SSH access from Jenkins LXC 200 as root
+- A working PVE cluster stack (`pve-cluster`, `pveproxy`, etc.)
+
+The pipeline handles everything else: NAT setup, LXC template download, and all installation steps.
 
 ---
 
