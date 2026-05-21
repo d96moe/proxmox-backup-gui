@@ -59,12 +59,12 @@ pct create "${LXC_ID}" "${TEMPLATE}" \
 echo "--- Waiting for LXC to boot..."
 sleep 5
 
-# Override systemd-resolved symlink with static DNS — same fix as in CI integration VM
-pct exec "${LXC_ID}" -- bash -c "rm -f /etc/resolv.conf && echo 'nameserver 1.1.1.1' > /etc/resolv.conf"
-
 # ── Install dependencies ───────────────────────────────────────────────────────
 echo "=== Installing Python + dependencies ==="
 pct exec "${LXC_ID}" -- bash -c "
+    # Override systemd-resolved symlink right before apt-get so it can't race back
+    rm -f /etc/resolv.conf
+    echo 'nameserver 1.1.1.1' > /etc/resolv.conf
     while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1; do
         echo '  Waiting for apt lock...'; sleep 5
     done

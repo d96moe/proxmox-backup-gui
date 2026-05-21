@@ -88,6 +88,18 @@ systemctl reset-failed pve-cluster 2>/dev/null || true
 systemctl restart pve-cluster
 sleep 5
 systemctl is-active pve-cluster && echo "pve-cluster: OK" || { journalctl -u pve-cluster -n 10 --no-pager; exit 1; }
+
+# Set up NAT so LXCs on the isolated vmbr0 bridge can reach the internet.
+# vmbr0 in a nested PVE VM has no external bridge port — give it a host IP
+# and masquerade traffic through the VM's uplink.
+UPLINK=\$(ip route show default | awk '{print \$5; exit}')
+echo "Setting up NAT via \${UPLINK}..."
+ip addr add 10.10.0.1/24 dev vmbr0 2>/dev/null || true
+ip link set vmbr0 up
+echo 1 > /proc/sys/net/ipv4/ip_forward
+iptables -t nat -C POSTROUTING -s 10.10.0.0/24 -o "\${UPLINK}" -j MASQUERADE 2>/dev/null \
+    || iptables -t nat -A POSTROUTING -s 10.10.0.0/24 -o "\${UPLINK}" -j MASQUERADE
+echo "NAT ready: 10.10.0.0/24 → \${UPLINK}"
 ENDSSH
                 """
             }
@@ -148,9 +160,10 @@ ENDSSH
                     ssh ${SSH_OPTS} root@${VM_IP} bash -s << 'ENDSSH'
 set -euo pipefail
 cd ${REPO_DIR}
-# Use DHCP — LXC gets an IP on the local network (vmbr0 is bridged on template 9001)
-# Skip first-host prompt by passing empty FIRST_HOST_ID
+# Static IP on the NAT'd 10.10.0.0/24 subnet we set up on vmbr0.
+# FIRST_HOST_ID="" skips the interactive first-host prompt.
 FIRST_HOST_ID="" GUI_USER=ci-admin GUI_PASSWORD=ci-install-test-pw \
+    LXC_IP=10.10.0.100/24 LXC_GW=10.10.0.1 \
     bash setup-lxc.sh
 ENDSSH
                 """
