@@ -211,10 +211,11 @@ GUI_PASSWORD=test-viewer-pw pct exec 199 -- bash /tmp/add-user.sh viewerci viewe
 GUI_PASSWORD=test-admin-pw pct exec 199 -- bash /tmp/add-user.sh adminextra admin \
     && echo "add-user.sh admin: OK"
 
-# Verify duplicate user is rejected
-GUI_PASSWORD=x pct exec 199 -- bash /tmp/add-user.sh viewerci viewer 2>&1 | grep -q "already exists" \
+# Verify duplicate user is rejected (add-user.sh exits 1 for duplicates — capture with || true)
+dup_out=\$(GUI_PASSWORD=x pct exec 199 -- bash /tmp/add-user.sh viewerci viewer 2>&1 || true)
+echo "\${dup_out}" | grep -q "already exists" \
     && echo "Duplicate user rejection: OK" \
-    || { echo "ERROR: duplicate user was not rejected"; exit 1; }
+    || { echo "ERROR: duplicate user was not rejected"; echo "Output: \${dup_out}"; exit 1; }
 ENDSSH
                 """
             }
