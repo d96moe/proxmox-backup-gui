@@ -141,13 +141,27 @@ systemctl is-active pve-agent \
     || { echo "ERROR: pve-agent not running"; journalctl -u pve-agent -n 30 --no-pager; exit 1; }
 if curl -sfk -H "Authorization: Bearer ci-install-test-token" https://127.0.0.1:8099/health 2>/dev/null; then
     echo "Agent HTTPS health: OK"
+    AGENT_URL="https://127.0.0.1:8099"
+    CURL_INSECURE="-k"
 elif curl -sf -H "Authorization: Bearer ci-install-test-token" http://127.0.0.1:8099/health 2>/dev/null; then
     echo "Agent HTTP health: OK"
+    AGENT_URL="http://127.0.0.1:8099"
+    CURL_INSECURE=""
 else
     echo "ERROR: Agent /health failed"
     journalctl -u pve-agent -n 20 --no-pager
     exit 1
 fi
+
+# Verify token rejection: no token → 401
+curl -sf \${CURL_INSECURE} "\${AGENT_URL}/health" 2>/dev/null \
+    && { echo "ERROR: Agent accepted request with no token"; exit 1; } \
+    || echo "Agent no-token rejection: OK"
+
+# Verify token rejection: wrong token → 401
+curl -sf \${CURL_INSECURE} -H "Authorization: Bearer wrongtoken" "\${AGENT_URL}/health" 2>/dev/null \
+    && { echo "ERROR: Agent accepted wrong token"; exit 1; } \
+    || echo "Agent wrong-token rejection: OK"
 ENDSSH
                 """
             }
@@ -191,6 +205,21 @@ pct exec 199 -- curl -sf http://localhost:5000/ | grep -qiE "login|proxmox" \
 pct exec 199 -- systemctl is-active mosquitto \
     && echo "Mosquitto: active" \
     || { echo "ERROR: Mosquitto not running inside LXC"; exit 1; }
+
+# Verify GUI login: correct credentials return 200 + role field
+login_ok=\$(pct exec 199 -- curl -sf -X POST http://localhost:5000/api/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"username":"ci-admin","password":"ci-install-test-pw"}' 2>&1 || true)
+echo "\${login_ok}" | grep -q "role" \
+    && echo "GUI login (correct creds): OK" \
+    || { echo "ERROR: GUI login failed with correct credentials"; echo "Response: \${login_ok}"; exit 1; }
+
+# Verify GUI login: wrong password returns 401 (curl -f fails on 4xx)
+pct exec 199 -- curl -sf -X POST http://localhost:5000/api/auth/login \
+    -H "Content-Type: application/json" \
+    -d '{"username":"ci-admin","password":"wrongpassword"}' 2>/dev/null \
+    && { echo "ERROR: GUI login accepted wrong password"; exit 1; } \
+    || echo "GUI login (wrong creds) rejected: OK"
 ENDSSH
                 """
             }
