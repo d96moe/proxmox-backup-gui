@@ -871,6 +871,40 @@
   </div>
 </div>
 
+<!-- Backup Modal -->
+<div class="modal-overlay" id="backup-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div>
+        <div class="modal-title">Backup now</div>
+        <div class="modal-subtitle" id="backup-modal-subtitle"></div>
+      </div>
+      <button class="modal-close" onclick="closeBackupModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-source-select">
+        <div class="source-label">Backup type</div>
+        <div class="source-options" id="backup-modal-options">
+          <div class="source-opt selected" data-btype="pbs" onclick="selectBackupType(this)">
+            <div class="source-opt-icon">💾</div>
+            <div class="source-opt-name">PBS only</div>
+            <div class="source-opt-desc">local · minutes</div>
+          </div>
+          <div class="source-opt" data-btype="pbs+restic" onclick="selectBackupType(this)">
+            <div class="source-opt-icon">💾☁</div>
+            <div class="source-opt-name">PBS + Cloud</div>
+            <div class="source-opt-desc">local + restic · longer</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeBackupModal()">Cancel</button>
+      <button class="btn btn-primary" id="backup-confirm-btn" onclick="confirmBackup()">Backup now</button>
+    </div>
+  </div>
+</div>
+
 <!-- Progress Modal -->
 <div class="modal-overlay" id="job-modal">
   <div class="modal wide">
@@ -1266,6 +1300,40 @@ function reopenJobModal(vmid) {
       payload: JSON.stringify({ op_id: entry.jobId })
     }));
   }
+}
+
+// ─────────────────────────────────────────────
+// Backup now modal
+// ─────────────────────────────────────────────
+let _backupModalState = {};
+
+function openBackupModal(vmid, type, name) {
+  _backupModalState = { vmid, type, name };
+  document.getElementById('backup-modal-subtitle').textContent = name;
+  // Reset to PBS-only selection
+  document.querySelectorAll('#backup-modal-options .source-opt')
+    .forEach((el, i) => el.classList.toggle('selected', i === 0));
+  document.getElementById('backup-modal').classList.add('open');
+}
+
+function selectBackupType(el) {
+  el.closest('.source-options').querySelectorAll('.source-opt')
+    .forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+}
+
+function closeBackupModal() {
+  document.getElementById('backup-modal').classList.remove('open');
+}
+
+async function confirmBackup() {
+  const { vmid, type } = _backupModalState;
+  const btype = document.querySelector('#backup-modal-options .source-opt.selected')?.dataset.btype ?? 'pbs';
+  const run_restic_after = btype === 'pbs+restic';
+  const title = run_restic_after ? 'PBS + Cloud Backup' : 'PBS Backup';
+  closeBackupModal();
+
+  MQTTBus.triggerAction('backup', { vmid, type, btype, run_restic_after }, title, vmid);
 }
 
 function closeJobModal() {
