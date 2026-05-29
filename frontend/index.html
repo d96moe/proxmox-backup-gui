@@ -2374,6 +2374,119 @@ async function submitChangePw() {
 // ─────────────────────────────────────────────
 // Global 401 → redirect to login
 // ─────────────────────────────────────────────
+
+// ─────────────────────────────────────────────
+// Card rendering helpers (called by MQTTBus._upsertCard)
+// ─────────────────────────────────────────────
+function locBadge(local, cloud) {
+  if (local && cloud) return `<div class="loc-badge both"><div class="loc-dot"></div>local + cloud</div>`;
+  if (local)          return `<div class="loc-badge local"><div class="loc-dot"></div>local</div>`;
+  if (cloud)          return `<div class="loc-badge cloud"><div class="loc-dot"></div>cloud</div>`;
+  return `<div class="loc-badge none"><div class="loc-dot"></div>none</div>`;
+}
+
+function itemLocBadge(item) {
+  const hasLocal = item.snapshots.some(s => s.local);
+  const hasCloud = item.snapshots.some(s => s.cloud);
+  return locBadge(hasLocal, hasCloud);
+}
+
+function iconClass(item) {
+  if (item.type === 'lxc') return 'lxc-default';
+  return 'vm-' + item.os;
+}
+
+function iconLabel(item) {
+  if (item.type === 'lxc') return 'LXC';
+  const map = { windows:'WIN', linux:'LNX', haos:'HA', macos:'OSX' };
+  return map[item.os] || 'VM';
+}
+
+function renderCard(item) {
+  const latestAge = item.snapshots[0]?.age ?? '—';
+  const snapCount = item.snapshots.length;
+  const typeLabel = item.type.toUpperCase();
+  const statusColor = item.status === 'running' ? 'var(--green)' : 'var(--muted)';
+  const hasLocalOnly = item.snapshots.some(s => s.local && !s.cloud);
+
+  const snapshotRows = snapCount === 0
+    ? `<div class="no-backups">No backups found</div>`
+    : item.snapshots.map(s => `
+        <div class="snapshot-row${s.partial ? ' snapshot-row--partial' : ''}" data-backup-time="${s.backup_time}">
+          <div class="snap-row-top">
+            <div><div class="snap-date">${s.partial ? '<span title="Incomplete backup (failed mid-way)" style="color:var(--danger,#e05252)">⚠ </span>' : ''}${s.date}</div><div class="snap-age">${s.age}${s.restic_short_id ? ` · <span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--muted)">${s.restic_short_id}</span>` : ''}${s.partial ? ' · <span style="color:var(--danger,#e05252);font-size:10px">incomplete</span>' : ''}</div></div>
+            <div class="snap-size">${s.size}</div>
+            <div class="snap-type">${s.incremental ? 'incremental' : 'full'}</div>
+            ${locBadge(s.local, s.cloud)}
+          </div>
+          <div class="snap-row-bottom">
+            ${s.local && !s.cloud ? `<button class="restore-btn" style="color:var(--accent);border-color:rgba(74,158,255,.3)" onclick="event.stopPropagation();triggerResticBackup(${item.id},'${item.name.replace(/'/g,"\\'")}')">☁ sync</button>` : ''}
+            <button class="restore-btn"
+              data-vmid="${item.id}"
+              data-type="${item.type}"
+              data-vm="${item.name.replace(/"/g,'&quot;')}"
+              data-date="${(s.date||'').replace(/"/g,'&quot;')}"
+              data-size="${(s.size||'—').replace(/"/g,'&quot;')}"
+              data-backup-time="${s.backup_time}"
+              data-local="${s.local}"
+              data-cloud="${s.cloud}"
+              data-restic-id="${s.restic_id||''}"
+              onclick="const d=this.dataset;openRestoreModal(d)">
+              Restore →
+            </button>
+            <button class="delete-btn"
+              data-vmid="${item.id}"
+              data-type="${item.type}"
+              data-vm="${item.name.replace(/"/g,'&quot;')}"
+              data-date="${(s.date||'').replace(/"/g,'&quot;')}"
+              data-backup-time="${s.backup_time}"
+              data-local="${s.local}"
+              data-cloud="${s.cloud}"
+              data-restic-id="${s.restic_id||''}"
+              onclick="const d=this.dataset;openDeleteModal(d)">
+              ✕ Delete
+            </button>
+          </div>
+        </div>`).join('');
+
+  return `
+    <div class="vm-card">
+      <div class="vm-header" onclick="toggleSnaps(this)">
+        <div class="vm-icon ${iconClass(item)}">${iconLabel(item)}</div>
+        <div class="vm-info">
+          <div class="vm-name">
+            ${item.name}
+            <span style="color:var(--muted);font-weight:300;font-size:11px">
+              · ${typeLabel} ${item.id}
+            </span>
+            <span style="color:${statusColor};font-size:10px;margin-left:4px">●</span>
+          </div>
+          <div class="vm-meta">
+            ${item.template ? '<span class="template-badge">TMPL</span> · ' : ''}${snapCount} snapshot${snapCount !== 1 ? 's' : ''} · latest ${latestAge}
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px">
+          ${itemLocBadge(item)}
+          <span id="vm-job-${item.id}" style="display:none" onclick="event.stopPropagation();reopenJobModal(${item.id})"></span>
+          ${hasLocalOnly ? `<button class="backup-btn" onclick="event.stopPropagation();triggerResticBackup(${item.id},'${item.name}')">☁ sync</button>` : ''}
+          ${item.in_pve ? `<button class="backup-btn" data-vmid="${item.id}" onclick="event.stopPropagation();openBackupModal(${item.id},'${item.type}','${item.name.replace(/'/g,"\\'")}')">Backup now</button>` : ''}
+          ${item.snapshots.some(s => s.local) ? `<button class="backup-btn" style="color:var(--red);border-color:rgba(240,82,82,.3)" onclick="event.stopPropagation();openDeleteAllModal(${item.id},'${item.type}','${item.name.replace(/'/g,"\\'")}')">✕ Del all</button>` : ''}
+        </div>
+        <button class="expand-btn" onclick="event.stopPropagation();toggleSnaps(this.closest('.vm-header'))">▾</button>
+      </div>
+      <div class="snapshots">
+        <div class="snapshot-header-row">
+          <span class="col-label">Date</span>
+          <span class="col-label" title="Source VM/LXC disk size — not the on-disk footprint after deduplication" style="cursor:help;border-bottom:1px dotted var(--muted)">VM size</span>
+          <span class="col-label">Type</span>
+          <span class="col-label">Location</span>
+          <span class="col-label"></span>
+        </div>
+        ${snapshotRows}
+      </div>
+    </div>`;
+}
+
 // MQTT bus — stateful, data-driven
 //
 // Agent publishes retained state per VM:
