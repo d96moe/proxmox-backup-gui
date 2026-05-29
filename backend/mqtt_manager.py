@@ -14,6 +14,46 @@ WS_LOCK = threading.Lock()
 
 _global_client = None
 
+def _on_connect(prefix):
+    def callback(c, _u, _f, rc):
+        if rc == 0:
+            c.subscribe(f"{prefix}/#", qos=1)
+            log.info("MQTT Global Client connected and subscribed to %s/#", prefix)
+        else:
+            log.error("MQTT Global Client failed to connect, rc=%s", rc)
+    return callback
+
+def _on_message(c, _u, msg):
+    try:
+        payload = msg.payload.decode("utf-8", errors="replace")
+    except Exception:
+        payload = ""
+
+    # Update Cache
+    if msg.retain:
+        with MQTT_CACHE_LOCK:
+            if payload:
+                try:
+                    MQTT_CACHE[msg.topic] = json.loads(payload)
+                except json.JSONDecodeError:
+                    MQTT_CACHE[msg.topic] = payload
+            else:
+                MQTT_CACHE.pop(msg.topic, None)
+    elif not payload:
+        with MQTT_CACHE_LOCK:
+            MQTT_CACHE.pop(msg.topic, None)
+
+    # Broadcast to WebSockets
+    with WS_LOCK:
+        dead = set()
+        for q in WS_CLIENTS:
+            try:
+                q.put_nowait({"topic": msg.topic, "payload": payload})
+            except queue.Full:
+                dead.add(q)
+        for q in dead:
+            WS_CLIENTS.discard(q)
+
 def init_mqtt(host: str, port: int, user: str, password: str, prefix: str):
     global _global_client
     if _global_client is not None:
@@ -28,46 +68,8 @@ def init_mqtt(host: str, port: int, user: str, password: str, prefix: str):
     if user and password:
         client.username_pw_set(user, password)
 
-    def on_connect(c, _u, _f, rc):
-        if rc == 0:
-            c.subscribe(f"{prefix}/#", qos=1)
-            log.info("MQTT Global Client connected and subscribed to %s/#", prefix)
-        else:
-            log.error("MQTT Global Client failed to connect, rc=%s", rc)
-
-    def on_message(c, _u, msg):
-        try:
-            payload = msg.payload.decode("utf-8", errors="replace")
-        except Exception:
-            payload = ""
-
-        # Update Cache
-        if msg.retain:
-            with MQTT_CACHE_LOCK:
-                if payload:
-                    try:
-                        MQTT_CACHE[msg.topic] = json.loads(payload)
-                    except json.JSONDecodeError:
-                        MQTT_CACHE[msg.topic] = payload
-                else:
-                    MQTT_CACHE.pop(msg.topic, None)
-        elif not payload:
-            with MQTT_CACHE_LOCK:
-                MQTT_CACHE.pop(msg.topic, None)
-
-        # Broadcast to WebSockets
-        with WS_LOCK:
-            dead = set()
-            for q in WS_CLIENTS:
-                try:
-                    q.put_nowait({"topic": msg.topic, "payload": payload})
-                except queue.Full:
-                    dead.add(q)
-            for q in dead:
-                WS_CLIENTS.discard(q)
-
-    client.on_connect = on_connect
-    client.on_message = on_message
+    client.on_connect = _on_connect(prefix)
+    client.on_message = _on_message
     
     try:
         client.connect(host, port, keepalive=30)
