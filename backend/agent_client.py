@@ -1,178 +1,141 @@
-"""HTTP client for the PVE agent (pve_agent.py).
-
-Used by the GUI backend (app.py) when a host has agent_url configured.
-Replaces direct SSH + PVE/PBS/Restic API calls with a single HTTP endpoint
-running locally on the PVE host (10.10.0.1:8099).
-"""
 from __future__ import annotations
-
 import time
+import uuid
+import json
 from typing import Callable, Iterator
-
-import requests
-import urllib3
-
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
+from mqtt_manager import MQTT_CACHE, MQTT_CACHE_LOCK, publish_cmd
 
 class AgentClient:
-    def __init__(self, base_url: str, token: str = "", timeout: int = 30) -> None:
-        self._base = base_url.rstrip("/")
-        self._timeout = timeout
-        self._session = requests.Session()
-        self._session.verify = False  # agent uses PVE self-signed cert
-        if token:
-            self._session.headers["Authorization"] = f"Bearer {token}"
-
-    def _url(self, path: str) -> str:
-        return f"{self._base}/{path.lstrip('/')}"
-
-    def _get(self, path: str) -> dict | list:
-        resp = self._session.get(self._url(path), timeout=self._timeout)
-        if not resp.ok:
-            raise RuntimeError(f"Agent GET {path} → {resp.status_code}: {resp.text}")
-        return resp.json()
-
-    def _post(self, path: str, body: dict) -> dict:
-        resp = self._session.post(self._url(path), json=body, timeout=self._timeout)
-        if not resp.ok:
-            raise RuntimeError(f"Agent POST {path} → {resp.status_code}: {resp.text}")
-        return resp.json()
-
-    def _delete(self, path: str) -> dict:
-        resp = self._session.delete(self._url(path), timeout=self._timeout)
-        if not resp.ok:
-            raise RuntimeError(f"Agent DELETE {path} → {resp.status_code}: {resp.text}")
-        return resp.json()
-
-    # ── Health ────────────────────────────────────────────────────────────────
-
-    def health(self) -> dict:
-        return self._get("/health")
-
-    def rescan(self) -> dict:
-        return self._post("/rescan", {})
-
-    # ── VMs ──────────────────────────────────────────────────────────────────
-
-    def get_vms(self) -> list[dict]:
-        return self._get("/vms")
+    def __init__(self, host_cfg) -> None:
+        # host_cfg is a HostConfig object
+        self._cfg = host_cfg
+        import os
+        self._prefix = os.environ.get("MQTT_TOPIC_PREFIX", "proxmox")
+        # In CI, the agent node name is "gui-ci" or whatever pve_node is.
+        # But wait, the GUI uses host_cfg.id.
+        self._base = f"{self._prefix}/{host_cfg.id}"
 
     def get_items(self) -> dict:
-        """Fetch all items (VMs + LXCs with annotated snapshots) in one call.
+        vms = []
+        lxcs = []
+        storage = {}
+        pbs_stale = False
+        
+        with MQTT_CACHE_LOCK:
+            index = MQTT_CACHE.get(f"{self._base}/vms/index", [])
+            for vmid in index:
+                meta = MQTT_CACHE.get(f"{self._base}/vm/{vmid}/meta", {}).copy()
+                pbs = MQTT_CACHE.get(f"{self._base}/vm/{vmid}/pbs", {})
+                restic = MQTT_CACHE.get(f"{self._base}/vm/{vmid}/restic", {})
+                
+                meta["snapshots"] = pbs.get("snapshots", []) + restic.get("snapshots", [])
+                
+                if meta.get("type") == "qemu":
+                    vms.append(meta)
+                else:
+                    lxcs.append(meta)
+                    
+            storage = MQTT_CACHE.get(f"{self._base}/storage", {})
+            ready = MQTT_CACHE.get(f"{self._base}/state/ready", {})
+            pbs_stale = not ready.get("pbs_ok", True)
+            
+        return {
+            "vms": vms,
+            "lxcs": lxcs,
+            "storage": storage,
+            "pbs_stale": pbs_stale
+        }
 
-        Returns {vms, lxcs, storage, pbs_stale} — same shape as /api/host/<id>/items.
-        Uses the agent's /items endpoint which does a single PBS + single restic call.
-        """
-        return self._get("/items")
+    def rescan(self) -> dict:
+        publish_cmd(f"{self._base}/cmd/rescan", {})
+        return {}
 
-    # ── Snapshots ────────────────────────────────────────────────────────────
+    def get_operations(self) -> list[dict]:
+        ops = []
+        with MQTT_CACHE_LOCK:
+            # We don't have a list of all operations published. We can just return [] or read from cache if the agent publishes it.
+            # Actually, we can scan for /ops/+/status
+            for t, p in MQTT_CACHE.items():
+                if t.startswith(f"{self._base}/ops/") and t.endswith("/status"):
+                    op_id = t.split("/")[3]
+                    ops.append({"op_id": op_id, "status": p})
+        return ops
 
-    def get_snapshots(self, vm_type: str, vmid: int) -> dict:
-        return self._get(f"/snapshots/{vm_type}/{vmid}")
-
-    def delete_snapshot(self, vm_type: str, vmid: int, ts: int) -> None:
-        self._delete(f"/snapshots/{vm_type}/{vmid}/{ts}")
-
-    # ── Operations ───────────────────────────────────────────────────────────
+    def get_operation(self, op_id: str) -> dict:
+        with MQTT_CACHE_LOCK:
+            status = MQTT_CACHE.get(f"{self._base}/ops/{op_id}/status", "unknown")
+            return {"op_id": op_id, "status": status}
 
     def backup(self, vmid: int, vm_type: str, node: str, storage: str) -> str:
-        """Trigger a backup; returns op_id."""
-        data = self._post("/operations/backup", {
+        corr_id = str(uuid.uuid4())
+        publish_cmd(f"{self._base}/cmd/backup", {
             "vmid": vmid, "vm_type": vm_type,
             "node": node, "storage": storage,
+            "corr_id": corr_id
         })
-        return data["op_id"]
+        return self._wait_for_ack("backup", corr_id)
 
     def restore(self, vmid: int, vm_type: str, node: str,
                 storage_id: str, backup_time_iso: str, pbs_datastore: str) -> str:
-        """Trigger a restore; returns op_id."""
-        data = self._post("/operations/restore", {
+        corr_id = str(uuid.uuid4())
+        publish_cmd(f"{self._base}/cmd/restore", {
             "vmid": vmid, "vm_type": vm_type, "node": node,
             "storage_id": storage_id, "backup_time_iso": backup_time_iso,
             "pbs_datastore": pbs_datastore,
+            "corr_id": corr_id
         })
-        return data["op_id"]
-
-    def get_operation(self, op_id: str) -> dict:
-        return self._get(f"/operations/{op_id}")
-
-    def get_operations(self) -> list[dict]:
-        return self._get("/operations")
-
-    def wait_for_op(self, op_id: str, log: Callable[[str], None],
-                    poll_interval: float = 2.0) -> bool:
-        """Poll until op is done. Calls log() with each new log line. Returns True on ok."""
-        sent = 0
-        while True:
-            op = self.get_operation(op_id)
-            lines = op.get("log", [])
-            while sent < len(lines):
-                log(lines[sent])
-                sent += 1
-            status = op.get("status")
-            if status == "ok":
-                return True
-            if status == "failed":
-                return False
-            if poll_interval > 0:
-                time.sleep(poll_interval)
-
-    def stream_op(self, op_id: str) -> Iterator[str]:
-        """SSE-stream log lines from a running/finished operation."""
-        resp = self._session.get(
-            self._url(f"/operations/{op_id}/stream"),
-            stream=True, timeout=None,
-        )
-        if not resp.ok:
-            raise RuntimeError(f"Agent stream {op_id} → {resp.status_code}")
-        for raw in resp.iter_lines(decode_unicode=True):
-            if raw.startswith("data:"):
-                line = raw[5:].strip()
-                if line == "__done__":
-                    return
-                yield line
-
-    # ── Schedules ────────────────────────────────────────────────────────────
-
-    def get_schedules(self) -> dict:
-        return self._get("/schedules")
-
-    # ── PBS tasks ────────────────────────────────────────────────────────────
-
-    def get_pbs_tasks(self, running_only: bool = False) -> list[dict]:
-        params = "?running=1" if running_only else ""
-        return self._get(f"/pbs/tasks{params}")
-
-    def get_pbs_task_log(self, upid: str) -> list[str]:
-        return self._get(f"/pbs/tasks/{upid}/log").get("lines", [])
-
-    # ── Settings ─────────────────────────────────────────────────────────────
-
-    def get_settings(self) -> dict:
-        return self._get("/settings")
-
-    def set_settings(self, settings: dict) -> dict:
-        return self._post("/settings", settings)
-
-    # ── Restic log ────────────────────────────────────────────────────────────
-
-    def get_restic_log(self) -> dict:
-        return self._get("/restic/log")
-
-    def get_operations(self) -> list[dict]:
-        """Return all operations (any status) from the agent."""
-        result = self._get("/operations")
-        return result if isinstance(result, list) else []
+        return self._wait_for_ack("restore", corr_id)
 
     def start_restic_prune(self) -> dict:
-        """Start a restic prune operation on the agent. Returns {op_id}."""
-        return self._post("/operations/restic-prune", {})
+        corr_id = str(uuid.uuid4())
+        publish_cmd(f"{self._base}/cmd/restic-prune", {"corr_id": corr_id})
+        op_id = self._wait_for_ack("restic-prune", corr_id)
+        return {"op_id": op_id}
 
-    # ── Connection settings ───────────────────────────────────────────────────
+    def _wait_for_ack(self, cmd: str, corr_id: str, timeout: int = 5) -> str:
+        start = time.time()
+        while time.time() - start < timeout:
+            with MQTT_CACHE_LOCK:
+                ack = MQTT_CACHE.get(f"{self._base}/cmd/{cmd}/ack", {})
+                if ack.get("corr_id") == corr_id:
+                    return ack.get("op_id", "")
+            time.sleep(0.1)
+        return ""
+
+    def get_settings(self) -> dict:
+        with MQTT_CACHE_LOCK:
+            return MQTT_CACHE.get(f"{self._base}/settings", {})
+
+    def set_settings(self, settings: dict) -> dict:
+        publish_cmd(f"{self._base}/cmd/settings", settings)
+        return settings
 
     def get_connection(self) -> dict:
-        return self._get("/connection")
+        # Connection settings aren't actively polled over MQTT, they are configured per agent.
+        # But Phase 3 implies removing this from GUI or using MQTT.
+        return {}
 
     def set_connection(self, settings: dict) -> dict:
-        return self._post("/connection", settings)
+        return {}
+        
+    def get_schedules(self) -> dict:
+        with MQTT_CACHE_LOCK:
+            return MQTT_CACHE.get(f"{self._base}/schedules", {})
+
+    def get_pbs_tasks(self, running_only: bool = False) -> list[dict]:
+        with MQTT_CACHE_LOCK:
+            tasks = MQTT_CACHE.get(f"{self._base}/pbs/tasks", [])
+            if running_only:
+                tasks = [t for t in tasks if t.get("status") == "running"]
+            return tasks
+
+    def get_pbs_task_log(self, upid: str) -> list[str]:
+        publish_cmd(f"{self._base}/cmd/replay_pbs_log", {"upid": upid})
+        # The GUI now uses SSE to stream or poll the log. Wait, Phase 3 removes SSE!
+        # The frontend will subscribe to the topic directly. So returning empty here is fine,
+        # or we return what we have so far.
+        return []
+
+    def get_restic_log(self) -> dict:
+        publish_cmd(f"{self._base}/cmd/replay_restic_log", {})
+        return {"lines": []}

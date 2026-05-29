@@ -21,7 +21,7 @@ from flask import Flask, Response, jsonify, send_from_directory, abort, request,
 from flask_cors import CORS
 from flask_login import login_user, logout_user, login_required, current_user
 from flask_sock import Sock
-import paho.mqtt.client as paho_mqtt
+from mqtt_manager import init_mqtt, WS_CLIENTS, WS_LOCK
 
 from config import load_hosts, save_hosts, HostConfig
 from pbs_client import PBSClient
@@ -296,80 +296,44 @@ def api_delete_user(username: str):
 
 @sock.route('/mqtt-ws')
 def mqtt_proxy(ws):
-    """WebSocket proxy: browser ↔ Flask ↔ Mosquitto (TCP).
-
-    Browser never connects to Mosquitto directly — all MQTT traffic flows
-    through this endpoint on the same host:port as the GUI.  Auth is checked
-    on the WebSocket upgrade request (same session cookie as the UI).
-
-    Wire protocol (both directions): newline-delimited JSON objects.
-      broker → browser: {"topic": "proxmox/home/vm/301/pbs", "payload": "{…}"}
-      browser → broker: {"topic": "proxmox/home/cmd/backup/pbs", "payload": "{…}"}
-      browser → proxy:  {"type": "replay", "prefix": "proxmox/home"}
-      proxy → browser:  {"type": "ping"}   (keepalive every 25 s)
-      browser → proxy:  {"type": "pong"}
-    """
     if not current_user.is_authenticated:
         return
 
-    msg_q    = queue.Queue(maxsize=2000)
-    retained = {}          # topic → payload str (for replay on host-switch)
-    stop_evt = threading.Event()
+    msg_q = queue.Queue(maxsize=2000)
+    
+    with WS_LOCK:
+        WS_CLIENTS.add(msg_q)
 
-    def _on_connect(client, _u, _f, rc):
-        if rc == 0:
-            client.subscribe(f"{_MQTT_PREFIX}/+/#", qos=1)
-
-    def _on_message(client, _u, msg):
-        payload = msg.payload.decode("utf-8", errors="replace")
-        if msg.retain:
-            if payload:
-                retained[msg.topic] = payload
-            else:
-                # Empty payload + retain=True = broker clearing the retained message.
-                retained.pop(msg.topic, None)
-        elif not payload:
-            # Empty payload with retain=False: broker forwarding a retained-clear
-            # publish to existing subscribers.  Remove from our cache too.
-            retained.pop(msg.topic, None)
-        try:
-            msg_q.put_nowait({"topic": msg.topic, "payload": payload})
-        except queue.Full:
-            pass
-
-    _cbv = getattr(paho_mqtt, "CallbackAPIVersion", None)
-    client = paho_mqtt.Client(
-        *([_cbv.VERSION1] if _cbv else []),
-        client_id=f"gui-ws-{id(ws)}",
-        protocol=paho_mqtt.MQTTv311,
-    )
-    client.on_connect = _on_connect
-    client.on_message = _on_message
-    try:
-        client.connect(_MQTT_HOST, _MQTT_PORT, keepalive=30)
-    except Exception as exc:
-        ws.send(json.dumps({"type": "error", "message": f"MQTT broker unavailable: {exc}"}))
-        return
-    client.loop_start()
-
-    def _sender():
-        while not stop_evt.is_set():
+    # Send initial replay
+    from mqtt_manager import MQTT_CACHE, MQTT_CACHE_LOCK
+    with MQTT_CACHE_LOCK:
+        for topic, payload in MQTT_CACHE.items():
             try:
-                item = msg_q.get(timeout=25)
-                ws.send(json.dumps(item))
-            except queue.Empty:
+                msg_q.put_nowait({"topic": topic, "payload": payload})
+            except queue.Full:
+                break
+
+    try:
+        # Sender thread
+        stop_evt = threading.Event()
+        def _sender():
+            while not stop_evt.is_set():
                 try:
-                    ws.send(json.dumps({"type": "ping"}))
+                    item = msg_q.get(timeout=25)
+                    ws.send(json.dumps(item))
+                except queue.Empty:
+                    try:
+                        ws.send(json.dumps({"type": "ping"}))
+                    except Exception:
+                        stop_evt.set()
+                        break
                 except Exception:
                     stop_evt.set()
                     break
-            except Exception:
-                stop_evt.set()
-                break
 
-    threading.Thread(target=_sender, daemon=True).start()
+        threading.Thread(target=_sender, daemon=True).start()
 
-    try:
+        # Receiver loop
         while not stop_evt.is_set():
             data = ws.receive(timeout=60)
             if data is None:
@@ -379,23 +343,15 @@ def mqtt_proxy(ws):
                 mtype = msg.get("type")
                 if mtype == "pong":
                     continue
-                if mtype == "replay":
-                    # Re-send all retained messages for the requested host prefix
-                    prefix = msg.get("prefix", "")
-                    for t, p in list(retained.items()):
-                        if not prefix or t.startswith(prefix):
-                            try:
-                                msg_q.put_nowait({"topic": t, "payload": p})
-                            except queue.Full:
-                                break
                 elif msg.get("topic"):
-                    client.publish(msg["topic"], msg.get("payload", ""), qos=1)
-            except (json.JSONDecodeError, Exception):
+                    from mqtt_manager import publish_cmd
+                    publish_cmd(msg["topic"], msg.get("payload", ""))
+            except Exception:
                 pass
     finally:
         stop_evt.set()
-        client.loop_stop()
-        client.disconnect()
+        with WS_LOCK:
+            WS_CLIENTS.discard(msg_q)
 
 
 @app.get("/api/hosts")
@@ -452,7 +408,7 @@ def get_items(host_id: str):
     if not host:
         abort(404, f"Host '{host_id}' not configured")
 
-    if host.agent_url:
+    if True:
         return _get_items_via_agent(host, host_id)
 
     def fetch():
@@ -819,7 +775,7 @@ def _get_items_via_agent(host: HostConfig, host_id: str):
     cloud-only entries (restic snapshots where the PBS copy has been pruned).
     """
     try:
-        agent = AgentClient(host.agent_url, token=host.agent_token)
+        agent = AgentClient(host)
         data = agent.get_items()
     except Exception as e:
         abort(500, f"Agent unavailable ({e})")
@@ -834,9 +790,9 @@ def trigger_rescan(host_id: str):
     host = HOSTS.get(host_id)
     if not host:
         abort(404)
-    if host.agent_url:
+    if True:
         try:
-            AgentClient(host.agent_url, token=host.agent_token).rescan()
+            AgentClient(host).rescan()
         except Exception:
             pass
     return jsonify({"status": "ok"})
@@ -850,9 +806,9 @@ def get_schedules(host_id: str):
     if not host:
         abort(404)
 
-    if host.agent_url:
+    if True:
         try:
-            return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_schedules())
+            return jsonify(AgentClient(host).get_schedules())
         except Exception:
             pass
         return jsonify({
@@ -902,7 +858,7 @@ def get_pbs_tasks(host_id: str):
     if not host.agent_url:
         abort(404)
     running_only = request.args.get("running") == "1"
-    return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_pbs_tasks(running_only=running_only))
+    return jsonify(AgentClient(host).get_pbs_tasks(running_only=running_only))
 
 
 @app.get("/api/host/<host_id>/pbs/tasks/<path:upid>/log")
@@ -913,7 +869,7 @@ def get_pbs_task_log(host_id: str, upid: str):
         abort(404)
     if not host.agent_url:
         abort(404)
-    return jsonify({"lines": AgentClient(host.agent_url, token=host.agent_token).get_pbs_task_log(upid)})
+    return jsonify({"lines": AgentClient(host).get_pbs_task_log(upid)})
 
 
 @app.get("/api/host/<host_id>/pbs/tasks/<path:upid>/stream")
@@ -948,7 +904,7 @@ def get_host_settings(host_id: str):
         abort(404)
     if not host.agent_url:
         abort(404)
-    return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_settings())
+    return jsonify(AgentClient(host).get_settings())
 
 
 @app.post("/api/host/<host_id>/settings")
@@ -962,7 +918,7 @@ def post_host_settings(host_id: str):
         abort(404)
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(AgentClient(host.agent_url, token=host.agent_token).set_settings(body))
+        return jsonify(AgentClient(host).set_settings(body))
     except RuntimeError as exc:
         import re as _re
         m = _re.search(r"→ (\d+):", str(exc))
@@ -980,7 +936,7 @@ def get_host_connection(host_id: str):
         abort(404)
     if not host.agent_url:
         abort(404)
-    return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_connection())
+    return jsonify(AgentClient(host).get_connection())
 
 
 @app.post("/api/host/<host_id>/connection")
@@ -994,7 +950,7 @@ def post_host_connection(host_id: str):
         abort(404)
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(AgentClient(host.agent_url, token=host.agent_token).set_connection(body))
+        return jsonify(AgentClient(host).set_connection(body))
     except RuntimeError as exc:
         import re as _re
         m = _re.search(r"→ (\d+):", str(exc))
@@ -1047,7 +1003,7 @@ def start_restic_prune(host_id: str):
     if not host.agent_url:
         return jsonify({"error": "no agent configured for this host"}), 400
     try:
-        result = AgentClient(host.agent_url, token=host.agent_token).start_restic_prune()
+        result = AgentClient(host).start_restic_prune()
         return jsonify(result), 202
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -1061,7 +1017,7 @@ def get_restic_log(host_id: str):
         abort(404)
     if not host.agent_url:
         abort(404)
-    return jsonify(AgentClient(host.agent_url, token=host.agent_token).get_restic_log())
+    return jsonify(AgentClient(host).get_restic_log())
 
 
 @app.get("/api/host/<host_id>/restic/log/stream")
@@ -1076,7 +1032,7 @@ def stream_restic_log(host_id: str):
     import time as _t
 
     def generate():
-        client = AgentClient(host.agent_url, token=host.agent_token)
+        client = AgentClient(host)
         sent = 0
         while True:
             try:
@@ -1120,7 +1076,7 @@ def backup_pbs(host_id: str):
     # Agent path — delegate backup to pve_agent running on PVE host.
     # run_restic_after is not supported via agent (agent does not run restic).
     if host.agent_url and not run_restic_after:
-        agent = AgentClient(host.agent_url, token=host.agent_token)
+        agent = AgentClient(host)
         label = f"PBS backup {vm_type}/{vmid}"
         job_id = create_job(label)
 
@@ -1212,7 +1168,7 @@ def restore(host_id: str):
     if host.agent_url and source == "local":
         if not backup_time:
             abort(400, "backup_time required for local restore")
-        agent = AgentClient(host.agent_url, token=host.agent_token)
+        agent = AgentClient(host)
         job_id = create_job(f"Restore {vm_type}/{vmid} from local")
         backup_time_iso = datetime.fromtimestamp(int(backup_time), tz=timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%SZ"
@@ -1623,9 +1579,9 @@ def get_job_status(job_id: str):
     # Fall back: MQTT-triggered operations are tracked on the agent, not in Flask jobs.
     # Normalize agent op format → Flask job format so _pollJob works unchanged.
     for host in HOSTS.values():
-        if host.agent_url:
+        if True:
             try:
-                op = AgentClient(host.agent_url, token=host.agent_token).get_operation(job_id)
+                op = AgentClient(host).get_operation(job_id)
                 if op:
                     return jsonify({
                         "id":      job_id,
@@ -1652,7 +1608,7 @@ def get_active_jobs_endpoint():
         if not host.agent_url:
             continue
         try:
-            ops = AgentClient(host.agent_url, token=host.agent_token).get_operations()
+            ops = AgentClient(host).get_operations()
             for op in ops:
                 if op.get("status") == "running":
                     agent_ops.append({
@@ -1846,6 +1802,12 @@ def _human_age(seconds: float) -> str:
     d = s // 86400
     return f"{d} day{'s' if d > 1 else ''} ago"
 
+
+
+first_host = next(iter(HOSTS.values())) if HOSTS else None
+mqtt_user = first_host.mqtt_user if first_host else ""
+mqtt_pass = first_host.mqtt_password if first_host else ""
+init_mqtt(_MQTT_HOST, _MQTT_PORT, mqtt_user, mqtt_pass, _MQTT_PREFIX)
 
 if __name__ == "__main__":
     import os

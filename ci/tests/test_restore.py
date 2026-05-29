@@ -1581,11 +1581,11 @@ def test_partial_snapshot_cleaned_up_after_removal(host_id, partial_snapshot):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _host_has_agent(host_id: str) -> bool:
-    """Return True if the host has an agent_url configured."""
+    """Return True if the host has an mqtt_user configured."""
     hosts = _get("/api/hosts")
     for h in hosts:
         if h["id"] == host_id:
-            return bool(h.get("agent_url"))
+            return bool(h.get("mqtt_user"))
     return False
 
 

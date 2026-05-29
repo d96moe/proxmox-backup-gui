@@ -33,8 +33,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 
-from flask import Flask, Response, jsonify, request, stream_with_context
-
 # Re-use existing client code — agent runs on PVE host alongside them.
 from pbs_client import PBSClient
 from pve_client import PVEClient
@@ -42,16 +40,7 @@ from pve_client import PVEClient
 VERSION = "0.1.0"
 _start_time = time.monotonic()
 
-app = Flask(__name__)
 log = logging.getLogger(__name__)
-
-
-@app.after_request
-def no_cache(response: "Response") -> "Response":
-    # Streaming responses set their own Cache-Control; leave them alone.
-    if not response.is_streamed:
-        response.headers["Cache-Control"] = "no-store"
-    return response
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -177,6 +166,24 @@ class MQTTPublisher:
         elif cmd == "restore-datastore":
             threading.Thread(target=self._handle_cmd_restore_datastore, args=(body,),
                              daemon=True, name="mqtt-cmd-restore-datastore").start()
+        elif cmd == "replay_op_log":
+            threading.Thread(target=self._handle_cmd_replay_op_log, args=(body,),
+                             daemon=True, name="mqtt-cmd-replay-op-log").start()
+        elif cmd == "replay_pbs_log":
+            threading.Thread(target=self._handle_cmd_replay_pbs_log, args=(body,),
+                             daemon=True, name="mqtt-cmd-replay-pbs-log").start()
+        elif cmd == "replay_restic_log":
+            threading.Thread(target=self._handle_cmd_replay_restic_log, args=(body,),
+                             daemon=True, name="mqtt-cmd-replay-restic-log").start()
+        elif cmd == "replay_op_log":
+            threading.Thread(target=self._handle_cmd_replay_op_log, args=(body,),
+                             daemon=True, name="mqtt-cmd-replay-op-log").start()
+        elif cmd == "replay_pbs_log":
+            threading.Thread(target=self._handle_cmd_replay_pbs_log, args=(body,),
+                             daemon=True, name="mqtt-cmd-replay-pbs-log").start()
+        elif cmd == "replay_restic_log":
+            threading.Thread(target=self._handle_cmd_replay_restic_log, args=(body,),
+                             daemon=True, name="mqtt-cmd-replay-restic-log").start()
 
     def _ack(self, corr_id: str, op_id: str) -> None:
         """Publish job ACK so the browser can start polling the operation."""
@@ -396,6 +403,74 @@ class MQTTPublisher:
             res.restore_datastore(restic_id, op.append_log)
 
         _run_in_background(op, _do)
+
+    def _handle_cmd_replay_op_log(self, body: dict) -> None:
+        op_id = body.get("op_id")
+        if not op_id:
+            return
+        log.info("MQTT cmd/replay_op_log: op_id=%s", op_id)
+        op = _get_op(op_id)
+        if op is None:
+            self._client.publish(f"{self._base}/ops/{op_id}/log", "__done__", qos=0)
+            return
+        # Replay lines
+        for line in op.log:
+            self.publish_log(op.op_id, line)
+        if op.status in ("ok", "failed"):
+            self._client.publish(f"{self._base}/ops/{op_id}/log", "__done__", qos=0)
+
+    def _handle_cmd_replay_pbs_log(self, body: dict) -> None:
+        upid = body.get("upid")
+        if not upid:
+            return
+        log.info("MQTT cmd/replay_pbs_log: upid=%s", upid)
+        lines = _get_pbs_task_log(upid)
+        for line in lines:
+            self._client.publish(f"{self._base}/pbs/tasks/{upid}/log", json.dumps(line), qos=0)
+        self._client.publish(f"{self._base}/pbs/tasks/{upid}/log", json.dumps({"done": True}), qos=0)
+
+    def _handle_cmd_replay_restic_log(self, body: dict) -> None:
+        log.info("MQTT cmd/replay_restic_log")
+        res = LocalResticClient(_cfg)
+        lines = res.get_log_lines(tail=10000)
+        for line in lines:
+            self._client.publish(f"{self._base}/restic/log", line, qos=0)
+        if not res.is_running():
+            self._client.publish(f"{self._base}/restic/log", "__done__", qos=0)
+
+    def _handle_cmd_replay_op_log(self, body: dict) -> None:
+        op_id = body.get("op_id")
+        if not op_id:
+            return
+        log.info("MQTT cmd/replay_op_log: op_id=%s", op_id)
+        op = _get_op(op_id)
+        if op is None:
+            self._client.publish(f"{self._base}/ops/{op_id}/log", "__done__", qos=0)
+            return
+        # Replay lines
+        for line in op.log:
+            self.publish_log(op.op_id, line)
+        if op.status in ("ok", "failed"):
+            self._client.publish(f"{self._base}/ops/{op_id}/log", "__done__", qos=0)
+
+    def _handle_cmd_replay_pbs_log(self, body: dict) -> None:
+        upid = body.get("upid")
+        if not upid:
+            return
+        log.info("MQTT cmd/replay_pbs_log: upid=%s", upid)
+        lines = _get_pbs_task_log(upid)
+        for line in lines:
+            self._client.publish(f"{self._base}/pbs/tasks/{upid}/log", json.dumps(line), qos=0)
+        self._client.publish(f"{self._base}/pbs/tasks/{upid}/log", json.dumps({"done": True}), qos=0)
+
+    def _handle_cmd_replay_restic_log(self, body: dict) -> None:
+        log.info("MQTT cmd/replay_restic_log")
+        res = LocalResticClient(_cfg)
+        lines = res.get_log_lines(tail=10000)
+        for line in lines:
+            self._client.publish(f"{self._base}/restic/log", line, qos=0)
+        if not res.is_running():
+            self._client.publish(f"{self._base}/restic/log", "__done__", qos=0)
 
     def setup_message_handler(self) -> None:
         self._client.on_message = self._on_message
@@ -2021,762 +2096,6 @@ def _get_pbs_task_log(upid: str) -> list[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Routes — health
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route("/health")
-def health():
-    return jsonify({
-        "status":  "ok",
-        "version": VERSION,
-        "uptime":  time.monotonic() - _start_time,
-    })
-
-
-@app.route("/rescan", methods=["POST"])
-def rescan():
-    if _poller:
-        _poller.rescan_now()
-    return jsonify({"status": "ok"})
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Routes — VMs
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route("/vms")
-def vms():
-    try:
-        pve = PVEClient(_host())
-        raw = pve.get_vms_and_lxcs()
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-
-    result = []
-    for vmid, info in raw.items():
-        result.append({"vmid": vmid, **info})
-    return jsonify(result)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Routes — items (full combined view: VMs + annotated snapshots + cloud-only)
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route("/items")
-def items():
-    """Return all VMs/LXCs with PBS snapshots annotated for cloud coverage.
-
-    Single call replaces N calls to /snapshots/<type>/<vmid> — one PBS query
-    and one restic query total, then builds the full items structure including
-    cloud-only entries (restic snapshots where the PBS copy has been pruned).
-
-    Returns: {vms: [...], lxcs: [...], storage: {}, pbs_stale: false}
-    """
-    try:
-        pve = PVEClient(_host())
-        pve_meta = pve.get_vms_and_lxcs()
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-
-    # ── PBS: all snapshot groups ──────────────────────────────────────────────
-    pbs_groups: list[dict] = []
-    try:
-        pbs = PBSClient(_host())
-        pbs_groups = pbs.get_snapshots()
-    except Exception:
-        pass  # PBS down — restic data may still work
-
-    # Build snap_map: vmid → [snap_dict]
-    snap_map: dict[int, list] = {}
-    pbs_type_map: dict[int, str] = {}  # vmid → "ct"/"vm"
-    for group in pbs_groups:
-        vid = int(group["pve_id"]) if str(group["pve_id"]).isdigit() else group["pve_id"]
-        btype = group.get("backup_type", "vm")
-        pbs_type_map[vid] = btype
-        for snap in group.get("snapshots", []):
-            snap["local"] = True
-            snap.setdefault("cloud", False)
-        snap_map.setdefault(vid, []).extend(group.get("snapshots", []))
-
-    # ── Restic: all snapshots in one call ─────────────────────────────────────
-    restic_flat: list[dict] = []
-    if _cfg and _cfg.restic_repo:
-        try:
-            res = LocalResticClient(_cfg)
-            restic_flat = res.get_snapshots_flat()  # newest first
-        except Exception:
-            pass
-
-    # Index: vmid → pbs_time → newest restic snap
-    res_by_vmid_pbstime: dict[int, dict[int, dict]] = {}
-    # Index: vmid → [restic snaps covering this vmid]
-    res_by_vmid: dict[int, list[dict]] = {}
-    for s in restic_flat:
-        for cov in s.get("covers", []):
-            vid = cov.get("vmid")
-            pt = cov.get("pbs_time")
-            if vid is None:
-                continue
-            res_by_vmid.setdefault(vid, []).append(s)
-            if pt is not None:
-                # setdefault: first wins (newest-first list → newest wins)
-                res_by_vmid_pbstime.setdefault(vid, {}).setdefault(pt, s)
-
-    # ── Annotate PBS snapshots with cloud coverage ────────────────────────────
-    pbs_times_per_vm: dict[int, set[int]] = {}
-    for vid, snaps in snap_map.items():
-        local_times: set[int] = set()
-        for snap in snaps:
-            bt = snap.get("backup_time")
-            local_times.add(bt)
-            rs = res_by_vmid_pbstime.get(vid, {}).get(bt)
-            if rs:
-                snap["cloud"] = True
-                snap["restic_id"] = rs["id"]
-                snap["restic_short_id"] = rs.get("short_id", rs["id"][:8])
-        pbs_times_per_vm[vid] = local_times
-
-    # ── Cloud-only entries: restic covers a pbs_time no longer in PBS ─────────
-    added_cloud: set[tuple] = set()  # (vid, pbs_time)
-    now_ts = time.time()
-    for vid, r_snaps in res_by_vmid.items():
-        local_times = pbs_times_per_vm.get(vid, set())
-        for s in r_snaps:  # newest first
-            for cov in s.get("covers", []):
-                if cov.get("vmid") != vid:
-                    continue
-                pt = cov.get("pbs_time")
-                if pt is None or pt in local_times:
-                    continue
-                key = (vid, pt)
-                if key in added_cloud:
-                    continue
-                added_cloud.add(key)
-                dt = datetime.fromtimestamp(pt, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
-                snap_map.setdefault(vid, []).append({
-                    "backup_time": pt,
-                    "date": dt,
-                    "local": False,
-                    "cloud": True,
-                    "incremental": True,
-                    "size": "—",
-                    "restic_id": s["id"],
-                    "restic_short_id": s.get("short_id", s["id"][:8]),
-                })
-
-    # ── Sort snapshots newest-first, attach age ───────────────────────────────
-    for snaps in snap_map.values():
-        snaps.sort(key=lambda s: s["backup_time"], reverse=True)
-        for snap in snaps:
-            age_secs = now_ts - snap["backup_time"]
-            snap["age"] = _human_age(age_secs)
-
-    # ── Build final item lists ────────────────────────────────────────────────
-    vms_list: list[dict] = []
-    lxcs_list: list[dict] = []
-    all_vmids = set(pve_meta.keys()) | set(snap_map.keys())
-
-    for vid in sorted(all_vmids):
-        _pbs_btype = pbs_type_map.get(vid, "vm")
-        _orphan_type = "lxc" if _pbs_btype == "ct" else "vm"
-        meta = pve_meta.get(vid, {
-            "name": f"id-{vid}", "type": _orphan_type,
-            "os": "linux", "status": "unknown",
-        })
-        item = {
-            "id":        vid,
-            "name":      meta.get("name", f"id-{vid}"),
-            "type":      meta.get("type", _orphan_type),
-            "os":        meta.get("os", "linux"),
-            "status":    meta.get("status", "unknown"),
-            "template":  meta.get("template", False),
-            "in_pve":    vid in pve_meta,
-            "snapshots": snap_map.get(vid, []),
-            "restic_snaps": res_by_vmid.get(vid, []),
-        }
-        vm_type = meta.get("type", _orphan_type)
-        if vm_type == "lxc":
-            lxcs_list.append(item)
-        else:
-            vms_list.append(item)
-
-    return jsonify({
-        "vms":      vms_list,
-        "lxcs":     lxcs_list,
-        "storage":  {},
-        "pbs_stale": False,
-    })
-
-
-def _human_age(secs: float) -> str:
-    """Human-readable age string (e.g. '2h 15m', '3d')."""
-    if secs < 0:
-        return "0m"
-    m = int(secs // 60)
-    h = m // 60
-    d = h // 24
-    if d:
-        return f"{d}d {h % 24}h" if h % 24 else f"{d}d"
-    if h:
-        return f"{h}h {m % 60}m" if m % 60 else f"{h}h"
-    return f"{m}m"
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Routes — snapshots
-# ─────────────────────────────────────────────────────────────────────────────
-
-_VALID_TYPES = {"vm", "ct"}
-
-
-@app.route("/snapshots/<vm_type>/<int:vmid>")
-def snapshots(vm_type: str, vmid: int):
-    if vm_type not in _VALID_TYPES:
-        return jsonify({"error": f"Invalid vm_type '{vm_type}' — use vm or ct"}), 400
-
-    vmid_str = str(vmid)
-    # PBS — get_snapshots() returns [{pve_id, backup_type, snapshots:[...]}]
-    # Find the group for this vmid, return its snapshots list.
-    pbs_result = []
-    try:
-        pbs = PBSClient(_host())
-        groups = pbs.get_snapshots()
-        for group in groups:
-            if str(group.get("pve_id")) == vmid_str:
-                pbs_result = group.get("snapshots", [])
-                break
-    except Exception:
-        pass  # PBS down — return empty, restic may still work
-
-    # Restic — get_snapshots_flat() returns {id, ts, size_bytes, covers:[{type,vmid,pbs_time}]}
-    # Filter snapshots that cover this vmid; also collect which pbs_times are covered.
-    restic_result = []
-    restic_pbs_times: set[int] = set()
-    try:
-        res = LocalResticClient(_cfg)
-        flat = res.get_snapshots_flat()
-        for s in flat:
-            covers = s.get("covers", [])
-            vm_covers = [c for c in covers if str(c.get("vmid")) == vmid_str]
-            if vm_covers:
-                restic_result.append(s)
-                for c in vm_covers:
-                    if c.get("pbs_time") is not None:
-                        restic_pbs_times.add(c["pbs_time"])
-    except Exception:
-        pass
-
-    # Annotate PBS snapshots with cloud coverage + restic_id
-    # Build pbs_time → newest restic snap (flat is already newest-first)
-    restic_by_pbs_time: dict[int, dict] = {}
-    for s in restic_result:
-        for c in s.get("covers", []):
-            pt = c.get("pbs_time")
-            if pt is not None and str(c.get("vmid")) == vmid_str:
-                restic_by_pbs_time.setdefault(pt, s)  # first wins (newest)
-
-    for snap in pbs_result:
-        bt = snap.get("backup_time")
-        rs = restic_by_pbs_time.get(bt)
-        snap["cloud"] = rs is not None
-        if rs:
-            snap["restic_id"] = rs["id"]
-            snap["restic_short_id"] = rs.get("short_id", rs["id"][:8])
-
-    return jsonify({"pbs": pbs_result, "restic": restic_result})
-
-
-@app.route("/snapshots/<vm_type>/<vmid>")  # catches non-int vmid for 400
-def snapshots_bad_type(vm_type: str, vmid: str):
-    if vm_type not in _VALID_TYPES:
-        return jsonify({"error": f"Invalid vm_type '{vm_type}'"}), 400
-    return jsonify({"error": f"Invalid vmid '{vmid}'"}), 400
-
-
-@app.route("/snapshots/<vm_type>/<int:vmid>/<ts>", methods=["DELETE"])
-def delete_snapshot(vm_type: str, vmid: int, ts: str):
-    if vm_type not in _VALID_TYPES:
-        return jsonify({"error": f"Invalid vm_type '{vm_type}'"}), 400
-    try:
-        ts_int = int(ts)
-    except ValueError:
-        return jsonify({"error": f"Invalid timestamp '{ts}'"}), 400
-    try:
-        pbs = PBSClient(_host())
-        pbs.delete_snapshot(vm_type, str(vmid), ts_int)
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
-    return jsonify({"ok": True})
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Routes — operations
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route("/operations")
-def ops_list():
-    with _ops_lock:
-        items = [op.to_dict(full=False) for op in _operations.values()]
-    # newest first
-    items.sort(key=lambda o: o["created_at"], reverse=True)
-    return jsonify(items)
-
-
-@app.route("/operations/<op_id>")
-def op_get(op_id: str):
-    op = _get_op(op_id)
-    if op is None:
-        return jsonify({"error": "Not found"}), 404
-    return jsonify(op.to_dict())
-
-
-@app.route("/operations/<op_id>/stream")
-def op_stream(op_id: str):
-    op = _get_op(op_id)
-    if op is None:
-        return jsonify({"error": "Not found"}), 404
-
-    def _generate() -> Iterator[str]:
-        # If already finished, replay the full log immediately.
-        if op.status in ("ok", "failed"):
-            for line in op.log:
-                yield f"data: {line}\n\n"
-            yield "data: __done__\n\n"
-            return
-
-        # Still running — stream as lines appear.
-        sent = 0
-        while True:
-            current_log = op.log
-            while sent < len(current_log):
-                yield f"data: {current_log[sent]}\n\n"
-                sent += 1
-            if op.status in ("ok", "failed"):
-                # Drain any remaining lines, then close.
-                current_log = op.log
-                while sent < len(current_log):
-                    yield f"data: {current_log[sent]}\n\n"
-                    sent += 1
-                yield "data: __done__\n\n"
-                return
-            time.sleep(0.1)
-
-    return Response(
-        stream_with_context(_generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-@app.route("/operations/backup", methods=["POST"])
-def op_backup():
-    body = request.get_json(silent=True) or {}
-    vmid    = body.get("vmid")
-    node    = body.get("node")
-    vm_type = body.get("vm_type", "vm")
-    storage = body.get("storage")
-
-    if vmid is None:
-        return jsonify({"error": "vmid required"}), 400
-    if node is None:
-        return jsonify({"error": "node required"}), 400
-    if storage is None:
-        return jsonify({"error": "storage required"}), 400
-
-    op = _new_op("backup", vmid=str(vmid))
-
-    def _do(op: Operation):
-        pve = PVEClient(_host())
-        op.append_log(f"Starting backup: vmid={vmid} node={node} storage={storage}")
-        upid = pve.backup_vm(int(vmid), vm_type, storage, node)
-        op.append_log(f"Task started: {upid}")
-        ok = pve.wait_for_task(node, upid, op.append_log)
-        if not ok:
-            raise RuntimeError("PVE task did not complete successfully")
-        op.append_log("Backup complete")
-
-    _run_in_background(op, _do)
-    return jsonify({"op_id": op.op_id}), 202
-
-
-@app.route("/operations/restore", methods=["POST"])
-def op_restore():
-    body = request.get_json(silent=True) or {}
-    vmid            = body.get("vmid")
-    vm_type         = body.get("vm_type", "vm")
-    node            = body.get("node")
-    storage_id      = body.get("storage_id")
-    backup_time_iso = body.get("backup_time_iso")
-    pbs_datastore   = body.get("pbs_datastore")
-
-    missing = [f for f, v in [
-        ("vmid", vmid), ("node", node), ("storage_id", storage_id),
-        ("backup_time_iso", backup_time_iso), ("pbs_datastore", pbs_datastore),
-    ] if v is None]
-    if missing:
-        return jsonify({"error": f"Missing fields: {', '.join(missing)}"}), 400
-
-    op = _new_op("restore", vmid=str(vmid))
-
-    def _do(op: Operation):
-        pve = PVEClient(_host())
-        op.append_log(f"Starting restore: vmid={vmid} node={node} ts={backup_time_iso}")
-        # Stop VM/LXC before restore — PVE rejects overwriting a running container.
-        pve.stop_vm(int(vmid), vm_type, node)
-        upid = pve.restore_vm(int(vmid), vm_type, backup_time_iso,
-                              storage_id, node, pbs_datastore)
-        op.append_log(f"Task started: {upid}")
-        ok = pve.wait_for_task(node, upid, op.append_log)
-        if not ok:
-            raise RuntimeError("PVE restore task did not complete successfully")
-        op.append_log("Restore complete")
-        # Start VM/LXC after restore — PVE does not auto-start after restore.
-        # For self-restore (ct/300): agent runs on PVE host and can start ct/300
-        # even after Flask (inside ct/300) has died.
-        pve.start_vm(int(vmid), vm_type, node)
-        op.append_log(f"Started {vm_type}/{vmid}")
-
-    _run_in_background(op, _do)
-    return jsonify({"op_id": op.op_id}), 202
-
-
-@app.route("/operations/restic-prune", methods=["POST"])
-def op_restic_prune():
-    """Run restic prune as a tracked operation — progress visible in GUI log modal."""
-    if not _cfg or not _cfg.restic_repo:
-        return jsonify({"error": "restic not configured"}), 400
-    if not _restic_op_lock.acquire(blocking=False):
-        return jsonify({"error": "Another restic operation is already running — try again later"}), 409
-    op = _new_op("prune", vmid=None)
-
-    def _do(op: Operation):
-        try:
-            res = LocalResticClient(_cfg)
-            res.run_prune(op.append_log)
-            op.append_log("Cleaning GDrive trash…")
-            subprocess.run(
-                ["rclone", "cleanup", f"{_cfg.restic_repo.split(':')[1]}:"],
-                capture_output=True, env=res._full_env,
-            )
-            op.append_log("Done.")
-        finally:
-            _restic_op_lock.release()
-
-    _run_in_background(op, _do, rescan_restic=False)
-    return jsonify({"op_id": op.op_id}), 202
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Routes — schedules
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route("/schedules")
-def schedules():
-    result = {
-        "pbs_jobs":        [],
-        "pbs_running":     False,
-        "restic_next":     None,
-        "restic_running":  False,
-        "pbs_retention":   [],
-        "restic_retention": {},
-    }
-
-    try:
-        pve = PVEClient(_host())
-        result["pbs_jobs"]    = pve.get_backup_schedules()
-        result["pbs_running"] = pve.is_backup_running()
-    except Exception:
-        pass
-
-    try:
-        cfg = _cfg
-        res = LocalResticClient(_cfg)
-        result["restic_next"]      = res.get_next_run()
-        result["restic_running"]   = res.is_running()
-        result["restic_retention"] = res.get_retention()
-        prune_jobs                 = res.get_pbs_prune_jobs()
-        result["pbs_retention"]    = [
-            j for j in prune_jobs
-            if j.get("store") == (cfg.pbs_datastore if cfg else "")
-        ]
-    except Exception:
-        pass
-
-    return jsonify(result)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Routes — PBS tasks
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.route("/pbs/tasks")
-def pbs_tasks():
-    running_only = request.args.get("running") == "1"
-    return jsonify(_get_pbs_tasks(running_only=running_only))
-
-
-@app.route("/pbs/tasks/<path:upid>/log")
-def pbs_task_log(upid: str):
-    return jsonify({"lines": _get_pbs_task_log(upid)})
-
-
-@app.route("/pbs/tasks/<path:upid>/stream")
-def pbs_task_stream(upid: str):
-    """SSE stream of a PBS task log — polls until task finishes."""
-    def generate() -> Iterator[str]:
-        seen = 0
-        while True:
-            lines = _get_pbs_task_log(upid)
-            for line in lines[seen:]:
-                yield f"data: {json.dumps(line)}\n\n"
-            seen = len(lines)
-            # Check if task is done
-            tasks = _get_pbs_tasks(running_only=True)
-            running_upids = {t.get("upid") for t in tasks}
-            if upid not in running_upids:
-                yield f"data: {json.dumps({'done': True})}\n\n"
-                return
-            time.sleep(2)
-
-    return Response(stream_with_context(generate()),
-                    mimetype="text/event-stream",
-                    headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Routes — settings
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _pvesh_set_backup(job_id: str, **fields) -> None:
-    """Set backup job fields via pvesh — fallback for PVE versions that drop HTTP PUT."""
-    cmd = ["pvesh", "set", f"/cluster/backup/{job_id}"]
-    for k, v in fields.items():
-        cmd += [f"--{k}", str(v)]
-    subprocess.run(cmd, check=True, timeout=15)
-
-
-def _pvesh_set_backup_vm_selection(job_id: str, mode: str, vmids: list[int]) -> None:
-    ids = ",".join(str(v) for v in vmids)
-    kwargs: dict = {"all": 0 if mode == "include" else 1}
-    if ids:
-        kwargs["vmid" if mode == "include" else "exclude"] = ids
-    _pvesh_set_backup(job_id, **kwargs)
-
-
-@app.route("/settings")
-def settings_get():
-    res = LocalResticClient(_cfg)
-    pve = PVEClient(_host())
-    pbs_jobs = pve.get_backup_schedules()
-    pbs_job      = pbs_jobs[0] if pbs_jobs else None
-    pbs_schedule = {"id": pbs_job["id"], "schedule": pbs_job["schedule"]} if pbs_job else None
-    vm_selection = pve.get_backup_vm_selection(pbs_job["id"]) if pbs_job else {"mode": "exclude", "vmids": []}
-    prune_jobs   = res.get_pbs_prune_jobs()
-    cfg          = _cfg
-    pbs_prune    = next(
-        ({"id": j["id"], "retention": {k: int(j[k]) if str(j[k]).isdigit() else j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
-         for j in prune_jobs if j.get("store") == (cfg.pbs_datastore if cfg else "")),
-        None,
-    )
-    return jsonify({
-        "retention":       res.get_retention(),
-        "pbs_schedule":    pbs_schedule,
-        "restic_schedule": res.get_restic_schedule(),
-        "vm_selection":    vm_selection,
-        "pbs_prune":       pbs_prune,
-    })
-
-
-@app.route("/settings", methods=["POST"])
-def settings_post():
-    body = request.get_json(silent=True) or {}
-
-    _RECOGNIZED = {"retention", "restic_schedule", "pbs_schedule", "pbs_prune", "vm_selection"}
-    if not any(k in body for k in _RECOGNIZED):
-        return jsonify({"error": "body must contain at least one recognized key"}), 400
-
-    res = LocalResticClient(_cfg)
-    errors = []
-
-    if "retention" in body:
-        retention = body["retention"]
-        if not isinstance(retention, dict):
-            return jsonify({"error": "retention must be a dict"}), 400
-        try:
-            res.set_retention(retention)
-        except Exception as exc:
-            errors.append(f"retention: {exc}")
-
-    if "restic_schedule" in body:
-        try:
-            res.set_restic_schedule(body["restic_schedule"])
-        except Exception as exc:
-            errors.append(f"restic_schedule: {exc}")
-
-    if "pbs_schedule" in body:
-        sched = body["pbs_schedule"]
-        job_id   = sched.get("id")       if isinstance(sched, dict) else None
-        schedule = sched.get("schedule") if isinstance(sched, dict) else None
-        if not job_id or not schedule:
-            return jsonify({"error": "pbs_schedule requires {id, schedule}"}), 400
-        try:
-            try:
-                PVEClient(_host()).set_backup_schedule(job_id, schedule)
-            except Exception:
-                _pvesh_set_backup(job_id, schedule=schedule)
-        except Exception as exc:
-            errors.append(f"pbs_schedule: {exc}")
-
-    if "pbs_prune" in body:
-        pp = body["pbs_prune"]
-        job_id    = pp.get("id")        if isinstance(pp, dict) else None
-        retention = pp.get("retention") if isinstance(pp, dict) else None
-        if not job_id or not isinstance(retention, dict):
-            return jsonify({"error": "pbs_prune requires {id, retention: dict}"}), 400
-        bad = {k: v for k, v in retention.items() if not isinstance(v, int)}
-        if bad:
-            return jsonify({"error": f"pbs_prune retention values must be integers: {bad}"}), 400
-        try:
-            res.set_pbs_prune_job(job_id, retention)
-        except Exception as exc:
-            errors.append(f"pbs_prune: {exc}")
-
-    if "vm_selection" in body:
-        sel = body["vm_selection"]
-        mode  = sel.get("mode")  if isinstance(sel, dict) else None
-        vmids = sel.get("vmids") if isinstance(sel, dict) else None
-        if mode not in ("exclude", "include") or not isinstance(vmids, list) \
-                or not all(isinstance(v, int) for v in vmids):
-            return jsonify({"error": "vm_selection requires {mode: 'exclude'|'include', vmids: [int]}"}), 400
-        try:
-            pve2 = PVEClient(_host())
-            jobs2 = pve2.get_backup_schedules()
-            if not jobs2:
-                return jsonify({"error": "no PBS backup job found"}), 400
-            job_id2 = jobs2[0]["id"]
-            try:
-                pve2.set_backup_vm_selection(job_id2, mode, vmids)
-            except Exception:
-                # Fall back to pvesh for PVE versions that drop HTTP PUT connections
-                _pvesh_set_backup_vm_selection(job_id2, mode, vmids)
-        except Exception as exc:
-            errors.append(f"vm_selection: {exc}")
-
-    if errors:
-        return jsonify({"error": "; ".join(errors)}), 500
-
-    # Republish updated schedules via MQTT (invalidate hash so publish always fires)
-    if _poller:
-        with _poller._hash_lock:
-            _poller._hashes.pop("schedules", None)
-        _poller._scan_schedules()
-
-    pve = PVEClient(_host())
-    pbs_jobs2 = pve.get_backup_schedules()
-    pbs_job2   = pbs_jobs2[0] if pbs_jobs2 else None
-    pbs_sched2 = {"id": pbs_job2["id"], "schedule": pbs_job2["schedule"]} if pbs_job2 else None
-    vm_sel2    = pve.get_backup_vm_selection(pbs_job2["id"]) if pbs_job2 else {"mode": "exclude", "vmids": []}
-    prune_jobs2 = res.get_pbs_prune_jobs()
-    cfg2        = _cfg
-    pbs_prune2  = next(
-        ({"id": j["id"], "retention": {k: int(j[k]) if str(j[k]).isdigit() else j[k] for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
-         for j in prune_jobs2 if j.get("store") == (cfg2.pbs_datastore if cfg2 else "")),
-        None,
-    )
-    return jsonify({
-        "retention":       res.get_retention(),
-        "pbs_schedule":    pbs_sched2,
-        "restic_schedule": res.get_restic_schedule(),
-        "vm_selection":    vm_sel2,
-        "pbs_prune":       pbs_prune2,
-    })
-
-
-@app.route("/restic/log")
-def restic_log_get():
-    res = LocalResticClient(_cfg)
-    return jsonify({"lines": res.get_log_lines(), "running": res.is_running()})
-
-
-@app.route("/restic/log/stream")
-def restic_log_stream():
-    """SSE stream of the restic log file — tails while running, sends __done__ when finished."""
-    def generate() -> Iterator[str]:
-        res = LocalResticClient(_cfg)
-        sent = 0
-        while True:
-            lines = res.get_log_lines(tail=10000)
-            while sent < len(lines):
-                yield f"data: {lines[sent]}\n\n"
-                sent += 1
-            if not res.is_running():
-                yield "data: __done__\n\n"
-                return
-            time.sleep(2)
-    return Response(
-        stream_with_context(generate()),
-        mimetype="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Connection settings — read/write the agent's own config.json
-# ─────────────────────────────────────────────────────────────────────────────
-
-_SENSITIVE = {"pve_password", "pbs_password", "restic_password", "agent_token", "mqtt_password", "mqtt_ha_password"}
-
-@app.route("/connection")
-def connection_get():
-    try:
-        with open(_config_path) as f:
-            raw = json.load(f)
-    except Exception as exc:
-        return jsonify({"error": f"cannot read config: {exc}"}), 500
-    for key in _SENSITIVE:
-        if key in raw:
-            raw[key] = ""   # redact — UI shows placeholder, only sends back if changed
-    return jsonify(raw)
-
-
-@app.route("/connection", methods=["POST"])
-def connection_post():
-    body = request.get_json(silent=True) or {}
-    if not body:
-        return jsonify({"error": "empty body"}), 400
-
-    # Read current config
-    try:
-        with open(_config_path) as f:
-            current = json.load(f)
-    except Exception as exc:
-        return jsonify({"error": f"cannot read config: {exc}"}), 500
-
-    # Merge: skip sensitive fields if posted as empty (means "unchanged")
-    for k, v in body.items():
-        if k in _SENSITIVE and v == "":
-            continue
-        current[k] = v
-
-    # Write back
-    try:
-        with open(_config_path, "w") as f:
-            json.dump(current, f, indent=2)
-            f.write("\n")
-    except Exception as exc:
-        return jsonify({"error": f"cannot write config: {exc}"}), 500
-
-    # Reload in-process config
-    global _cfg
-    try:
-        _cfg = AgentConfig(**current)
-    except Exception as exc:
-        return jsonify({"error": f"config written but reload failed: {exc}"}), 500
-
-    return jsonify({"ok": True})
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -2848,24 +2167,9 @@ if __name__ == "__main__":
     else:
         log.info("MQTT not configured — running without event publishing")
 
-    # Bind address: AGENT_BIND env overrides the default 10.10.0.1.
-    # On a nested CI VM, vmbr0 is 10.10.0.1. On a real PVE host, use the
-    # actual bridge IP (e.g. 192.168.0.200) or 0.0.0.0 for all interfaces.
-    bind_host = os.environ.get("AGENT_BIND", "0.0.0.0")
-    bind_port = int(os.environ.get("AGENT_PORT", str(_cfg.agent_port)))
-
-    # SSL: use PVE cert by default; override via env or disable with SSL_CERT=""
-    _default_cert = "/etc/pve/local/pve-ssl.pem"
-    _default_key  = "/etc/pve/local/pve-ssl.key"
-    ssl_cert = os.environ.get("SSL_CERT", _default_cert)
-    ssl_key  = os.environ.get("SSL_KEY",  _default_key)
-    ssl_ctx  = None
-    if ssl_cert and ssl_key and os.path.exists(ssl_cert) and os.path.exists(ssl_key):
-        import ssl as _ssl
-        ssl_ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_SERVER)
-        ssl_ctx.load_cert_chain(ssl_cert, ssl_key)
-        log.info("SSL enabled — cert: %s", ssl_cert)
-    else:
-        log.info("SSL not configured — running plain HTTP")
-
-    app.run(host=bind_host, port=bind_port, threaded=True, ssl_context=ssl_ctx)
+    log.info("Agent is now running in pure MQTT mode.")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        pass

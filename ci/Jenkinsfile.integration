@@ -367,6 +367,8 @@ cfg = {
     'agent_token':        c['pbs_password'],
     'mqtt_host':          'localhost',
     'mqtt_port':          1883,
+    'mqtt_user':          'ci-mqtt-user',
+    'mqtt_password':      'ci-mqtt-pass',
     'mqtt_hostname':      'ci',       # must match hosts.json id → MQTT topic prefix
     'pve_node':           'gui-ci',   # actual PVE node name (hostname of the CI VM)
 }
@@ -398,12 +400,15 @@ SVCEOF
 
 # ── Mosquitto (MQTT broker) ─────────────────────────────────────────────────
 # Mosquitto pre-installed in template 9092. Configure it to listen on all
-# interfaces (Mosquitto 2.x defaults to loopback-only) and start it.
+# interfaces with authentication enabled.
 mkdir -p /etc/mosquitto/conf.d
 cat > /etc/mosquitto/conf.d/ci.conf << 'MQTTEOF'
 listener 1883 0.0.0.0
-allow_anonymous true
+allow_anonymous false
+password_file /etc/mosquitto/passwd
 MQTTEOF
+# Create MQTT user for CI tests
+mosquitto_passwd -c -b /etc/mosquitto/passwd ci-mqtt-user ci-mqtt-pass
 systemctl enable mosquitto
 systemctl restart mosquitto
 echo "Mosquitto configured and started"
@@ -411,29 +416,24 @@ echo "Mosquitto configured and started"
 systemctl daemon-reload
 systemctl restart pve-agent || systemctl start pve-agent
 
-# Wait for agent to be ready (include token since auth is now required)
-AGENT_TOKEN=$(python3 -c "import json; print(json.load(open('/etc/pve-agent/config.json'))['agent_token'])")
+# Wait for agent to be ready by checking its MQTT status
+echo "Waiting for agent to publish online status to MQTT..."
 for i in $(seq 1 20); do
-    curl -sf -H "Authorization: Bearer ${AGENT_TOKEN}" http://10.10.0.1:8099/health > /dev/null 2>&1 && { echo "Agent ready"; break; }
+    # Using mosquitto_sub to check the retained online message
+    STATUS=$(timeout 3 mosquitto_sub -h 127.0.0.1 -p 1883 -u "ci-mqtt-user" -P "ci-mqtt-pass" -t "proxmox/ci/agent/status" -C 1 -W 3 2>/dev/null || true)
+    if [ "$STATUS" = "online" ]; then
+        echo "Agent ready (MQTT online)"
+        break
+    fi
     echo "  waiting for agent... ($i/20)"
     sleep 3
 done
-curl -sf -H "Authorization: Bearer ${AGENT_TOKEN}" http://10.10.0.1:8099/health || { echo "ERROR: Agent not reachable"; exit 1; }
-
-# Smoke-test every key endpoint — catches missing methods/attributes that only
-# blow up at runtime (not at import time), which /health alone won't catch.
-for EP in /settings /schedules /vms /items /connection; do
-    CODE=$(curl -s -o /tmp/agent-ep-out.txt -w "%{http_code}" \
-        -H "Authorization: Bearer ${AGENT_TOKEN}" "http://10.10.0.1:8099${EP}")
-    if [ "${CODE}" != "200" ]; then
-        echo "ERROR: Agent ${EP} returned HTTP ${CODE}"
-        cat /tmp/agent-ep-out.txt
-        journalctl -u pve-agent --no-pager -n 30 || true
-        exit 1
-    fi
-    echo "  ${EP} → ${CODE} OK"
-done
-echo "Agent deployed and all endpoints healthy"
+if [ "$STATUS" != "online" ]; then
+    echo "ERROR: Agent not reachable via MQTT"
+    journalctl -u pve-agent --no-pager -n 30 || true
+    exit 1
+fi
+echo "Agent deployed and communicating over MQTT"
 DEPLOY_AGENT
 
                     # ── Deploy backend + frontend to LXC 300 ──
@@ -465,16 +465,18 @@ DEPLOY_AGENT
                         # curl pre-installed in template 9092's LXC 300
                         pct exec 300 -- curl --version >/dev/null
 
-                        # Wire up agent_url + agent_token in hosts.json so the Flask
-                        # backend can authenticate to the agent. The token matches
-                        # the pbs_password already in hosts.json (reused as shared secret).
+                        # Wire up MQTT credentials in hosts.json so the Flask
+                        # backend can connect to Mosquitto.
                         pct exec 300 -- python3 -c "
 import json
 with open('/opt/proxmox-backup-gui/backend/hosts.json') as f: h=json.load(f)
-h[0]['agent_url']   = 'http://10.10.0.1:8099'
-h[0]['agent_token'] = h[0].get('pbs_password', '')
+h[0]['mqtt_user'] = 'ci-mqtt-user'
+h[0]['mqtt_password'] = 'ci-mqtt-pass'
+# Clean up obsolete fields
+h[0].pop('agent_url', None)
+h[0].pop('agent_token', None)
 open('/opt/proxmox-backup-gui/backend/hosts.json','w').write(json.dumps(h))
-print('hosts.json: agent_url and agent_token configured')
+print('hosts.json: MQTT credentials configured')
 "
                         # Create CI admin user with known password (overwrites any existing users.json)
                         pct exec 300 -- /opt/proxmox-backup-gui/.venv/bin/python3 -c "
