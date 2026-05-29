@@ -1434,14 +1434,7 @@ def _build_restic_index(snaps: list[dict]) -> dict[str, dict[int, dict]]:
 _poller: StatePoller | None = None
 
 
-@app.before_request
-def _check_auth():
-    """Require Bearer token when agent_token is configured."""
-    if not _cfg or not _cfg.agent_token:
-        return  # open — no token configured
-    auth = request.headers.get("Authorization", "")
-    if auth != f"Bearer {_cfg.agent_token}":
-        return jsonify({"error": "Unauthorized"}), 401
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
