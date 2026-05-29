@@ -30,17 +30,18 @@ def _on_message(c, _u, msg):
         payload = ""
 
     # Update Cache
-    if msg.retain:
-        with MQTT_CACHE_LOCK:
-            if payload:
+    with MQTT_CACHE_LOCK:
+        if payload:
+            if msg.topic.endswith("/log"):
+                log_list = MQTT_CACHE.setdefault(msg.topic, [])
+                if isinstance(log_list, list):
+                    log_list.append(payload)
+            else:
                 try:
                     MQTT_CACHE[msg.topic] = json.loads(payload)
                 except json.JSONDecodeError:
                     MQTT_CACHE[msg.topic] = payload
-            else:
-                MQTT_CACHE.pop(msg.topic, None)
-    elif not payload:
-        with MQTT_CACHE_LOCK:
+        else:
             MQTT_CACHE.pop(msg.topic, None)
 
     # Broadcast to WebSockets

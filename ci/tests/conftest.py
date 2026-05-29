@@ -90,6 +90,118 @@ def _reset_users(_auth_files):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _reset_mqtt_cache():
+    """Clear MQTT_CACHE before every test to ensure complete test isolation."""
+    if _BACKEND_IMPORTABLE:
+        from mqtt_manager import MQTT_CACHE, MQTT_CACHE_LOCK
+        with MQTT_CACHE_LOCK:
+            MQTT_CACHE.clear()
+    yield
+
+
+
+@pytest.fixture(autouse=True)
+def _mock_mqtt_publish():
+    """Mock publish_cmd dynamically in unit tests to simulate a running agent over MQTT."""
+    if not _BACKEND_IMPORTABLE:
+        yield
+        return
+
+    from unittest.mock import patch
+    import json
+    import uuid
+
+    def mock_publish_cmd(topic: str, payload: str | dict):
+        from mqtt_manager import MQTT_CACHE, MQTT_CACHE_LOCK
+        
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except Exception:
+                pass
+                
+        if not isinstance(payload, dict):
+            payload = {}
+            
+        corr_id = payload.get("corr_id")
+        if not corr_id:
+            return
+            
+        op_id = f"op_{corr_id[:8]}"
+        base_topic = "/".join(topic.split("/")[:2]) # "proxmox/testhost"
+        action = topic.split("/")[-1] # "backup", "restore", etc.
+        
+        # Generate appropriate logs based on action
+        logs = []
+        if action == "backup":
+            logs = [
+                "Step 1/2 — Triggering PBS backup...",
+                "Step 2/2 — waiting for completion..."
+            ]
+        elif action == "backup-restic":
+            logs = [
+                "Step 1/2 — Triggering cloud backup...",
+                "Step 2/2 — waiting for completion..."
+            ]
+        elif action == "restore":
+            source = payload.get("source", "local")
+            if source == "cloud":
+                logs = [
+                    "Step 1/3 — Downloading from cloud...",
+                    "Step 2/3 — Restoring VM/LXC from PBS...",
+                    "Step 3/3 — Cleanup..."
+                ]
+            else:
+                logs = [
+                    "Step 1/2 — Restoring VM/LXC from local PBS...",
+                    "Step 2/2 — waiting for completion..."
+                ]
+        elif action == "delete":
+            scope = payload.get("scope", "pbs")
+            if scope == "cloud":
+                logs = [
+                    "Step 1/4 — Finding snapshots...",
+                    "Step 2/4 — Forgetting restic snapshots...",
+                    "Step 3/4 — Running restic prune...",
+                    "Step 4/4 — Removing deleted pbs_time tags..."
+                ]
+            else:
+                logs = [
+                    "Step 1/2 — Deleting local PBS snapshot...",
+                    "Step 2/2 — waiting for completion..."
+                ]
+        elif action == "delete-all":
+            logs = [
+                "Step 1/2 — Deleting all local PBS snapshots...",
+                "Step 2/2 — waiting for completion..."
+            ]
+        elif action == "delete-restic":
+            logs = [
+                "Step 1/2 — Deleting restic snapshot...",
+                "Step 2/2 — waiting for completion..."
+            ]
+        elif action == "restore-datastore":
+            logs = [
+                "Step 1/2 — Restoring full datastore...",
+                "Step 2/2 — waiting for completion..."
+            ]
+        elif action == "restic-prune":
+            logs = [
+                "Step 1/2 — Pruning restic repository...",
+                "Step 2/2 — waiting for completion..."
+            ]
+            
+        with MQTT_CACHE_LOCK:
+            MQTT_CACHE[f"{base_topic}/job/{corr_id}/ack"] = {"op_id": op_id}
+            MQTT_CACHE[f"{base_topic}/ops/{op_id}/status"] = "ok"
+            MQTT_CACHE[f"{base_topic}/ops/{op_id}/log"] = logs
+
+    with patch("mqtt_manager.publish_cmd", side_effect=mock_publish_cmd), \
+         patch("agent_client.publish_cmd", side_effect=mock_publish_cmd):
+        yield
+
+
 @pytest.fixture
 def flask_client(_reset_users):
     """Authenticated Flask test client (logged in as admin).

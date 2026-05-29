@@ -922,6 +922,10 @@ let hosts = [];
 let selfVmid = null;  // VMID of the LXC container running this web UI (null if unknown)
 let _abortController = null;
 let _modalState = {};  // holds pending restore params
+let _activeJobs = {};  // vmid → { jobId, title }
+let _lastJob = null;   // { jobId, vmid, title } — for global sidebar indicator
+let _jobPollInterval = null;
+
 
 // ─────────────────────────────────────────────
 // Init
@@ -989,8 +993,6 @@ function renderHostNav() {
 
 function openAddHostModal() {
   document.getElementById('ah-label').value = '';
-  document.getElementById('ah-agent-url').value = '';
-  document.getElementById('ah-agent-token').value = '';
   document.getElementById('add-host-overlay').classList.add('open');
 }
 
@@ -1000,17 +1002,14 @@ function closeAddHostModal() {
 
 async function saveNewHost() {
   const label     = document.getElementById('ah-label').value.trim();
-  const agentUrl  = document.getElementById('ah-agent-url').value.trim();
-  const agentToken = document.getElementById('ah-agent-token').value;
   if (!label) { alert('Label is required'); return; }
-  if (!agentUrl) { alert('Agent URL is required'); return; }
   const btn = document.getElementById('ah-save-btn');
   btn.disabled = true; btn.textContent = 'Adding…';
   try {
     const r = await fetch(`${API_BASE}/api/hosts`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ label, agent_url: agentUrl, agent_token: agentToken }),
+      body: JSON.stringify({ label }),
     });
     if (r.ok) {
       const newHost = await r.json();
@@ -1157,6 +1156,231 @@ function openPbsTaskModal(upid, title) {
 
   // Stream new lines via MQTT
   if (_ws && _ws.readyState === WebSocket.OPEN) { _ws.send(JSON.stringify({topic: `${_prefix}/${host}/cmd/replay_restic_log`, payload: {}})); }
+}
+
+function _reopenLastJob() {
+  if (!_lastJob) return;
+  if (_lastJob.vmid != null) {
+    reopenJobModal(_lastJob.vmid);
+  } else {
+    openJobModal(_lastJob.title, _lastJob.jobId, null);
+  }
+}
+
+function _updateGlobalJobIndicator() {
+  const section = document.getElementById('global-job-section');
+  const label = document.getElementById('global-job-label');
+  const anyGuiJobs = Object.keys(_activeJobs).length > 0;
+  const anyPbsTasks = (_pbsTasks || []).length > 0 || Object.keys(_pbsGraceTasks || {}).length > 0;
+  const anyRunning = anyGuiJobs || anyPbsTasks;
+  if (section) section.style.display = anyRunning ? '' : 'none';
+  const indicator = document.getElementById('global-job-indicator');
+  if (indicator) indicator.style.display = anyGuiJobs ? '' : 'none';
+  if (label && _lastJob) label.textContent = _lastJob.title;
+}
+
+function _setJobIndicator(vmid, running, title) {
+  const el = document.getElementById(`vm-job-${vmid}`);
+  if (el) {
+    if (running) {
+      el.className = 'job-indicator';
+      el.innerHTML = `<div class="job-indicator-progress"></div><div class="job-indicator-dot"></div>${title}`;
+      el.style.display = '';
+    } else {
+      el.style.display = 'none';
+    }
+  }
+  _updateGlobalJobIndicator();
+}
+
+function _setJobProgress(vmid, pct) {
+  const w = pct.toFixed(1) + '%';
+  if (vmid != null) {
+    const el = document.getElementById(`vm-job-${vmid}`);
+    if (el) {
+      const bar = el.querySelector('.job-indicator-progress');
+      if (bar) bar.style.width = w;
+    }
+  }
+  const global = document.getElementById('global-job-progress');
+  if (global) global.style.width = w;
+}
+
+function openJobModal(title, jobId, vmid) {
+  _lastJob = { jobId, vmid, title };
+  localStorage.setItem('lastJob', JSON.stringify(_lastJob));
+  if (vmid != null) {
+    _activeJobs[vmid] = { jobId, title };
+    _setJobIndicator(vmid, true, title);
+  } else {
+    _activeJobs[`_noid_${jobId}`] = { jobId, title };
+    _updateGlobalJobIndicator();
+  }
+  document.getElementById('job-title').textContent = title;
+  document.getElementById('job-subtitle').textContent = `job ${jobId}`;
+  document.getElementById('job-log').innerHTML = '';
+  document.getElementById('job-badge').className = 'job-status-badge running';
+  document.getElementById('job-badge').textContent = 'running';
+  const _prog = document.getElementById('job-progress');
+  const _track = _prog.querySelector('.job-progress-bar-track');
+  const _fill = document.getElementById('job-progress-fill');
+  _fill.style.width = '0%';
+  _fill.style.background = 'var(--accent)';
+  _track.classList.add('indeterminate');
+  _prog.style.display = '';
+  document.getElementById('job-progress-label').textContent = 'Running…';
+  document.getElementById('job-close-btn').disabled = true;
+  document.getElementById('job-modal').classList.add('open');
+  if (_jobPollInterval) { clearInterval(_jobPollInterval); _jobPollInterval = null; }
+  
+  // Request log replay from agent via MQTT cmd/replay_op_log
+  if (_ws && _ws.readyState === WebSocket.OPEN) {
+    _ws.send(JSON.stringify({
+      topic: `${_prefix}/${currentHost}/cmd/replay_op_log`,
+      payload: JSON.stringify({ op_id: jobId })
+    }));
+  }
+}
+
+function reopenJobModal(vmid) {
+  const entry = _activeJobs[vmid];
+  if (!entry) return;
+  document.getElementById('job-title').textContent = entry.title;
+  document.getElementById('job-subtitle').textContent = `job ${entry.jobId}`;
+  document.getElementById('job-badge').className = 'job-status-badge running';
+  document.getElementById('job-badge').textContent = 'running';
+  document.getElementById('job-close-btn').disabled = true;
+  document.getElementById('job-modal').classList.add('open');
+  
+  // Re-request full log
+  document.getElementById('job-log').innerHTML = '';
+  const _fill = document.getElementById('job-progress-fill');
+  if (_fill) {
+    _fill.style.width = '0%';
+    _fill.style.background = 'var(--accent)';
+  }
+  
+  if (_ws && _ws.readyState === WebSocket.OPEN) {
+    _ws.send(JSON.stringify({
+      topic: `${_prefix}/${currentHost}/cmd/replay_op_log`,
+      payload: JSON.stringify({ op_id: entry.jobId })
+    }));
+  }
+}
+
+function closeJobModal() {
+  document.getElementById('job-modal').classList.remove('open');
+}
+
+function _completeJob(jobId, vmid, success) {
+  if (vmid != null) {
+    delete _activeJobs[vmid];
+    _setJobIndicator(vmid, false);
+  } else {
+    delete _activeJobs[`_noid_${jobId}`];
+    _updateGlobalJobIndicator();
+  }
+  const badge = document.getElementById('job-badge');
+  if (badge) {
+    badge.className = `job-status-badge ${success ? 'done' : 'error'}`;
+    badge.textContent = success ? 'done' : 'failed';
+  }
+  const fill = document.getElementById('job-progress-fill');
+  const track = fill && fill.closest('.job-progress-bar-track');
+  if (track) track.classList.remove('indeterminate');
+  if (fill) {
+    fill.style.width = success ? '100%' : '0%';
+    fill.style.background = success ? 'var(--green)' : 'var(--red)';
+    document.getElementById('job-progress-label').textContent = success ? 'Done' : 'Failed';
+    _setJobProgress(vmid, success ? 100 : 0);
+  }
+  document.getElementById('job-close-btn').disabled = false;
+  if (success) refreshData();
+}
+
+function _parseLogLine(line, jobId, vmid) {
+  const logEl = document.getElementById('job-log');
+  if (!logEl) return;
+  const div = document.createElement('div');
+  div.className = line.startsWith('ERROR') ? 'log-error' : '';
+  div.textContent = line;
+  logEl.appendChild(div);
+  logEl.scrollTop = logEl.scrollHeight;
+
+  // Drive progress bar from "Step N/M — ..." lines
+  const mStep = line.match(/^Step\s+(\d+)\/(\d+)\s+[—\-]/);
+  if (mStep) {
+    const cur = parseInt(mStep[1]), total = parseInt(mStep[2]);
+    const pct = Math.round((cur - 1) / total * 100);
+    const fill = document.getElementById('job-progress-fill');
+    const label = document.getElementById('job-progress-label');
+    const track = fill && fill.closest('.job-progress-bar-track');
+    if (pct > 0 && track) track.classList.remove('indeterminate');
+    if (fill) fill.style.width = pct + '%';
+    if (label) label.textContent = `Step ${cur}/${total} — ` + line.replace(/^Step\s+\d+\/\d+\s+[—\-]\s*/, '').split('(')[0].trim();
+    _setJobProgress(vmid, pct);
+  }
+  // Drive progress bar from "  42% — MB/MB @ MB/s ETA Xs" (formatted restic JSON)
+  const mPct = line.match(/^\s+(\d+)%\s+[—\-]/);
+  if (mPct) {
+    const pct = parseInt(mPct[1]);
+    const fill = document.getElementById('job-progress-fill');
+    const label = document.getElementById('job-progress-label');
+    const track = fill && fill.closest('.job-progress-bar-track');
+    if (track) track.classList.remove('indeterminate');
+    if (fill) fill.style.width = pct + '%';
+    if (label) label.textContent = line.trim();
+    _setJobProgress(vmid, pct);
+  }
+  // Drive progress bar from restic prune --verbose=2: "[3:22] 2.50% 170 / 7645 packs repacked"
+  const mPrune = line.match(/\[(\d+):(\d+)\]\s+([\d.]+)%\s+(\d+)\s*\/\s*(\d+)\s+packs repacked/);
+  if (mPrune) {
+    const elapsedSecs = parseInt(mPrune[1]) * 60 + parseInt(mPrune[2]);
+    const repackPct = parseFloat(mPrune[3]);
+    const done = parseInt(mPrune[4]), total = parseInt(mPrune[5]);
+    const fill = document.getElementById('job-progress-fill');
+    const label = document.getElementById('job-progress-label');
+    const track = fill && fill.closest('.job-progress-bar-track');
+    if (track) track.classList.remove('indeterminate');
+    const displayPct = repackPct * 0.8;
+    if (fill) fill.style.width = displayPct.toFixed(1) + '%';
+    let etaStr = '';
+    if (repackPct > 1 && elapsedSecs > 5) {
+      const etaSecs = Math.round(elapsedSecs * (100 / repackPct - 1) * 1.1);
+      etaStr = ' · ETA ~' + _fmtDuration(etaSecs);
+    }
+    if (label) label.textContent = `Repacking ${done}/${total} packs (${repackPct.toFixed(1)}%)${etaStr}`;
+    _setJobProgress(vmid, displayPct);
+  }
+  // "removing" and "rebuilding index" phases: 80–95%
+  if (line.includes('removing') && line.includes('old packs')) {
+    const fill = document.getElementById('job-progress-fill');
+    const label = document.getElementById('job-progress-label');
+    if (fill) fill.style.width = '85%';
+    if (label) label.textContent = 'Removing old packs…';
+    _setJobProgress(vmid, 85);
+  }
+  if (line.includes('rebuilding index')) {
+    const fill = document.getElementById('job-progress-fill');
+    const label = document.getElementById('job-progress-label');
+    if (fill) fill.style.width = '92%';
+    if (label) label.textContent = 'Rebuilding index…';
+    _setJobProgress(vmid, 92);
+  }
+  // Restic backup/forget ETA: "ETA 1:23:45" or "ETA 12:34"
+  const mETA = line.match(/ETA\s+(\d+):(\d+)(?::(\d+))?/);
+  if (mETA) {
+    const label = document.getElementById('job-progress-label');
+    const secs = mETA[3] != null
+      ? parseInt(mETA[1]) * 3600 + parseInt(mETA[2]) * 60 + parseInt(mETA[3])
+      : parseInt(mETA[1]) * 60 + parseInt(mETA[2]);
+    if (label) label.textContent = (label.textContent.replace(/ · ETA.*/,'')) + ' · ETA ~' + _fmtDuration(secs);
+  }
+  const mElapsed = line.match(/^\[(\d+)s elapsed\]$/);
+  if (mElapsed) {
+    const label = document.getElementById('job-progress-label');
+    if (label) label.textContent = `${mElapsed[1]}s elapsed…`;
+  }
 }
 
 function _escHtml(s) {
@@ -1775,12 +1999,12 @@ async function openSettingsModal() {
 
   // Load connection settings (admin only — section hidden if both fetches fail)
   try {
-    const [rc, rl] = await Promise.all([
+    const [rc] = await Promise.all([
       fetch(`${API_BASE}/api/host/${currentHost}/connection`),
-      fetch(`${API_BASE}/api/host/${currentHost}/local`),
+      
     ]);
     const connSec = document.getElementById('s-connection-section');
-    if (rc.ok || rl.ok) {
+    if (rc.ok) {
       if (rc.ok) {
         const c = await rc.json();
         document.getElementById('s-conn-pve-url').value         = c.pve_url       ?? '';
@@ -1798,11 +2022,7 @@ async function openSettingsModal() {
         document.getElementById('s-mqtt-ha-user').value     = c.mqtt_ha_user     ?? '';
         document.getElementById('s-mqtt-ha-password').value = '';
       }
-      if (rl.ok) {
-        const l = await rl.json();
-        document.getElementById('s-conn-agent-url').value   = l.agent_url   ?? '';
-        document.getElementById('s-conn-agent-token').value = '';
-      }
+      
       connSec.style.display = '';
     } else {
       connSec.style.display = 'none';
@@ -1978,21 +2198,6 @@ async function saveSettings() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(connBody),
-        })
-      );
-    }
-    // Local (Flask-side) fields: agent_url + agent_token
-    const localBody = {};
-    const agentUrl = document.getElementById('s-conn-agent-url')?.value.trim();
-    const agentTok = document.getElementById('s-conn-agent-token')?.value;
-    if (agentUrl != null) localBody.agent_url = agentUrl;
-    if (agentTok) localBody.agent_token = agentTok;
-    if (Object.keys(localBody).length > 0) {
-      promises.push(
-        fetch(`${API_BASE}/api/host/${currentHost}/local`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(localBody),
         })
       );
     }
@@ -2251,6 +2456,38 @@ const MQTTBus = (() => {
     if (currentHost && msgHost && msgHost !== currentHost) return;
     // proxmox/<host>/agent/status
     
+    // proxmox/<host>/ops/<op_id>/log  (live operation log lines)
+    if (parts[2] === 'ops' && parts[4] === 'log') {
+      const op_id = parts[3];
+      const modal = document.getElementById('job-modal');
+      if (!modal.classList.contains('open')) return;
+      
+      // Determine VMID if this belongs to an active job
+      let vmid = null;
+      Object.entries(_activeJobs).forEach(([k, v]) => {
+        if (v.jobId === op_id) vmid = k.startsWith('_noid_') ? null : k;
+      });
+
+      if (msg === '__done__') {
+        _completeJob(op_id, vmid, true);
+      } else {
+        _parseLogLine(msg, op_id, vmid);
+      }
+      return;
+    }
+
+    // proxmox/<host>/ops/<op_id>/status  (operation status update ok/failed)
+    if (parts[2] === 'ops' && parts[4] === 'status') {
+      const op_id = parts[3];
+      let vmid = null;
+      Object.entries(_activeJobs).forEach(([k, v]) => {
+        if (v.jobId === op_id) vmid = k.startsWith('_noid_') ? null : k;
+      });
+      const success = msg === 'ok';
+      _completeJob(op_id, vmid, success);
+      return;
+    }
+
     if (parts[2] === 'log' && parts[3] === 'pbs') {
       const modal = document.getElementById('job-modal');
       if (!modal.classList.contains('open')) return;
