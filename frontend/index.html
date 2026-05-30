@@ -3015,8 +3015,286 @@ window.fetch = async function(...args) {
 // ─────────────────────────────────────────────
 // Start
 // ─────────────────────────────────────────────
+
+// --- Restored: setStatus ---
+function setStatus(state, msg) {
+  const dot = document.getElementById('status-dot');
+  dot.className = 'status-dot' + (state === 'error' ? ' error' : '');
+  document.getElementById('sync-status').textContent = msg;
+}
+
+// --- Restored: openRestoreModal ---
+function openRestoreModal(d) {
+  const hasLocal = d.local === 'true';
+  const hasCloud = d.cloud === 'true';
+
+  const vmid = parseInt(d.vmid);
+  _modalState = {
+    vmid,
+    type:       d.type,
+    backupTime: parseInt(d.backupTime),
+    resticId:   d.resticId || null,
+    hasLocal,
+    hasCloud,
+    source:     hasLocal ? 'local' : 'cloud',
+    isSelf:     selfVmid !== null && vmid === selfVmid,
+  };
+
+  document.getElementById('modal-vm').textContent   = d.vm;
+  document.getElementById('modal-date').textContent = d.date;
+  document.getElementById('modal-size').textContent = d.size;
+  document.getElementById('modal-subtitle').textContent = d.vm + ' ┬À ' + d.date;
+  document.getElementById('modal-backup-after').checked = false;
+
+  const sources = [];
+  if (hasLocal) sources.push({ key:'local', icon:'­ƒÆ¥', name:'Local PBS', desc:'fast ┬À minutes' });
+  if (hasCloud) sources.push({ key:'cloud', icon:'Ôÿü', name:'Google Drive', desc:'restic ┬À hours' });
+
+  document.getElementById('modal-time').textContent = hasLocal ? '~5 min' : '~2ÔÇô4 h';
+  document.getElementById('modal-sources').innerHTML = sources.map((s, i) => `
+    <div class="source-opt ${i === 0 ? 'selected' : ''}" data-source="${s.key}"
+         onclick="selectRestoreSource(this)">
+      <div class="source-opt-icon">${s.icon}</div>
+      <div class="source-opt-name">${s.name}</div>
+      <div class="source-opt-desc">${s.desc}</div>
+    </div>`).join('');
+
+  const isSelf = _modalState.isSelf;
+  document.getElementById('modal-self-warning').style.display = isSelf ? '' : 'none';
+  document.getElementById('modal-self-confirm-label').style.display = isSelf ? '' : 'none';
+  document.getElementById('modal-self-confirm').checked = false;
+
+  updateRestoreWarning();
+  updateConfirmBtn();
+  document.getElementById('modal').classList.add('open');
+}
+
+// --- Restored: reopenJobModal ---
+function reopenJobModal(vmid) {
+  const entry = _activeJobs[vmid];
+  if (!entry) return;
+  // Modal is already being kept up-to-date by background poll ÔÇö just show it
+  document.getElementById('job-title').textContent = entry.title;
+  document.getElementById('job-subtitle').textContent = `job ${entry.jobId}`;
+  document.getElementById('job-badge').className = 'job-status-badge running';
+  document.getElementById('job-badge').textContent = 'running';
+  document.getElementById('job-close-btn').disabled = false;
+  document.getElementById('job-modal').classList.add('open');
+  const logEl = document.getElementById('job-log');
+  if (logEl) logEl.scrollTop = logEl.scrollHeight;
+}
+
+// --- Restored: _pollJob ---
+async function _pollJob(jobId, vmid) {
+  let lastLogCount = 0;
+  const poll = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/job/${jobId}`);
+      if (!res.ok) return;
+      const job = await res.json();
+
+      // Append new log lines and update progress bar
+      const logEl = document.getElementById('job-log');
+      if (logEl) {
+        const newLines = job.logs.slice(lastLogCount);
+        lastLogCount = job.logs.length;
+        newLines.forEach(line => {
+          const div = document.createElement('div');
+          div.className = line.startsWith('ERROR') ? 'log-error' : '';
+          div.textContent = line;
+          logEl.appendChild(div);
+
+          // Drive progress bar from "Step N/M ÔÇö ..." lines
+          const mStep = line.match(/^Step\s+(\d+)\/(\d+)\s+[ÔÇö\-]/);
+          if (mStep) {
+            const cur = parseInt(mStep[1]), total = parseInt(mStep[2]);
+            const pct = Math.round((cur - 1) / total * 100);
+            const fill = document.getElementById('job-progress-fill');
+            const label = document.getElementById('job-progress-label');
+            const track = fill && fill.closest('.job-progress-bar-track');
+            // Only leave indeterminate mode when we have a real percentage to show
+            if (pct > 0 && track) track.classList.remove('indeterminate');
+            if (fill) fill.style.width = pct + '%';
+            if (label) label.textContent = `Step ${cur}/${total} ÔÇö ` + line.replace(/^Step\s+\d+\/\d+\s+[ÔÇö\-]\s*/, '').split('(')[0].trim();
+            _setJobProgress(vmid, pct);
+          }
+          // Drive progress bar from "  42% ÔÇö MB/MB @ MB/s ETA Xs" (formatted restic JSON)
+          const mPct = line.match(/^\s+(\d+)%\s+[ÔÇö\-]/);
+          if (mPct) {
+            const pct = parseInt(mPct[1]);
+            const fill = document.getElementById('job-progress-fill');
+            const label = document.getElementById('job-progress-label');
+            const track = fill && fill.closest('.job-progress-bar-track');
+            if (track) track.classList.remove('indeterminate');
+            if (fill) fill.style.width = pct + '%';
+            if (label) label.textContent = line.trim();
+            _setJobProgress(vmid, pct);
+          }
+          // Drive progress bar from restic prune --verbose=2: "[3:22] 2.50% 170 / 7645 packs repacked"
+          // Repack is ~80% of total work; remaining phases (remove old packs, rebuild index) fill to 100%.
+          const mPrune = line.match(/\[(\d+):(\d+)\]\s+([\d.]+)%\s+(\d+)\s*\/\s*(\d+)\s+packs repacked/);
+          if (mPrune) {
+            const elapsedSecs = parseInt(mPrune[1]) * 60 + parseInt(mPrune[2]);
+            const repackPct = parseFloat(mPrune[3]);
+            const done = parseInt(mPrune[4]), total = parseInt(mPrune[5]);
+            const fill = document.getElementById('job-progress-fill');
+            const label = document.getElementById('job-progress-label');
+            const track = fill && fill.closest('.job-progress-bar-track');
+            if (track) track.classList.remove('indeterminate');
+            const displayPct = repackPct * 0.8;
+            if (fill) fill.style.width = displayPct.toFixed(1) + '%';
+            let etaStr = '';
+            if (repackPct > 1 && elapsedSecs > 5) {
+              // ETA for full job: repack phase + ~10% extra for remove+reindex
+              const etaSecs = Math.round(elapsedSecs * (100 / repackPct - 1) * 1.1);
+              etaStr = ' ┬À ETA ~' + _fmtDuration(etaSecs);
+            }
+            if (label) label.textContent = `Repacking ${done}/${total} packs (${repackPct.toFixed(1)}%)${etaStr}`;
+            _setJobProgress(vmid, displayPct);
+          }
+          // "removing" and "rebuilding index" phases: 80ÔÇô95%
+          if (line.includes('removing') && line.includes('old packs')) {
+            const fill = document.getElementById('job-progress-fill');
+            const label = document.getElementById('job-progress-label');
+            if (fill) fill.style.width = '85%';
+            if (label) label.textContent = 'Removing old packsÔÇª';
+            _setJobProgress(vmid, 85);
+          }
+          if (line.includes('rebuilding index')) {
+            const fill = document.getElementById('job-progress-fill');
+            const label = document.getElementById('job-progress-label');
+            if (fill) fill.style.width = '92%';
+            if (label) label.textContent = 'Rebuilding indexÔÇª';
+            _setJobProgress(vmid, 92);
+          }
+          // Restic backup/forget ETA: "ETA 1:23:45" or "ETA 12:34"
+          const mETA = line.match(/ETA\s+(\d+):(\d+)(?::(\d+))?/);
+          if (mETA) {
+            const label = document.getElementById('job-progress-label');
+            const secs = mETA[3] != null
+              ? parseInt(mETA[1]) * 3600 + parseInt(mETA[2]) * 60 + parseInt(mETA[3])
+              : parseInt(mETA[1]) * 60 + parseInt(mETA[2]);
+            if (label) label.textContent = (label.textContent.replace(/ ┬À ETA.*/,'')) + ' ┬À ETA ~' + _fmtDuration(secs);
+          }
+          // Update label for heartbeat lines "[Xs elapsed]" without touching the bar
+          const mElapsed = line.match(/^\[(\d+)s elapsed\]$/);
+          if (mElapsed) {
+            const label = document.getElementById('job-progress-label');
+            if (label) label.textContent = `${mElapsed[1]}s elapsedÔÇª`;
+          }
+        });
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+
+      if (job.status === 'done' || job.status === 'error') {
+        clearInterval(_jobPollInterval);
+        _jobPollInterval = null;
+        localStorage.removeItem('lastJob');
+        if (vmid != null) {
+          delete _activeJobs[vmid];
+          _setJobIndicator(vmid, false);
+        } else {
+          delete _activeJobs[`_noid_${jobId}`];
+          _updateGlobalJobIndicator();
+        }
+        const badge = document.getElementById('job-badge');
+        if (badge) {
+          badge.className = `job-status-badge ${job.status}`;
+          badge.textContent = job.status;
+        }
+        const fill = document.getElementById('job-progress-fill');
+        const track = fill && fill.closest('.job-progress-bar-track');
+        if (track) track.classList.remove('indeterminate');
+        if (job.status === 'done' && fill) {
+          fill.style.width = '100%';
+          fill.style.background = 'var(--green)';
+          document.getElementById('job-progress-label').textContent = 'Done';
+          _setJobProgress(vmid, 100);
+        } else if (job.status === 'error' && fill) {
+          fill.style.background = 'var(--red)';
+          document.getElementById('job-progress-label').textContent = 'Failed';
+          _setJobProgress(vmid, 0);
+        }
+        if (job.status === 'done') refreshData();
+      }
+    } catch (_) {}
+  };
+  await poll();
+  if (_jobPollInterval) clearInterval(_jobPollInterval);
+  _jobPollInterval = setInterval(poll, 2000);
+}
+
+// --- Restored: triggerResticBackup ---
+function triggerResticBackup(vmid, name) {
+  if (!confirm(`Run restic cloud backup now?\n\nThis backs up the full PBS datastore. PBS will be briefly stopped.`)) return;
+  MQTTBus.triggerAction('backup-restic', {}, 'Cloud Backup', vmid ?? null);
+}
+
+// --- Restored: _escHtml ---
+function _escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// --- Restored: openDeleteAllModal ---
+function openDeleteAllModal(vmid, type, name) {
+  _deleteAllState = { vmid, type, name };
+  document.getElementById('delete-all-subtitle').textContent = name;
+  document.getElementById('delete-all-warning').innerHTML =
+    'ÔÜá &nbsp;All local PBS snapshots for this VM will be permanently deleted. Cloud restic copies (if any) are not affected.<br><br>Stop any scheduled backup jobs before proceeding.' + _scheduleHint();
+  const input = document.getElementById('delete-all-confirm-input');
+  input.value = '';
+  input.placeholder = name;
+  document.getElementById('delete-all-confirm-btn').disabled = true;
+  document.getElementById('delete-all-modal').classList.add('open');
+  setTimeout(() => input.focus(), 100);
+}
+
+// --- Restored: openDeleteModal ---
+function openDeleteModal(d) {
+  const hasLocal = d.local === 'true';
+  const hasCloud = d.cloud === 'true';
+
+  _deleteState = {
+    vmid:       parseInt(d.vmid),
+    type:       d.type,
+    backupTime: parseInt(d.backupTime),
+    resticId:   d.resticId || null,
+    hasLocal,
+    hasCloud,
+    scope:      hasLocal ? 'local' : 'cloud',
+  };
+
+  document.getElementById('delete-modal-vm').textContent   = d.vm;
+  document.getElementById('delete-modal-date').textContent = d.date;
+  document.getElementById('delete-modal-subtitle').textContent = d.vm + ' ┬À ' + d.date;
+
+  const scopeSection = document.getElementById('delete-scope-section');
+  const scopeOptions = document.getElementById('delete-scope-options');
+
+  if (hasLocal && hasCloud) {
+    // Offer choice: keep cloud or delete everything
+    scopeSection.style.display = '';
+    scopeOptions.innerHTML = `
+      <div class="source-opt selected" data-scope="local" onclick="selectDeleteScope(this)">
+        <div class="source-opt-icon">­ƒÆ¥</div>
+        <div class="source-opt-name">Local only</div>
+        <div class="source-opt-desc">keep cloud copy</div>
+      </div>
+      <div class="source-opt" data-scope="both" onclick="selectDeleteScope(this)">
+        <div class="source-opt-icon">­ƒÆ¥Ôÿü</div>
+        <div class="source-opt-name">Local + Cloud</div>
+        <div class="source-opt-desc">permanent</div>
+      </div>`;
+    _deleteState.scope = 'local';
+  } else {
+    scopeSection.style.display = 'none';
+  }
+
+  updateDeleteWarning();
+  document.getElementById('delete-modal').classList.add('open');
+}
+
 loadCurrentUser();
-init();
 </script>
 </body>
 </html>
