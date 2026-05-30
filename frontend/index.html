@@ -3294,6 +3294,273 @@ function openDeleteModal(d) {
   document.getElementById('delete-modal').classList.add('open');
 }
 
+// --- Restored: toggleSnaps ---
+function toggleSnaps(header) {
+  const card = header.closest('.vm-card');
+  const snaps = card.querySelector('.snapshots');
+  const btn = card.querySelector('.expand-btn');
+  snaps.classList.toggle('open');
+  btn.classList.toggle('open');
+  btn.textContent = snaps.classList.contains('open') ? 'Ôû┤' : 'Ôû¥';
+}
+
+// --- Restored: updateConfirmBtn ---
+function updateConfirmBtn() {
+  const btn = document.getElementById('modal-confirm-btn');
+  const selfOk = !_modalState.isSelf || document.getElementById('modal-self-confirm').checked;
+  btn.disabled = !selfOk;
+}
+
+// --- Restored: _scheduleHint ---
+function _scheduleHint() {
+  if (!_schedules) return '';
+  const { pbs_jobs, pbs_running, restic_next, restic_running } = _schedules;
+  const parts = [];
+  if (pbs_running)    parts.push('<strong style="color:var(--red)">ÔÜá PBS backup is running now</strong>');
+  if (restic_running) parts.push('<strong style="color:var(--red)">ÔÜá Restic backup is running now</strong>');
+  (pbs_jobs || []).forEach(j => { if (j.schedule) parts.push(`PBS: ${j.schedule}`); });
+  if (restic_next) parts.push(`Restic: ${restic_next.next} (in ${restic_next.left})`);
+  if (!parts.length) return '';
+  return `<br><br><span style="font-size:10px;color:var(--muted)">Scheduled: ${parts.join(' ┬À ')}</span>`;
+}
+
+// --- Restored: _apiError ---
+function _apiError(res, text) {
+  if (res.status === 409) return 'A restic operation is already running ÔÇö please try again in a moment.';
+  return text;
+}
+
+// --- Restored: confirmRestore ---
+async function confirmRestore() {
+  const { vmid, type, backupTime, resticId, source } = _modalState;
+  const runBackupAfter = document.getElementById('modal-backup-after').checked;
+  closeModal();
+
+  MQTTBus.triggerAction('restore',
+    { vmid, type, backup_time: backupTime, source, restic_id: resticId, run_backup_after: runBackupAfter },
+    'Restore', vmid);
+}
+
+// --- Restored: triggerResticPrune ---
+async function triggerResticPrune() {
+  if (!confirm('Run restic prune now?\n\nThis removes unreferenced data from the cloud repo and may take a while.')) return;
+  const btn = document.getElementById('s-prune-now-btn');
+  if (btn) { btn.disabled = true; btn.textContent = 'StartingÔÇª'; }
+  try {
+    const ds = MQTTBus.getDS();
+    const hostId = ds?.hostId || currentHost;
+    const resp = await fetch(`/api/host/${hostId}/restic/prune`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || resp.statusText);
+    closeSettingsModal();
+    openJobModal('Restic prune', data.op_id, null);
+  } catch (e) {
+    alert(`Prune failed to start: ${e.message}`);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Prune now'; }
+  }
+}
+
+// --- Restored: renderSchedules ---
+function renderSchedules() {
+  const section = document.getElementById('schedules-section');
+  const container = document.getElementById('schedule-info');
+  if (!_schedules) { section.style.display = 'none'; return; }
+
+  const { pbs_jobs, pbs_running, restic_next, restic_running, pbs_retention, restic_retention } = _schedules;
+
+  const retDims = [
+    { key: 'keep-last',    label: 'last'    },
+    { key: 'keep-daily',   label: 'daily'   },
+    { key: 'keep-weekly',  label: 'weekly'  },
+    { key: 'keep-monthly', label: 'monthly' },
+    { key: 'keep-yearly',  label: 'yearly'  },
+  ];
+
+  const _schedNext = sched => {
+    if (!sched) return null;
+    const m = sched.match(/(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const next = new Date();
+    next.setHours(+m[1], +m[2], 0, 0);
+    if (next <= new Date()) next.setDate(next.getDate() + 1);
+    return next;
+  };
+  const _fmtLeft = ms => {
+    const min = Math.round(ms / 60000);
+    if (min < 60)   return `in ${min}m`;
+    if (min < 1440) return `in ${Math.floor(min/60)}h`;
+    return `in ${Math.floor(min/1440)}d`;
+  };
+  const _fmtDate = d => {
+    const pad = n => String(n).padStart(2,'0');
+    const wd = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
+    return `${wd} ${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+
+  const pbsJob   = (pbs_jobs || [])[0];
+  const pbsNext  = _schedNext(pbsJob?.schedule);
+  const pbsSched = pbsNext ? _fmtLeft(pbsNext - new Date()) : (pbsJob?.schedule || 'ÔÇö');
+  const pbsTitle = pbsNext ? _fmtDate(pbsNext) : '';
+  const pbsRet   = (pbs_retention || [])[0] || {};
+  const resSched = restic_next ? `in ${restic_next.left.replace('min','m')}` : 'ÔÇö';
+  const resTitle = restic_next ? restic_next.next.replace(/:\d{2}\s+\S+$/, '') : '';
+  const resRet   = restic_retention || {};
+
+  const hasAny = pbs_jobs?.length || restic_next || pbs_running || restic_running || Object.keys(resRet).length || Object.keys(pbsRet).length;
+  if (!hasAny) { section.style.display = 'none'; return; }
+
+  let html = '';
+  if (pbs_running) html += `<div class="running-badge pbs" style="margin-bottom:8px"><div class="running-badge-dot"></div>PBS backup running</div>`;
+  if (restic_running) {
+    html += `<div class="running-badge cloud" onclick="openResticLogModal(currentHost)" style="cursor:pointer;margin-bottom:8px" title="Click to view live log"><div class="running-badge-dot"></div>Restic backup running</div>`;
+  }
+
+  const fmtRetCell = ret => retDims
+    .filter(d => ret[d.key])
+    .map(d => `<span class="ret-k">${d.label}</span><span class="ret-v">${ret[d.key]}</span>`)
+    .join('');
+
+  const pbsPruneCell  = fmtRetCell(pbsRet) || 'ÔÇö';
+  const resPruneCell  = fmtRetCell(resRet) || 'ÔÇö';
+
+  html += `<div class="sched-table">
+    <span></span><span class="sh">PBS</span><span class="sh">Restic</span>
+    <span class="sr">schedule</span><span class="sv" title="${pbsTitle}">${pbsSched}</span><span class="sv" title="${resTitle}">${resSched}</span>
+    <span class="sr">prune</span><div class="sp ret-cell">${pbsPruneCell}</div><div class="sp ret-cell">${resPruneCell}</div>
+  </div>`;
+
+  section.style.display = '';
+  container.innerHTML = html;
+}
+
+// --- Restored: selectRestoreSource ---
+function selectRestoreSource(el) {
+  el.closest('.source-options').querySelectorAll('.source-opt')
+    .forEach(o => o.classList.remove('selected'));
+  el.classList.add('selected');
+  _modalState.source = el.dataset.source;
+  document.getElementById('modal-time').textContent =
+    _modalState.source === 'local' ? '~5 min' : '~2ÔÇô4 h';
+  updateRestoreWarning();
+  updateConfirmBtn();
+}
+
+// --- Restored: openResticLogModal ---
+async function openResticLogModal(host) {
+  const logEl = document.getElementById('job-log');
+  const badge = document.getElementById('job-badge');
+  const prog  = document.getElementById('job-progress');
+  document.getElementById('job-title').textContent = 'Restic nightly backup log';
+  document.getElementById('job-subtitle').textContent = '';
+  logEl.innerHTML = '';
+  badge.className = 'job-status-badge running';
+  badge.textContent = 'running';
+  prog.style.display = 'none';
+  document.getElementById('job-close-btn').disabled = false;
+  document.getElementById('job-modal').classList.add('open');
+
+  // First render existing lines
+  try {
+    const r = await fetch(`${API_BASE}/api/host/${host}/restic/log`);
+    if (r.ok) {
+      const { lines, running } = await r.json();
+      lines.forEach(l => { logEl.innerHTML += `<div>${_escHtml(l)}</div>`; });
+      logEl.scrollTop = logEl.scrollHeight;
+      if (!running) {
+        badge.className = 'job-status-badge ok';
+        badge.textContent = 'done';
+        return;
+      }
+    }
+  } catch (_) {}
+
+  // Stream new lines via SSE
+  if (_resticLogES) { _resticLogES.close(); _resticLogES = null; }
+  const es = new EventSource(`${API_BASE}/api/host/${host}/restic/log/stream`);
+  _resticLogES = es;
+  es.onmessage = (evt) => {
+    if (evt.data === '__done__') {
+      badge.className = 'job-status-badge ok';
+      badge.textContent = 'done';
+      es.close();
+      _resticLogES = null;
+      return;
+    }
+    logEl.innerHTML += `<div>${_escHtml(evt.data)}</div>`;
+    logEl.scrollTop = logEl.scrollHeight;
+  };
+  es.onerror = () => { es.close(); _resticLogES = null; };
+}
+
+// --- Restored: updateRestoreWarning ---
+function updateRestoreWarning() {
+  const w = document.getElementById('modal-warning');
+  if (_modalState.source === 'cloud') {
+    w.className = 'modal-warning cloud';
+    w.innerHTML = 'ÔÜá &nbsp;This will overwrite the current PBS datastore with the selected restic snapshot. Newer local snapshots will be replaced. Recent backups remain available in Google Drive.';
+  } else {
+    w.className = 'modal-warning';
+    w.innerHTML = 'ÔÜá &nbsp;The VM will be stopped and overwritten. This cannot be undone.';
+  }
+}
+
+// --- Restored: renderData ---
+function renderData(data) {
+  const { vms, lxcs, storage, restic_busy, pbs_stale } = data;
+
+  document.getElementById('page-subtitle').textContent =
+    `${vms.length} VMs ┬À ${lxcs.length} LXCs`;
+
+  let html = '';
+
+  if (pbs_stale) {
+    html += `<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;margin-bottom:12px;background:color-mix(in srgb,var(--yellow) 10%,transparent);border:1px solid color-mix(in srgb,var(--yellow) 30%,transparent);border-radius:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--yellow)">
+      <span>ÔÜá PBS is offline ÔÇö showing cached data from last successful refresh.</span>
+    </div>`;
+  }
+
+  if (restic_busy) {
+    html += `<div style="display:flex;align-items:center;gap:10px;padding:10px 16px;margin-bottom:12px;background:color-mix(in srgb,var(--accent) 10%,transparent);border:1px solid color-mix(in srgb,var(--accent) 30%,transparent);border-radius:8px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent)">
+      <div class="running-badge-dot" style="flex-shrink:0"></div>
+      <span>Restic backup in progress ÔÇö cloud coverage data is temporarily unavailable. Sync and delete cloud operations are disabled until it completes.</span>
+    </div>`;
+  }
+
+  if (vms.length > 0) {
+    html += `<div class="section-header">
+      <span class="section-title">Virtual Machines</span>
+      <div class="section-line"></div>
+      <span class="section-count">${vms.length}</span>
+    </div>
+    <div class="vm-grid">${vms.map(renderCard).join('')}</div>`;
+  }
+
+  if (lxcs.length > 0) {
+    html += `<div class="section-header">
+      <span class="section-title">Containers</span>
+      <div class="section-line"></div>
+      <span class="section-count">${lxcs.length}</span>
+    </div>
+    <div class="vm-grid">${lxcs.map(renderCard).join('')}</div>`;
+  }
+
+  if (!html) {
+    html = `<div class="state-msg">No VMs or containers found.</div>`;
+  }
+
+  document.getElementById('content').innerHTML = html;
+  // Re-apply active job indicators after re-render
+  Object.entries(_activeJobs).forEach(([vmid, entry]) => {
+    _setJobIndicator(parseInt(vmid), true, entry.title);
+  });
+}
+
+// --- Restored: closeModal ---
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+}
+
 loadCurrentUser();
 </script>
 </body>
