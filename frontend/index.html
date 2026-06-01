@@ -2626,7 +2626,8 @@ const MQTTBus = (() => {
       Object.entries(_activeJobs).forEach(([k, v]) => {
         if (v.jobId === op_id) vmid = k.startsWith('_noid_') ? null : k;
       });
-      const success = msg === 'ok';
+      if (msg === 'running') return;
+        const success = msg === 'ok';
       _completeJob(op_id, vmid, success);
       return;
     }
