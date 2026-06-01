@@ -304,12 +304,14 @@ def mqtt_proxy(ws):
     with WS_LOCK:
         WS_CLIENTS.add(msg_q)
 
-    # Send initial replay
+    # Send initial replay — serialize payload as JSON string to match
+    # the format of live MQTT messages (payload.toString() in _onMessage).
     from mqtt_manager import MQTT_CACHE, MQTT_CACHE_LOCK
     with MQTT_CACHE_LOCK:
         for topic, payload in MQTT_CACHE.items():
             try:
-                msg_q.put_nowait({"topic": topic, "payload": payload})
+                p = payload if isinstance(payload, str) else json.dumps(payload)
+                msg_q.put_nowait({"topic": topic, "payload": p})
             except queue.Full:
                 break
 
