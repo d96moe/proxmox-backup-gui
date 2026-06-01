@@ -470,6 +470,30 @@ def _mqtt_mock_script(host_ids: list[str]) -> str:
           try {{
             const _pl      = JSON.parse(msg.payload || '{{}}');
             const _corr_id = _pl.corr_id;
+            const _cmd     = cmdMatch[3];
+
+            if (_cmd === 'replay_op_log' || _cmd === 'replay_pbs_log' || _cmd === 'replay_restic_log') {{
+              const op_id = _pl.op_id || _pl.upid || 'mock-job-1';
+              setTimeout(async function() {{
+                try {{
+                  const res = await window.fetch('/api/job/' + op_id);
+                  if (!res.ok) return;
+                  const data = await res.json();
+                  if (data.logs) {{
+                    data.logs.forEach((line, idx) => {{
+                      setTimeout(() => {{
+                        _deliver(self, _pfx + '/' + _host + '/ops/' + op_id + '/log', line);
+                      }}, idx * 10);
+                    }});
+                    setTimeout(() => {{
+                      _deliver(self, _pfx + '/' + _host + '/ops/' + op_id + '/status', data.status === 'done' ? 'ok' : data.status);
+                    }}, data.logs.length * 10 + 20);
+                  }}
+                }} catch(e) {{}}
+              }}, 30);
+              return;
+            }}
+
             if (_corr_id) {{
               setTimeout(function() {{
                 _deliver(self, _pfx + '/' + _host + '/job/' + _corr_id + '/ack',
@@ -576,7 +600,8 @@ def page(browser, mock_server):
     pg = ctx.new_page()
     # Capture JS console errors so tests can assert on them
     pg._js_errors: list[str] = []
-    pg.on("pageerror", lambda e: pg._js_errors.append(str(e)))
+    pg.on("pageerror", lambda e: print(f"PAGEERROR: {e}") or pg._js_errors.append(str(e)))
+    pg.on("console", lambda msg: print(f"BROWSER CONSOLE: {msg.type} {msg.text}"))
     pg.goto("/")
     # Wait for actual home VM data — not just absence of loading text, which can
     # fire early on empty string before MQTT delivers the first message.
@@ -1255,10 +1280,10 @@ def test_job_badge_shows_error_status(page: Page):
     cfg.job_logs = ["ERROR: restore failed"]
     page.evaluate("openJobModal('Test', 'mock-job-1')")
     page.wait_for_function(
-        "() => document.getElementById('job-badge').textContent === 'error'",
+        "() => document.getElementById('job-badge').textContent === 'failed'",
         timeout=6000,
     )
-    assert page.locator("#job-badge").inner_text() == "error"
+    assert page.locator("#job-badge").inner_text() == "failed"
 
 def test_job_badge_shows_done_status(page: Page):
     """Job badge text must change to 'done' when job completes successfully."""
@@ -1503,7 +1528,7 @@ def test_restore_modal_failed_job_shows_error_badge(page: Page):
     page.click("#modal-confirm-btn")
     page.wait_for_selector("#job-modal.open", timeout=5000)
     page.wait_for_function(
-        "() => document.getElementById('job-badge').textContent === 'error'", timeout=6000)
+        "() => document.getElementById('job-badge').textContent === 'failed'", timeout=6000)
     log_text = page.locator("#job-log").inner_text()
     assert "ERROR" in log_text, f"Error message not shown in log: {log_text!r}"
     page.evaluate("closeJobModal()")

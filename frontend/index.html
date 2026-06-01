@@ -732,39 +732,8 @@
   </div>
 </div>
 
-<!-- Backup Modal -->
-<div class="modal-overlay" id="backup-modal">
-  <div class="modal">
-    <div class="modal-header">
-      <div>
-        <div class="modal-title">Backup now</div>
-        <div class="modal-subtitle" id="backup-modal-subtitle"></div>
-      </div>
-      <button class="modal-close" onclick="closeBackupModal()">✕</button>
-    </div>
-    <div class="modal-body">
-      <div class="modal-source-select">
-        <div class="source-label">Backup type</div>
-        <div class="source-options" id="backup-modal-options">
-          <div class="source-opt selected" data-btype="pbs" onclick="selectBackupType(this)">
-            <div class="source-opt-icon">💾</div>
-            <div class="source-opt-name">PBS only</div>
-            <div class="source-opt-desc">local · minutes</div>
-          </div>
-          <div class="source-opt" data-btype="pbs+restic" onclick="selectBackupType(this)">
-            <div class="source-opt-icon">💾☁</div>
-            <div class="source-opt-name">PBS + Cloud</div>
-            <div class="source-opt-desc">local + restic · longer</div>
-          </div>
-        </div>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn" onclick="closeBackupModal()">Cancel</button>
-      <button class="btn btn-primary" id="backup-confirm-btn" onclick="confirmBackup()">Run backup</button>
-    </div>
-  </div>
-</div>
+
+
 
 <!-- Delete Snapshot Modal -->
 <div class="modal-overlay" id="delete-modal">
@@ -1179,17 +1148,16 @@ function openPbsTaskModal(upid, title) {
   document.getElementById('job-badge').textContent = 'running';
   document.getElementById('job-badge').className = 'job-status-badge running';
   document.getElementById('job-progress').style.display = 'none';
-  document.getElementById('job-close-btn').disabled = true;
   const logEl = document.getElementById('job-log');
   logEl.innerHTML = '';
   modal.classList.add('open');
 
   if (_jobPollInterval) { clearInterval(_jobPollInterval); _jobPollInterval = null; }
 
-  if (_ws && _ws.readyState === WebSocket.OPEN) { _ws.send(JSON.stringify({topic: `${_prefix}/${currentHost}/cmd/replay_pbs_log`, payload: {upid: upid}})); }
+  MQTTBus.triggerAction('replay_pbs_log', {upid: upid});
 
   // Stream new lines via MQTT
-  if (_ws && _ws.readyState === WebSocket.OPEN) { _ws.send(JSON.stringify({topic: `${_prefix}/${host}/cmd/replay_restic_log`, payload: {}})); }
+  MQTTBus.triggerAction('replay_restic_log', {});
 }
 
 function _reopenLastJob() {
@@ -1250,6 +1218,8 @@ function openJobModal(title, jobId, vmid) {
     _activeJobs[`_noid_${jobId}`] = { jobId, title };
     _updateGlobalJobIndicator();
   }
+  // Request log replay from agent via MQTT cmd/replay_op_log
+  MQTTBus.triggerAction('replay_op_log', { op_id: jobId });
   document.getElementById('job-title').textContent = title;
   document.getElementById('job-subtitle').textContent = `job ${jobId}`;
   document.getElementById('job-log').innerHTML = '';
@@ -1263,17 +1233,9 @@ function openJobModal(title, jobId, vmid) {
   _track.classList.add('indeterminate');
   _prog.style.display = '';
   document.getElementById('job-progress-label').textContent = 'Running…';
-  document.getElementById('job-close-btn').disabled = true;
+  document.getElementById('job-close-btn').disabled = false;
   document.getElementById('job-modal').classList.add('open');
   if (_jobPollInterval) { clearInterval(_jobPollInterval); _jobPollInterval = null; }
-  
-  // Request log replay from agent via MQTT cmd/replay_op_log
-  if (_ws && _ws.readyState === WebSocket.OPEN) {
-    _ws.send(JSON.stringify({
-      topic: `${_prefix}/${currentHost}/cmd/replay_op_log`,
-      payload: JSON.stringify({ op_id: jobId })
-    }));
-  }
 }
 
 function reopenJobModal(vmid) {
@@ -1283,7 +1245,7 @@ function reopenJobModal(vmid) {
   document.getElementById('job-subtitle').textContent = `job ${entry.jobId}`;
   document.getElementById('job-badge').className = 'job-status-badge running';
   document.getElementById('job-badge').textContent = 'running';
-  document.getElementById('job-close-btn').disabled = true;
+  document.getElementById('job-close-btn').disabled = false;
   document.getElementById('job-modal').classList.add('open');
   
   // Re-request full log
@@ -3079,6 +3041,7 @@ function reopenJobModal(vmid) {
   document.getElementById('job-badge').className = 'job-status-badge running';
   document.getElementById('job-badge').textContent = 'running';
   document.getElementById('job-close-btn').disabled = false;
+  document.getElementById('job-close-btn').disabled = false;
   document.getElementById('job-modal').classList.add('open');
   const logEl = document.getElementById('job-log');
   if (logEl) logEl.scrollTop = logEl.scrollHeight;
@@ -3458,6 +3421,7 @@ async function openResticLogModal(host) {
   badge.textContent = 'running';
   prog.style.display = 'none';
   document.getElementById('job-close-btn').disabled = false;
+  document.getElementById('job-close-btn').disabled = false;
   document.getElementById('job-modal').classList.add('open');
 
   // First render existing lines
@@ -3562,6 +3526,7 @@ function closeModal() {
 }
 
 loadCurrentUser();
+init();
 </script>
 </body>
 </html>
