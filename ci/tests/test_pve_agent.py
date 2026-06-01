@@ -84,7 +84,7 @@ class TestMQTTPublisher:
             op = mock_run_bg.call_args[0][0]
             func = mock_run_bg.call_args[0][1]
             
-            assert op.op_type == "backup"
+            assert op.type == "backup"
             assert op.vmid == "101"
             
             mock_pve = mock_pve_cls.return_value
@@ -176,10 +176,10 @@ class TestStatePoller:
         poller = StatePoller(mock_cfg, pub)
         
         mock_pve = mock_pve_cls.return_value
-        mock_pve.get_vms.return_value = [
-            {"vmid": 100, "name": "VM100", "status": "running"},
-            {"vmid": 101, "name": "VM101", "status": "stopped"}
-        ]
+        mock_pve.get_vms_and_lxcs.return_value = {
+            100: {"name": "VM100", "status": "running"},
+            101: {"name": "VM101", "status": "stopped"}
+        }
         
         mock_pbs = mock_pbs_cls.return_value
         mock_pbs.get_snapshots.return_value = [
