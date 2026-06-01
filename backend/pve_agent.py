@@ -499,7 +499,7 @@ class MQTTPublisher:
                 ts = datetime.fromtimestamp(finished_at, tz=timezone.utc).isoformat()
                 self._client.publish(f"{self._base}/vm/{vmid}/backup/last_ok",
                                      ts, retain=True, qos=1)
-        self._client.publish(f"{self._base}/ops/{op_id}/status", status, qos=1)
+        self._client.publish(f"{self._base}/ops/{op_id}/status", status, qos=1, retain=True)
 
     def publish_progress(self, op_id: str, vmid: str | None,
                          pct: float, speed_mbps: float | None = None,
