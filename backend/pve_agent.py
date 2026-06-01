@@ -958,6 +958,14 @@ class StatePoller:
         self._partial_pbs_times: dict[str, set[int]] = {}
         self._partial_lock = threading.Lock()
 
+        # Serializes PVE/PBS scans. The browser fires a burst of cmd/rescan on
+        # page load (one per retained message), and each rescan_now() used to
+        # spawn its own scan thread. Many scans publishing concurrently on the
+        # shared paho socket stalls the MQTT network loop (TCP stays ESTABLISHED
+        # but no further messages are received). One scan at a time keeps all
+        # publishes on a single thread.
+        self._scan_lock = threading.Lock()
+
     def start(self) -> None:
         # Reset running-flags on startup so stale retained "restic_running/pbs_running: true"
         # can never persist across agent restarts.
@@ -994,8 +1002,22 @@ class StatePoller:
         self._stop.set()
 
     def rescan_now(self) -> None:
-        """Trigger an immediate PVE+PBS+storage rescan."""
-        threading.Thread(target=self._scan_pve_pbs, daemon=True, name="rescan-now").start()
+        """Trigger an immediate PVE+PBS+storage rescan.
+
+        Collapses bursts: if a scan is already running, skip — its fresh results
+        will be published anyway. This prevents the cmd/rescan storm on page load
+        from spawning dozens of concurrent scans that flood the MQTT socket.
+        """
+        threading.Thread(target=self._rescan_now_worker, daemon=True, name="rescan-now").start()
+
+    def _rescan_now_worker(self) -> None:
+        if not self._scan_lock.acquire(blocking=False):
+            log.debug("rescan_now: scan already in progress — collapsing duplicate")
+            return
+        try:
+            self._scan_pve_pbs()
+        finally:
+            self._scan_lock.release()
 
     def invalidate_vm_cache(self, vmid: str | None) -> None:
         """Clear cached hashes for a VM so the next rescan always republishes.
@@ -1020,7 +1042,8 @@ class StatePoller:
     def _loop_pve_pbs(self) -> None:
         while not self._stop.is_set():
             try:
-                self._scan_pve_pbs()
+                with self._scan_lock:   # never run concurrently with a rescan_now scan
+                    self._scan_pve_pbs()
             except Exception as exc:
                 log.warning("PVE/PBS poll error: %s", exc)
             self._stop.wait(self.PVE_PBS_INTERVAL)
