@@ -66,7 +66,11 @@ class MQTTPublisher:
 
         lwt_topic = f"{self._base}/agent/status"
 
-        self._client = mqtt.Client(client_id=f"pve-agent-{self._hostname}")
+        _cbv = getattr(mqtt, "CallbackAPIVersion", None)
+        self._client = mqtt.Client(
+            *([_cbv.VERSION1] if _cbv else []),
+            client_id=f"pve-agent-{self._hostname}",
+        )
         self._client.will_set(lwt_topic, "offline", retain=True, qos=1)
 
         if user:
@@ -684,7 +688,11 @@ class HAMQTTPublisher:
         self._hostname = hostname or socket.gethostname()
         self._base     = f"proxmox/{self._hostname}"
 
-        self._client = mqtt.Client(client_id=f"pve-agent-ha-{self._hostname}")
+        _cbv = getattr(mqtt, "CallbackAPIVersion", None)
+        self._client = mqtt.Client(
+            *([_cbv.VERSION1] if _cbv else []),
+            client_id=f"pve-agent-ha-{self._hostname}",
+        )
         self._client.will_set(f"{self._base}/agent/status", "offline",
                               retain=True, qos=1)
         if user:

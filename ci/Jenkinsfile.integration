@@ -426,7 +426,7 @@ systemctl restart pve-agent || systemctl start pve-agent
 echo "Waiting for agent to publish online status to MQTT..."
 echo "mosquitto_sub available: $(which mosquitto_sub 2>/dev/null || echo 'NOT FOUND')"
 for i in $(seq 1 20); do
-    STATUS=$(/opt/pve-agent/venv/bin/python3 -W ignore - <<'PYCHECK' 2>/dev/null || echo "error"
+    STATUS=$(/opt/pve-agent/venv/bin/python3 - <<'PYCHECK' 2>&1 || echo "error"
 import paho.mqtt.client as mqtt, time, sys
 result = []
 def on_connect(c, u, f, rc):
@@ -438,7 +438,8 @@ def on_connect(c, u, f, rc):
 def on_message(c, u, m):
     result.append(m.payload.decode())
     c.disconnect()
-c = mqtt.Client(client_id="ci-check")
+_cbv = getattr(mqtt, "CallbackAPIVersion", None)
+c = mqtt.Client(*([_cbv.VERSION1] if _cbv else []), client_id="ci-check")
 c.username_pw_set("ci-mqtt-user", "ci-mqtt-pass")
 c.on_connect = on_connect
 c.on_message = on_message
