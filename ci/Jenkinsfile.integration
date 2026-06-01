@@ -962,6 +962,20 @@ PYEOF
                         "pct push 300 /tmp/purge_ct300_snaps.py /tmp/purge_ct300_snaps.py && \
                          pct exec 300 -- python3 /tmp/purge_ct300_snaps.py"
                     echo "ct/300 snapshot purge complete"
+
+                    # The seed creates restic backups directly via the restic CLI, so the
+                    # agent (which only re-scans restic every 300s) has a STALE view: local
+                    # snapshots show cloud=False and cloud-only entries point at restic IDs
+                    # that no longer exist. Restart the agent so its StatePoller does an
+                    # immediate fresh _scan_restic + _scan_pve_pbs reflecting the final seed
+                    # state, then wait for it to republish before tests read the items API.
+                    echo "Restarting pve-agent to refresh restic/PBS scan after seeding..."
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} "systemctl restart pve-agent"
+                    # On startup the poller scans PBS (~3s) then restic from GDrive (~12s);
+                    # _scan_restic then calls rescan_now() to re-annotate with fresh coverage.
+                    # 30s gives GDrive listing slack before tests read the items API.
+                    sleep 30
+                    echo "pve-agent restarted; cache should now reflect seeded state"
                 '''
             }
         }
