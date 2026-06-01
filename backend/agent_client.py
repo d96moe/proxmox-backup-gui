@@ -575,7 +575,7 @@ class AgentClient:
                     log_fn(logs[printed])
                     printed += 1
                 
-                if status == "ok":
+                if status in ("ok", "done"):
                     return True
                 if status == "failed":
                     return False
