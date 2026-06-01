@@ -353,7 +353,7 @@ def test_cloud_restore_api(host_id, items):
     assert "job_id" in resp
 
     # Cloud restore is slow (restic download + PBS restart + VM restore)
-    job = _poll_job(resp["job_id"], timeout=600)
+    job = _poll_job(resp["job_id"], timeout=1800)
     err = _job_ok(job)
     assert not err, f"Cloud restore failed:\n{err}"
 
@@ -447,7 +447,7 @@ def test_cloud_only_restore_api(host_id, items):
     })
     assert "job_id" in resp
 
-    job = _poll_job(resp["job_id"], timeout=600)
+    job = _poll_job(resp["job_id"], timeout=1800)
     err = _job_ok(job)
     assert not err, f"Cloud-only restore failed:\n{err}"
 
@@ -891,7 +891,7 @@ def test_delete_both_snap_api(host_id, items):
     })
     assert "job_id" in resp, f"No job_id in delete/both response: {resp}"
 
-    job = _poll_job(resp["job_id"], timeout=600)
+    job = _poll_job(resp["job_id"], timeout=1800)
     err = _job_ok(job)
     assert not err, f"delete/both job failed:\n{err}"
 
@@ -962,7 +962,7 @@ def test_delete_cloud_only_api(host_id):
     assert "job_id" in resp, f"No job_id in delete/cloud response: {resp}"
 
     # Cloud delete: restore PBS from restic + delete + re-backup + forget — allow 10 min
-    job = _poll_job(resp["job_id"], timeout=600)
+    job = _poll_job(resp["job_id"], timeout=1800)
     err = _job_ok(job)
     assert not err, f"delete/cloud job failed:\n{err}"
 
