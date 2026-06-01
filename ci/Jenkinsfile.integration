@@ -403,7 +403,10 @@ SVCEOF
 # ── Mosquitto (MQTT broker) ─────────────────────────────────────────────────
 # Mosquitto pre-installed in template 9092. Configure it to listen on all
 # interfaces with authentication enabled.
+# Remove any existing conf.d files from the template to avoid conflicts
+# (e.g. gui.conf with allow_anonymous true would override our auth settings).
 mkdir -p /etc/mosquitto/conf.d
+rm -f /etc/mosquitto/conf.d/*.conf
 cat > /etc/mosquitto/conf.d/ci.conf << 'MQTTEOF'
 listener 1883 0.0.0.0
 allow_anonymous false
@@ -413,6 +416,7 @@ MQTTEOF
 mosquitto_passwd -c -b /etc/mosquitto/passwd ci-mqtt-user ci-mqtt-pass
 systemctl enable mosquitto
 systemctl restart mosquitto
+sleep 2
 echo "Mosquitto configured and started"
 
 systemctl daemon-reload
@@ -422,7 +426,7 @@ systemctl restart pve-agent || systemctl start pve-agent
 echo "Waiting for agent to publish online status to MQTT..."
 for i in $(seq 1 20); do
     # Using mosquitto_sub to check the retained online message
-    STATUS=$(timeout 3 mosquitto_sub -h 127.0.0.1 -p 1883 -u "ci-mqtt-user" -P "ci-mqtt-pass" -t "proxmox/ci/agent/status" -C 1 -W 3 2>/dev/null || true)
+    STATUS=$(timeout 3 mosquitto_sub -h 127.0.0.1 -p 1883 -u "ci-mqtt-user" -P "ci-mqtt-pass" -t "proxmox/ci/agent/status" -C 1 -W 3 2>&1 || true)
     if [ "$STATUS" = "online" ]; then
         echo "Agent ready (MQTT online)"
         break
