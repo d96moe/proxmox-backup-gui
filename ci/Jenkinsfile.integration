@@ -454,14 +454,14 @@ except Exception as e:
 print(result[0] if result else "timeout")
 PYCHECK
 )
-    if [ "$STATUS" = "online" ]; then
+    if echo "$STATUS" | grep -q "^online$"; then
         echo "Agent ready (MQTT online)"
         break
     fi
     echo "  waiting for agent... ($i/20) [STATUS='${STATUS}']"
     sleep 3
 done
-if [ "$STATUS" != "online" ]; then
+if ! echo "$STATUS" | grep -q "^online$"; then
     echo "ERROR: Agent not reachable via MQTT (last STATUS='${STATUS}')"
     journalctl -u pve-agent --no-pager -n 30 || true
     exit 1
