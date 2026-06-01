@@ -547,20 +547,13 @@ print('CI admin user created')
                             sleep 3
                         done
                         # Always dump journal for visibility
-                        echo "=== proxmox-backup-gui journal (last 20 lines) ==="
-                        pct exec 300 -- journalctl -u proxmox-backup-gui -n 20 --no-pager || true
+                        echo "=== proxmox-backup-gui journal (last 50 lines) ==="
+                        pct exec 300 -- journalctl -u proxmox-backup-gui -n 50 --no-pager || true
                         echo "=== end journal ==="
                         # Final check — fail if not active
                         if ! pct exec 300 -- systemctl is-active proxmox-backup-gui; then
                             exit 1
                         fi
-                        # Wait for Flask's MQTT_CACHE to populate from retained messages.
-                        # init_mqtt() uses loop_start() (async) — retained messages arrive
-                        # via _on_message callback a second or two after connect.
-                        # Without this sleep, Playwright tests start with empty MQTT_CACHE
-                        # and the browser never sees VM cards (race condition).
-                        echo "Waiting 10s for MQTT_CACHE to populate..."
-                        sleep 10
 
                         # Update test files and frontend in CI working dir
                         # (mock server in test_frontend.py reads frontend/index.html
