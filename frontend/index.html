@@ -2627,7 +2627,7 @@ const MQTTBus = (() => {
         if (v.jobId === op_id) vmid = k.startsWith('_noid_') ? null : k;
       });
       if (msg === 'running') return;
-        const success = msg === 'ok';
+      const success = msg === 'ok' || msg === 'done';
       _completeJob(op_id, vmid, success);
       return;
     }
