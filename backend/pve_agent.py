@@ -1904,20 +1904,26 @@ class LocalResticClient:
     def restore_datastore(self, snapshot_id: str, log_fn) -> None:
         """Restore a restic snapshot to the PBS datastore path."""
         log_fn("Stopping PBS…")
+        log.info("restore_datastore: stopping PBS services")
         subprocess.run(["systemctl", "stop", "proxmox-backup", "proxmox-backup-proxy"],
                        env=self._full_env, timeout=30)
         try:
-            log_fn(f"Restoring restic snapshot {snapshot_id[:8]}…")
+            cmd = ["restic", "restore", snapshot_id, "--target", "/", "--no-lock", "--verbose"]
+            log_fn(f"Restoring restic snapshot {snapshot_id[:8]}… (cmd: {' '.join(cmd)})")
+            log.info("restore_datastore: running %s", " ".join(cmd))
             proc = subprocess.Popen(
-                ["restic", "restore", snapshot_id, "--target", "/", "--no-lock", "--verbose"],
+                cmd,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, env=self._full_env,
             )
+            log.info("restore_datastore: restic PID=%d started, reading output…", proc.pid)
             for line in proc.stdout:
                 line = line.rstrip()
                 if line:
                     log_fn(line)
+                    log.debug("restore_datastore: %s", line)
             proc.wait()
+            log.info("restore_datastore: restic exited rc=%d", proc.returncode)
             if proc.returncode != 0:
                 raise RuntimeError(f"restic restore failed (rc={proc.returncode})")
             log_fn("Restore complete.")

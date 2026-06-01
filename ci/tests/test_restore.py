@@ -84,11 +84,26 @@ def _post(path: str, body: dict) -> dict:
 def _poll_job(job_id: str, timeout: int = 360) -> dict:
     """Poll /api/job/<id> until done or error. Returns final job dict."""
     deadline = time.monotonic() + timeout
+    last_log_count = 0
+    next_print = time.monotonic() + 30  # print progress every 30s
     while time.monotonic() < deadline:
         job = _get(f"/api/job/{job_id}")
+        logs = job.get("logs", [])
+        # Print new log lines as they arrive so CI log shows restic progress
+        if len(logs) > last_log_count:
+            for line in logs[last_log_count:]:
+                print(f"  [job log] {line}", flush=True)
+            last_log_count = len(logs)
         if job["status"] in ("done", "error"):
             return job
+        if time.monotonic() >= next_print:
+            elapsed = timeout - (deadline - time.monotonic())
+            print(f"  [poll] job {job_id} still running after {elapsed:.0f}s "
+                  f"({len(logs)} log lines so far)", flush=True)
+            next_print = time.monotonic() + 30
         time.sleep(4)
+    logs = _get(f"/api/job/{job_id}").get("logs", [])
+    print(f"  [timeout] Last job logs:\n" + "\n".join(f"    {l}" for l in logs[-20:]))
     raise TimeoutError(f"Job {job_id} did not finish within {timeout}s")
 
 

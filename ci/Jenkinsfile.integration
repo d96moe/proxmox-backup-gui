@@ -1052,6 +1052,11 @@ EOF
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
                         root@${VM_IP}:/tmp/test-results/integration.xml \
                         test-results/integration.xml
+                    # Always collect agent journal for post-mortem on cloud restore failures
+                    echo "=== pve-agent journal (last 80 lines) ==="
+                    ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
+                        "journalctl -u pve-agent --no-pager -n 80" || true
+                    echo "=== end pve-agent journal ==="
                 '''
             }
         }
