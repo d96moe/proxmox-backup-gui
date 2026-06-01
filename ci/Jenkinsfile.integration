@@ -316,7 +316,7 @@ cp /tmp/gui-update/config.py      ${AGENT_DIR}/config.py
 # Re-create only if missing (e.g. template was rebuilt without it).
 if [ ! -x ${AGENT_DIR}/venv/bin/python ]; then
     python3 -m venv ${AGENT_DIR}/venv
-    ${AGENT_DIR}/venv/bin/pip install --quiet flask requests paho-mqtt
+    ${AGENT_DIR}/venv/bin/pip install --quiet "flask" "requests" "paho-mqtt>=1.6,<2.0"
 fi
 
 # Read PVE and PBS credentials from the template-configured hosts.json in LXC 300.
@@ -438,8 +438,7 @@ def on_connect(c, u, f, rc):
 def on_message(c, u, m):
     result.append(m.payload.decode())
     c.disconnect()
-_cbv = getattr(mqtt, "CallbackAPIVersion", None)
-c = mqtt.Client(*([_cbv.VERSION1] if _cbv else []), client_id="ci-check")
+c = mqtt.Client(client_id="ci-check")
 c.username_pw_set("ci-mqtt-user", "ci-mqtt-pass")
 c.on_connect = on_connect
 c.on_message = on_message

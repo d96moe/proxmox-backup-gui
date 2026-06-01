@@ -60,10 +60,8 @@ def init_mqtt(host: str, port: int, user: str, password: str, prefix: str):
     if _global_client is not None:
         return
 
-    _cbv = getattr(paho_mqtt, "CallbackAPIVersion", None)
     client = paho_mqtt.Client(
-        *([_cbv.VERSION1] if _cbv else []),
-        client_id=f"gui-backend-global",
+        client_id="gui-backend-global",
         protocol=paho_mqtt.MQTTv311,
     )
     if user and password:
