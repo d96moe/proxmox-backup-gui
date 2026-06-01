@@ -1041,6 +1041,35 @@ for item in d.get('lxcs',[]):
         rid=s.get('restic_id','')
         print(' ',vmid,s['backup_time'],s.get('local'),s.get('cloud'),rid[:8] if rid else '')
 " 2>/dev/null || echo "items endpoint failed"
+                        # Dump the raw inputs to the restic→PBS coverage join so we can
+                        # see WHY local snapshots aren't flagged cloud-covered:
+                        #   (a) restic snapshots + their tags (ct-<vmid>-<ts>)
+                        #   (b) PBS snapshot dirs actually present in /mnt/ci-pbs
+                        #   (c) PBS API backup_times per VM
+                        echo "--- (a) restic snapshots + tags ---"
+                        # Read repo + password from the agent config (seed removes /tmp/.restic_pw).
+                        RR=$(python3 -c "import json;print(json.load(open('/etc/pve-agent/config.json'))['restic_repo'])" 2>/dev/null)
+                        RP=$(python3 -c "import json;print(json.load(open('/etc/pve-agent/config.json'))['restic_password'])" 2>/dev/null)
+                        RESTIC_REPOSITORY="$RR" RESTIC_PASSWORD="$RP" \
+                        RCLONE_CONFIG=/root/.config/rclone/rclone.conf \
+                            restic snapshots --json --no-lock 2>/dev/null | python3 -c "
+import json,sys
+try: snaps=json.load(sys.stdin)
+except Exception: snaps=[]
+for s in snaps:
+    print('  ', s.get('short_id'), s.get('time','')[:19], 'tags=', s.get('tags'))
+" 2>/dev/null || echo "  (restic snapshots failed)"
+                        echo "--- (b) PBS snapshot dirs in /mnt/ci-pbs ---"
+                        for d in /mnt/ci-pbs/ct/*/ /mnt/ci-pbs/vm/*/; do
+                            [ -d "$d" ] || continue
+                            id=$(basename "$d")
+                            for snap in "$d"*/; do
+                                [ -d "$snap" ] || continue
+                                name=$(basename "$snap")
+                                ts=$(date -d "$name" +%s 2>/dev/null || echo "?")
+                                echo "  ct/vm $id  dir=$name  ts=$ts"
+                            done
+                        done 2>/dev/null || echo "  (store listing failed)"
                         echo "--- END DIAGNOSTICS ---"
 
                         echo "Running: pytest ${PYTEST_TARGET} ${PYTEST_FILTER_ARG:+-k} ${PYTEST_FILTER_ARG}${FAIL_FAST_FLAG:+ -x}"
