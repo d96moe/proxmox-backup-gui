@@ -422,20 +422,46 @@ echo "Mosquitto configured and started"
 systemctl daemon-reload
 systemctl restart pve-agent || systemctl start pve-agent
 
-# Wait for agent to be ready by checking its MQTT status
+# Wait for agent to be ready — check via Python+paho-mqtt (always available in agent venv)
 echo "Waiting for agent to publish online status to MQTT..."
+echo "mosquitto_sub available: $(which mosquitto_sub 2>/dev/null || echo 'NOT FOUND')"
 for i in $(seq 1 20); do
-    # Using mosquitto_sub to check the retained online message
-    STATUS=$(timeout 3 mosquitto_sub -h 127.0.0.1 -p 1883 -u "ci-mqtt-user" -P "ci-mqtt-pass" -t "proxmox/ci/agent/status" -C 1 -W 3 2>&1 || true)
+    STATUS=$(/opt/pve-agent/venv/bin/python3 - <<'PYCHECK' 2>&1 || echo "error"
+import paho.mqtt.client as mqtt, time, sys
+result = []
+def on_connect(c, u, f, rc):
+    if rc == 0:
+        c.subscribe("proxmox/ci/agent/status", 0)
+    else:
+        result.append(f"connect-error-rc{rc}")
+        c.disconnect()
+def on_message(c, u, m):
+    result.append(m.payload.decode())
+    c.disconnect()
+c = mqtt.Client(client_id="ci-check")
+c.username_pw_set("ci-mqtt-user", "ci-mqtt-pass")
+c.on_connect = on_connect
+c.on_message = on_message
+try:
+    c.connect("127.0.0.1", 1883, 5)
+    c.loop_start()
+    time.sleep(3)
+    c.loop_stop()
+    c.disconnect()
+except Exception as e:
+    result.append(f"exception:{e}")
+print(result[0] if result else "timeout")
+PYCHECK
+)
     if [ "$STATUS" = "online" ]; then
         echo "Agent ready (MQTT online)"
         break
     fi
-    echo "  waiting for agent... ($i/20)"
+    echo "  waiting for agent... ($i/20) [STATUS='${STATUS}']"
     sleep 3
 done
 if [ "$STATUS" != "online" ]; then
-    echo "ERROR: Agent not reachable via MQTT"
+    echo "ERROR: Agent not reachable via MQTT (last STATUS='${STATUS}')"
     journalctl -u pve-agent --no-pager -n 30 || true
     exit 1
 fi
