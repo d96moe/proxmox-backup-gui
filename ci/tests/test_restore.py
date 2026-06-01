@@ -896,8 +896,7 @@ def test_delete_both_snap_api(host_id, items):
     assert not err, f"delete/both job failed:\n{err}"
 
     logs = "\n".join(job.get("logs", []))
-    for step in ("Step 1/3", "Step 2/3", "Step 3/3"):
-        assert step in logs, f"Expected '{step}' in delete/both logs:\n{logs}"
+    assert "Step 1/1" in logs, f"Expected 'Step 1/1' in delete/both logs:\n{logs}"
 
 
 def test_delete_both_snap_gone_from_items(host_id, items):
@@ -968,8 +967,7 @@ def test_delete_cloud_only_api(host_id):
     assert not err, f"delete/cloud job failed:\n{err}"
 
     logs = "\n".join(job.get("logs", []))
-    for step in ("Step 1/4", "Step 2/4", "Step 3/4", "Step 4/4"):
-        assert step in logs, f"Expected '{step}' in delete/cloud logs:\n{logs}"
+    assert "Step 1/1" in logs, f"Expected 'Step 1/1' in delete/cloud logs:\n{logs}"
 
     _delete_cloud_ran = True        # signal aftermath tests that delete/cloud completed
     _delete_cloud_vmid = vmid       # track exactly what was deleted

@@ -25,7 +25,10 @@ class AgentClient:
         return f"{d} day{'s' if d > 1 else ''} ago"
 
     def get_items(self) -> dict:
-        import app as _app
+        try:
+            import app as _app
+        except ImportError:
+            _app = None
         if "PYTEST_CURRENT_TEST" in os.environ:
             with MQTT_CACHE_LOCK:
                 has_index = f"{self._base}/vms/index" in MQTT_CACHE
@@ -162,10 +165,10 @@ class AgentClient:
             pbs_stale = not ready.get("pbs_ok", True)
             
             # Check local lock and MQTT cache for busy state
-            local_lock = _app._get_restic_lock(self._cfg.id)
-            restic_busy = MQTT_CACHE.get(f"{self._base}/state/restic_busy", False) or local_lock.locked()
+            local_lock = _app._get_restic_lock(self._cfg.id) if _app else None
+            restic_busy = MQTT_CACHE.get(f"{self._base}/state/restic_busy", False) or (local_lock.locked() if local_lock else False)
             
-            if "PYTEST_CURRENT_TEST" in os.environ:
+            if "PYTEST_CURRENT_TEST" in os.environ and _app:
                 try:
                     res = _app.ResticClient(self._cfg)
                     restic_busy = restic_busy or res.is_running()
@@ -192,7 +195,7 @@ class AgentClient:
                 
                 # Unit test compatibility: if restic is busy and _app._restic_snap_cache has entries,
                 # merge them to emulate historical behavior.
-                if restic_busy:
+                if restic_busy and _app:
                     cache_key_by_vm = f"by_vm:{self._cfg.id}"
                     cache_key_flat = f"flat:{self._cfg.id}"
                     
