@@ -15,7 +15,17 @@ from pve_agent import MQTTPublisher, StatePoller, AgentConfig, Operation, _new_o
 
 @pytest.fixture
 def mock_cfg():
-    cfg = AgentConfig()
+    cfg = AgentConfig(
+        pve_url="http://pve",
+        pve_user="root@pam",
+        pve_password="pve",
+        pbs_url="http://pbs",
+        pbs_user="root@pam",
+        pbs_password="pbs",
+        pbs_datastore="pbs-store",
+        pbs_storage_id="pbs-storage",
+        pbs_datastore_path="/mnt/datastore/pbs-store"
+    )
     cfg.mqtt_hostname = "test-node"
     cfg.pbs_storage_id = "pbs-storage"
     cfg.restic_repo = "/path/to/restic"
