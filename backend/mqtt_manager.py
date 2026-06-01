@@ -60,9 +60,13 @@ def init_mqtt(host: str, port: int, user: str, password: str, prefix: str):
     if _global_client is not None:
         return
 
+    # clean_session=False + stable client_id so queued QoS-1 publishes survive
+    # a reconnect (with clean_session=True the broker drops the session and any
+    # in-flight messages are lost — this caused cmd/restore to vanish in CI).
     client = paho_mqtt.Client(
         client_id="gui-backend-global",
         protocol=paho_mqtt.MQTTv311,
+        clean_session=False,
     )
     if user and password:
         client.username_pw_set(user, password)
@@ -78,9 +82,24 @@ def init_mqtt(host: str, port: int, user: str, password: str, prefix: str):
         log.error("Failed to connect global MQTT client to %s:%s - %s", host, port, e)
 
 def publish_cmd(topic: str, payload: dict | str):
-    if _global_client:
-        if isinstance(payload, dict):
-            payload = json.dumps(payload)
-        _global_client.publish(topic, payload, qos=1)
-    else:
+    if not _global_client:
         log.warning("publish_cmd failed: Global MQTT client not initialized")
+        return
+    if isinstance(payload, dict):
+        payload = json.dumps(payload)
+    # The network loop can drop the connection (e.g. missed keepalive while a
+    # long job blocked a thread). A QoS-1 publish on a disconnected client is
+    # silently lost with clean_session=True, so reconnect first if needed.
+    if not _global_client.is_connected():
+        log.warning("publish_cmd: global MQTT client disconnected — reconnecting before publish to %s", topic)
+        try:
+            _global_client.reconnect()
+        except Exception as e:
+            log.error("publish_cmd reconnect failed: %s", e)
+    info = _global_client.publish(topic, payload, qos=1)
+    try:
+        info.wait_for_publish(timeout=10)
+    except Exception as e:
+        log.error("publish_cmd wait_for_publish error on %s: %s", topic, e)
+    log.info("publish_cmd: topic=%s rc=%s mid=%s connected=%s",
+             topic, info.rc, info.mid, _global_client.is_connected())
