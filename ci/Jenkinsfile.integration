@@ -536,6 +536,10 @@ print('CI admin user created')
                             /opt/ci/proxmox-backup-gui/tests/test_self_restore.py
                         cp /tmp/gui-update/tests/test_mqtt.py \
                             /opt/ci/proxmox-backup-gui/tests/test_mqtt.py
+                        cp /tmp/gui-update/tests/test_mqtt_manager.py \
+                            /opt/ci/proxmox-backup-gui/tests/test_mqtt_manager.py
+                        cp /tmp/gui-update/tests/test_pve_agent.py \
+                            /opt/ci/proxmox-backup-gui/tests/test_pve_agent.py
                         cp /tmp/gui-update/tests/conftest.py \
                             /opt/ci/proxmox-backup-gui/tests/conftest.py
                         # test_mqtt.py resolves backend/ relative to its own path
@@ -938,7 +942,7 @@ PYEOF
                         frontend:     'tests/test_frontend.py',
                         restore:      'tests/test_restore.py',
                         self_restore: 'tests/test_self_restore.py',
-                        mqtt:         'tests/test_mqtt.py',
+                        mqtt:         'tests/test_mqtt.py tests/test_mqtt_manager.py tests/test_pve_agent.py',
                     ]
                     env.PYTEST_FILES  = suiteMap.get(params.TEST_SUITE, 'tests/')
                     // Use sentinel NONE so empty filter doesn't collapse bash -s arg positions

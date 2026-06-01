@@ -47,7 +47,10 @@ pipeline {
                 sh '''
                     mkdir -p test-results
                     PYTHONUNBUFFERED=1 \
-                    .venv/bin/pytest ci/tests/test_unit.py ci/tests/test_auth.py ci/tests/test_pve_agent.py \
+                    .venv/bin/pytest ci/tests/test_unit.py ci/tests/test_auth.py \
+                        ci/tests/test_pve_agent.py \
+                        ci/tests/test_mqtt.py \
+                        ci/tests/test_mqtt_manager.py \
                         -v --tb=short --no-header --color=yes \
                         --junit-xml=test-results/unit.xml
                 '''

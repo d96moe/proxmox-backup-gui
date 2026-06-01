@@ -1441,6 +1441,8 @@ _poller: StatePoller | None = None
 # Config
 # ─────────────────────────────────────────────────────────────────────────────
 
+_SENSITIVE = {"pve_password", "pbs_password", "restic_password", "agent_token", "mqtt_password", "mqtt_ha_password"}
+
 @dataclass
 class AgentConfig:
     pve_url: str

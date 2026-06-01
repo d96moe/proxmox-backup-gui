@@ -57,14 +57,14 @@ def test_agent_client_fetches_from_cache(clear_cache):
     
     # Pre-populate cache
     MQTT_CACHE["proxmox/gui-ci/vm/100/meta"] = {"vmid": 100, "type": "qemu"}
-    MQTT_CACHE["proxmox/gui-ci/vm/100/pbs"] = {"snapshots": [{"id": "s1"}]}
+    MQTT_CACHE["proxmox/gui-ci/vm/100/pbs"] = {"snapshots": [{"id": "s1", "backup_time": 1700000000}]}
     MQTT_CACHE["proxmox/gui-ci/vms/index"] = [100]
     
     client = AgentClient(host)
     items = client.get_items()
     
     assert len(items["vms"]) == 1
-    assert items["vms"][0]["vmid"] == 100
+    assert items["vms"][0]["id"] == 100
     assert len(items["vms"][0]["snapshots"]) == 1
 
 
@@ -83,14 +83,19 @@ def test_agent_client_backup_publishes_cmd(mock_publish_cmd):
     """Test that backup() uses publish_cmd and waits for ack."""
     host = DummyHost("gui-ci")
     client = AgentClient(host)
-    
-    # Mock _wait_for_ack to return immediately
-    with patch.object(client, "_wait_for_ack", return_value="fake-op"):
-        res = client.backup(100, "qemu", "pve1", "local")
-        
-        assert res == "fake-op"
-        # Verify publish_cmd was called with the correct topic
-        mock_publish_cmd.assert_called_once()
-        args, _ = mock_publish_cmd.call_args
-        assert args[0] == "proxmox/gui-ci/cmd/backup"
-        assert args[1]["vmid"] == 100
+
+    import os as _os
+    # Temporarily remove PYTEST_CURRENT_TEST so the real MQTT path runs
+    saved = _os.environ.pop("PYTEST_CURRENT_TEST", None)
+    try:
+        with patch.object(client, "_wait_for_ack", return_value="fake-op"):
+            res = client.backup(100, "qemu", "pve1", "local")
+
+            assert res == "fake-op"
+            mock_publish_cmd.assert_called_once()
+            args, _ = mock_publish_cmd.call_args
+            assert args[0] == "proxmox/gui-ci/cmd/backup"
+            assert args[1]["vmid"] == 100
+    finally:
+        if saved is not None:
+            _os.environ["PYTEST_CURRENT_TEST"] = saved
