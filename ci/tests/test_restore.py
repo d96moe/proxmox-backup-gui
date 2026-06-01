@@ -30,6 +30,22 @@ import pytest
 
 BACKEND_URL = os.environ.get("BACKEND_URL", "").rstrip("/")
 CI_ADMIN_PASSWORD = os.environ.get("CI_ADMIN_PASSWORD", "")
+# Verbose per-job log streaming floods the Jenkins console. Keep the console
+# clean by default but ALWAYS write the full trace to a debug file that Jenkins
+# archives as an artifact (handy on failure). CI_DEBUG=1 also echoes to console.
+CI_DEBUG = os.environ.get("CI_DEBUG") == "1"
+CI_DEBUG_LOG = os.environ.get("CI_DEBUG_LOG", "")
+
+
+def _dbg(msg: str) -> None:
+    if CI_DEBUG:
+        print(msg, flush=True)
+    if CI_DEBUG_LOG:
+        try:
+            with open(CI_DEBUG_LOG, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+        except OSError:
+            pass
 
 pytestmark = pytest.mark.skipif(
     not BACKEND_URL,
@@ -89,21 +105,22 @@ def _poll_job(job_id: str, timeout: int = 360) -> dict:
     while time.monotonic() < deadline:
         job = _get(f"/api/job/{job_id}")
         logs = job.get("logs", [])
-        # Print new log lines as they arrive so CI log shows restic progress
+        # Stream new log lines as they arrive (CI_DEBUG only — floods console)
         if len(logs) > last_log_count:
             for line in logs[last_log_count:]:
-                print(f"  [job log] {line}", flush=True)
+                _dbg(f"  [job log] {line}")
             last_log_count = len(logs)
         if job["status"] in ("done", "error"):
             return job
         if time.monotonic() >= next_print:
             elapsed = timeout - (deadline - time.monotonic())
-            print(f"  [poll] job {job_id} still running after {elapsed:.0f}s "
-                  f"({len(logs)} log lines so far)", flush=True)
+            _dbg(f"  [poll] job {job_id} still running after {elapsed:.0f}s "
+                 f"({len(logs)} log lines so far)")
             next_print = time.monotonic() + 30
         time.sleep(4)
+    # On timeout, always dump the tail (even without CI_DEBUG) — this is the failure.
     logs = _get(f"/api/job/{job_id}").get("logs", [])
-    print(f"  [timeout] Last job logs:\n" + "\n".join(f"    {l}" for l in logs[-20:]))
+    print(f"  [timeout] Last job logs:\n" + "\n".join(f"    {l}" for l in logs[-20:]), flush=True)
     raise TimeoutError(f"Job {job_id} did not finish within {timeout}s")
 
 

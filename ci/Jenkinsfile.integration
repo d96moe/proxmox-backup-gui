@@ -23,6 +23,8 @@ pipeline {
                description: 'Optional pytest -k expression for extra filtering (e.g. "backup" or "restore and not cloud")')
         booleanParam(name: 'FAIL_FAST', defaultValue: false,
                      description: 'Stop on first failure/error (-x) — useful when iterating to find root cause')
+        booleanParam(name: 'DEBUG', defaultValue: false,
+                     description: 'Verbose per-job log streaming in the console (CI_DEBUG=1) — off keeps the console readable')
     }
 
     options {
@@ -981,22 +983,28 @@ PYEOF
                     // Use sentinel NONE so empty filter doesn't collapse bash -s arg positions
                     env.PYTEST_FILTER = params.TEST_FILTER ?: 'NONE'
                     env.PYTEST_FAILFAST = params.FAIL_FAST ? 'true' : 'false'
+                    env.CI_DEBUG = params.DEBUG ? '1' : '0'
                     echo "TEST_SUITE=${params.TEST_SUITE}  →  ${env.PYTEST_FILES}"
                     if (env.PYTEST_FILTER) echo "TEST_FILTER: -k '${env.PYTEST_FILTER}'"
                     if (params.FAIL_FAST) echo "FAIL_FAST: enabled (-x)"
+                    if (params.DEBUG) echo "DEBUG: verbose job-log streaming enabled (CI_DEBUG=1)"
                 }
                 sh '''
                     VM_IP=$(cat vm_ip.txt)
 
                     # Run Playwright tests on the VM (it can reach LXC 10.10.0.100:5000)
                     # Pass BACKEND_URL so tests hit real backend instead of mock.
-                    # PYTEST_FILES, PYTEST_FILTER, PYTEST_FAILFAST forwarded as $1/$2/$3 via bash -s.
+                    # PYTEST_FILES, PYTEST_FILTER, PYTEST_FAILFAST, CI_DEBUG forwarded as $1/$2/$3/$4 via bash -s.
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        bash -s "${PYTEST_FILES}" "${PYTEST_FILTER}" "${PYTEST_FAILFAST}" << 'EOF'
+                        bash -s "${PYTEST_FILES}" "${PYTEST_FILTER}" "${PYTEST_FAILFAST}" "${CI_DEBUG}" << 'EOF'
                         PYTEST_TARGET="$1"
                         # $2 uses NONE sentinel to prevent Jenkins from collapsing empty args
                         [ "$2" = "NONE" ] && PYTEST_FILTER_ARG="" || PYTEST_FILTER_ARG="$2"
                         FAIL_FAST_FLAG="$3"
+                        export CI_DEBUG="$4"
+                        # Full verbose job trace always written here, archived by Jenkins.
+                        export CI_DEBUG_LOG=/tmp/test-results/job-debug.log
+                        : > "${CI_DEBUG_LOG}"
 
                         source /etc/profile.d/ci-venv.sh
                         mkdir -p /tmp/test-results
@@ -1052,11 +1060,17 @@ EOF
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
                         root@${VM_IP}:/tmp/test-results/integration.xml \
                         test-results/integration.xml
-                    # Always collect agent journal for post-mortem on cloud restore failures
-                    echo "=== pve-agent journal (last 80 lines) ==="
+                    # Pull the verbose job-debug trace (archived as an artifact below).
+                    # Also capture the agent journal into the same artifact dir.
+                    scp ${SSH_OPTS} -i ${SSH_KEY} \
+                        root@${VM_IP}:/tmp/test-results/job-debug.log \
+                        test-results/job-debug.log || echo "(no job-debug.log produced)"
+                    scp ${SSH_OPTS} -i ${SSH_KEY} \
+                        root@${VM_IP}:/tmp/test-results/integration.log \
+                        test-results/integration.log || echo "(no integration.log produced)"
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
-                        "journalctl -u pve-agent --no-pager -n 80" || true
-                    echo "=== end pve-agent journal ==="
+                        "journalctl -u pve-agent --no-pager -n 200" \
+                        > test-results/pve-agent-journal.log 2>&1 || true
                 '''
             }
         }
@@ -1065,6 +1079,11 @@ EOF
     post {
         always {
             junit allowEmptyResults: true, testResults: 'test-results/integration.xml'
+
+            // Archive verbose job trace + agent journal so failures can be
+            // diagnosed without re-running with DEBUG. Console stays clean.
+            archiveArtifacts artifacts: 'test-results/job-debug.log, test-results/pve-agent-journal.log, test-results/integration.log',
+                             allowEmptyArchive: true, fingerprint: false
 
             // Destroy VM and remove its PBS snapshots from the home datastore
             sh '''
