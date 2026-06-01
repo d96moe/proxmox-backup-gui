@@ -361,7 +361,11 @@ def test_local_restore_ui(real_page, host_id, items):
 
 def test_cloud_restore_api(host_id, items):
     """POST /restore with source=cloud — restores PBS datastore via SSH then restores VM."""
-    vmid, vm_type, restic_id, backup_time = _find_vm_with_any_cloud_snap(items)
+    # Re-fetch items fresh: the module-scoped `items` fixture is captured at the
+    # start of the session, but the restic repo changes as backup tests run, so
+    # its restic_id can point to a snapshot that no longer exists ("snapshot does
+    # not exist"). A fresh fetch reflects the current repo state.
+    vmid, vm_type, restic_id, backup_time = _find_vm_with_any_cloud_snap(_items(host_id))
     if vmid is None:
         pytest.skip("No cloud snapshots found — configure restic_repo in hosts.json")
 
@@ -380,7 +384,8 @@ def test_cloud_restore_api(host_id, items):
 
 def test_cloud_restore_with_backup_after_api(host_id, items):
     """Cloud restore with run_backup_after=True — PBS backup runs after VM is restored."""
-    vmid, vm_type, restic_id, backup_time = _find_vm_with_any_cloud_snap(items)
+    # Fresh fetch — see note in test_cloud_restore_api (restic repo churns during tests).
+    vmid, vm_type, restic_id, backup_time = _find_vm_with_any_cloud_snap(_items(host_id))
     if vmid is None:
         pytest.skip("No cloud snapshots found — configure restic_repo in hosts.json")
 
@@ -452,7 +457,7 @@ def test_cloud_only_restore_api(host_id, items):
     Skipped if no cloud-only snapshots are present — they appear when local PBS
     retention prunes old snapshots that have already been uploaded to restic.
     """
-    vmid, vm_type, restic_id, backup_time = _find_vm_with_cloud_only_snap(items)
+    vmid, vm_type, restic_id, backup_time = _find_vm_with_cloud_only_snap(_items(host_id))
     if vmid is None:
         pytest.skip(
             "No cloud-only snapshots found — these appear after local PBS retention "
