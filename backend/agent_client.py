@@ -613,4 +613,10 @@ class AgentClient:
 
     def get_restic_log(self) -> dict:
         publish_cmd(f"{self._base}/cmd/replay_restic_log", {})
-        return {"lines": []}
+        with MQTT_CACHE_LOCK:
+            schedules = MQTT_CACHE.get(f"{self._base}/schedules", {})
+            running = schedules.get("restic_running", False)
+            lines = MQTT_CACHE.get(f"{self._base}/restic/log", [])
+            if isinstance(lines, str):
+                lines = [lines]
+        return {"lines": lines, "running": running}

@@ -765,9 +765,8 @@ def backup_pbs(host_id: str):
             node = pve.get_nodes()[0]
         except Exception:
             pass
-        log(f"Step 1/2 — Triggering PBS backup: {_vm_type}/{_vmid} on node {node}")
+        log(f"Step 1/1 — Triggering PBS backup: {_vm_type}/{_vmid} on node {node}")
         op_id = agent.backup(_vmid, _vm_type, node, host.pbs_storage_id)
-        log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
         ok = agent.wait_for_op(op_id, log)
         if not ok:
             raise RuntimeError("Agent backup failed")
@@ -806,9 +805,8 @@ def restore(host_id: str):
 
     def _agent_restore_work(log):
         bt = int(backup_time) if backup_time is not None else 0
-        log(f"Step 1/2 — Triggering restore: {vm_type}/{vmid} ts={bt} from {source}...")
+        log(f"Step 1/1 — Triggering restore: {vm_type}/{vmid} ts={bt} from {source}...")
         op_id = agent.restore(vmid, vm_type, bt, source, restic_id, run_backup_after)
-        log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
         ok = agent.wait_for_op(op_id, log)
         if not ok:
             raise RuntimeError("Agent restore failed")
@@ -837,10 +835,9 @@ def backup_restic(host_id: str):
 
     def work(log):
         try:
-            log("Step 1/2 — Triggering cloud backup...")
+            log("Step 1/1 — Triggering cloud backup...")
             agent = AgentClient(host)
             op_id = agent.backup_restic()
-            log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
             ok = agent.wait_for_op(op_id, log)
             if not ok:
                 raise RuntimeError("Agent cloud backup failed")
@@ -873,10 +870,9 @@ def delete_pbs(host_id: str):
     job_id = create_job(f"Delete local PBS snapshot {vm_type}/{vmid} @ {dt_label}")
 
     def work(log):
-        log(f"Step 1/2 — Triggering delete of local PBS snapshot {vm_type}/{vmid} @ {dt_label}...")
+        log(f"Step 1/1 — Triggering delete of local PBS snapshot {vm_type}/{vmid} @ {dt_label}...")
         agent = AgentClient(host)
         op_id = agent.delete(vmid, vm_type, backup_time, scope="pbs")
-        log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
         ok = agent.wait_for_op(op_id, log)
         if not ok:
             raise RuntimeError("Agent delete failed")
@@ -905,10 +901,9 @@ def delete_pbs_all(host_id: str):
     job_id = create_job(f"Delete all local PBS snapshots for {vm_type}/{vmid}")
 
     def work(log):
-        log(f"Step 1/2 — Triggering delete of all local PBS snapshots for {vm_type}/{vmid}...")
+        log(f"Step 1/1 — Triggering delete of all local PBS snapshots for {vm_type}/{vmid}...")
         agent = AgentClient(host)
         op_id = agent.delete_all(vmid, vm_type)
-        log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
         ok = agent.wait_for_op(op_id, log)
         if not ok:
             raise RuntimeError("Agent delete-all failed")
@@ -948,10 +943,9 @@ def delete_cloud(host_id: str):
 
     def work(log):
         try:
-            log(f"Step 1/2 — Triggering delete of cloud-only snapshot {vm_type}/{vmid} @ {dt_label}...")
+            log(f"Step 1/1 — Triggering delete of cloud-only snapshot {vm_type}/{vmid} @ {dt_label}...")
             agent = AgentClient(host)
             op_id = agent.delete(vmid, vm_type, backup_time, scope="cloud", restic_id=restic_id)
-            log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
             ok = agent.wait_for_op(op_id, log)
             if not ok:
                 raise RuntimeError("Agent cloud delete failed")
@@ -993,10 +987,9 @@ def delete_both(host_id: str):
 
     def work(log):
         try:
-            log(f"Step 1/2 — Triggering delete of local+cloud snapshot {vm_type}/{vmid} @ {dt_label}...")
+            log(f"Step 1/1 — Triggering delete of local+cloud snapshot {vm_type}/{vmid} @ {dt_label}...")
             agent = AgentClient(host)
             op_id = agent.delete(vmid, vm_type, backup_time, scope="both", restic_id=restic_id)
-            log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
             ok = agent.wait_for_op(op_id, log)
             if not ok:
                 raise RuntimeError("Agent delete both failed")
@@ -1175,10 +1168,9 @@ def delete_restic(host_id: str):
 
     def work(log):
         try:
-            log(f"Step 1/2 — Triggering delete of restic snapshot {restic_id[:8]}...")
+            log(f"Step 1/1 — Triggering delete of restic snapshot {restic_id[:8]}...")
             agent = AgentClient(host)
             op_id = agent.delete_restic(restic_id)
-            log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
             ok = agent.wait_for_op(op_id, log)
             if not ok:
                 raise RuntimeError("Agent delete restic failed")
@@ -1212,10 +1204,9 @@ def restore_datastore(host_id: str):
 
     def work(log):
         try:
-            log(f"Step 1/2 — Triggering full restore of datastore from restic {restic_id[:8]}...")
+            log(f"Step 1/1 — Triggering full restore of datastore from restic {restic_id[:8]}...")
             agent = AgentClient(host)
             op_id = agent.restore_datastore(restic_id)
-            log(f"Step 2/2 — Agent op_id: {op_id} — waiting for completion...")
             ok = agent.wait_for_op(op_id, log)
             if not ok:
                 raise RuntimeError("Agent datastore restore failed")

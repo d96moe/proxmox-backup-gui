@@ -19,6 +19,10 @@ except ImportError:
 # Fall back to known CI path if calculated path doesn't exist.
 BACKEND = Path(__file__).parent.parent.parent / "backend"
 if not BACKEND.is_dir():
+    # CI VM host: tests at /opt/ci/proxmox-backup-gui/tests/ → backend one level up
+    BACKEND = Path("/opt/ci/proxmox-backup-gui/backend")
+if not BACKEND.is_dir():
+    # Fallback: LXC 300 internal path (used when tests run inside the container)
     BACKEND = Path("/opt/proxmox-backup-gui/backend")
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
