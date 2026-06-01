@@ -278,6 +278,7 @@ STEP_B
                         backend/pbs_client.py backend/pve_client.py \
                         backend/restic_client.py backend/jobs.py \
                         backend/agent_client.py backend/pve_agent.py \
+                        backend/mqtt_manager.py \
                         requirements.txt \
                         root@${VM_IP}:/tmp/gui-update/
 
@@ -290,6 +291,7 @@ STEP_B
                     scp ${SSH_OPTS} -i ${SSH_KEY} \
                         ci/tests/test_frontend.py ci/tests/test_restore.py \
                         ci/tests/test_self_restore.py ci/tests/test_mqtt.py \
+                        ci/tests/test_mqtt_manager.py ci/tests/test_pve_agent.py \
                         ci/tests/conftest.py \
                         root@${VM_IP}:/tmp/gui-update/tests/
 
@@ -545,7 +547,8 @@ print('CI admin user created')
                         # test_mqtt.py resolves backend/ relative to its own path
                         # (Path(__file__).parent.parent.parent/backend) — keep it in sync
                         mkdir -p /opt/ci/proxmox-backup-gui/backend
-                        for f in pve_agent.py pbs_client.py pve_client.py config.py restic_client.py; do
+                        for f in pve_agent.py pbs_client.py pve_client.py config.py restic_client.py \
+                                 agent_client.py mqtt_manager.py app.py auth.py jobs.py; do
                             [ -f /tmp/gui-update/${f} ] && cp /tmp/gui-update/${f} \
                                 /opt/ci/proxmox-backup-gui/backend/${f}
                         done
