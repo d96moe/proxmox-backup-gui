@@ -419,7 +419,8 @@ def test_cloud_restore_with_backup_after_api(host_id, items):
     assert not err, f"Cloud restore + post-backup failed:\n{err}"
 
     logs = "\n".join(job.get("logs", []))
-    assert "Post-restore backup complete" in logs or "Backup complete" in logs, \
+    # The agent logs "Cloud backup complete." after the post-restore restic backup.
+    assert "Cloud backup complete" in logs or "Backup complete" in logs, \
         f"Post-restore backup log line missing.\nLogs:\n{logs}"
 
 
