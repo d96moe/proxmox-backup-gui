@@ -242,7 +242,18 @@ class MQTTPublisher:
         restic_id   = body.get("restic_id")
         corr_id     = body.get("corr_id", str(uuid.uuid4()))
         run_backup_after = body.get("run_backup_after", False)
+        # Ack + fail loudly on a bad request rather than returning silently —
+        # a silent return leaves the GUI polling _wait_for_ack forever.
         if not vmid or not backup_time or not _cfg:
+            op = _new_op("restore", vmid=str(vmid) if vmid else None)
+            self._ack(corr_id, op.op_id)
+            op.append_log(f"ERROR: invalid restore request (vmid={vmid}, backup_time={backup_time})")
+            op.status = "failed"
+            op.finished_at = time.time()
+            if self._client:
+                self.publish_op_done(op.op_id, str(vmid) if vmid else None,
+                                     ok=False, finished_at=op.finished_at)
+            log.warning("MQTT cmd/restore rejected: vmid=%s backup_time=%s", vmid, backup_time)
             return
         node         = self._node()
         storage_id   = _cfg.pbs_storage_id

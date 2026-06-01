@@ -164,7 +164,12 @@ def _find_vm_with_local_snap(items: dict):
 
 
 def _find_vm_with_any_cloud_snap(items: dict):
-    """Return (vmid, vm_type, restic_id) — any cloud snapshot (may also be local)."""
+    """Return (vmid, vm_type, restic_id, backup_time) — any cloud snapshot (may also be local).
+
+    backup_time is needed even for cloud restores: after the datastore is
+    restored from restic, the VM is restored from the PBS snapshot at that time
+    (the agent rejects backup_time=0). The GUI sends it too (confirmRestore).
+    """
     for key, vtype in (("lxcs", "ct"), ("vms", "vm")):
         for item in items.get(key, []):
             if item.get("template"):
@@ -173,12 +178,12 @@ def _find_vm_with_any_cloud_snap(items: dict):
                 continue
             for snap in item["snapshots"]:
                 if snap.get("cloud") and snap.get("restic_id"):
-                    return item["id"], vtype, snap["restic_id"]
-    return None, None, None
+                    return item["id"], vtype, snap["restic_id"], snap.get("backup_time")
+    return None, None, None, None
 
 
 def _find_vm_with_cloud_only_snap(items: dict):
-    """Return (vmid, vm_type, restic_id) — snapshot in restic but NOT in local PBS."""
+    """Return (vmid, vm_type, restic_id, backup_time) — in restic but NOT in local PBS."""
     for key, vtype in (("lxcs", "ct"), ("vms", "vm")):
         for item in items.get(key, []):
             if item.get("template"):
@@ -187,8 +192,8 @@ def _find_vm_with_cloud_only_snap(items: dict):
                 continue
             for snap in item["snapshots"]:
                 if snap.get("cloud") and not snap.get("local") and snap.get("restic_id"):
-                    return item["id"], vtype, snap["restic_id"]
-    return None, None, None
+                    return item["id"], vtype, snap["restic_id"], snap.get("backup_time")
+    return None, None, None, None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -356,13 +361,13 @@ def test_local_restore_ui(real_page, host_id, items):
 
 def test_cloud_restore_api(host_id, items):
     """POST /restore with source=cloud — restores PBS datastore via SSH then restores VM."""
-    vmid, vm_type, restic_id = _find_vm_with_any_cloud_snap(items)
+    vmid, vm_type, restic_id, backup_time = _find_vm_with_any_cloud_snap(items)
     if vmid is None:
         pytest.skip("No cloud snapshots found — configure restic_repo in hosts.json")
 
     resp = _post(f"/api/host/{host_id}/restore", {
         "vmid": vmid, "type": vm_type,
-        "source": "cloud", "restic_id": restic_id,
+        "source": "cloud", "restic_id": restic_id, "backup_time": backup_time,
         "run_backup_after": False,
     })
     assert "job_id" in resp
@@ -375,13 +380,13 @@ def test_cloud_restore_api(host_id, items):
 
 def test_cloud_restore_with_backup_after_api(host_id, items):
     """Cloud restore with run_backup_after=True — PBS backup runs after VM is restored."""
-    vmid, vm_type, restic_id = _find_vm_with_any_cloud_snap(items)
+    vmid, vm_type, restic_id, backup_time = _find_vm_with_any_cloud_snap(items)
     if vmid is None:
         pytest.skip("No cloud snapshots found — configure restic_repo in hosts.json")
 
     resp = _post(f"/api/host/{host_id}/restore", {
         "vmid": vmid, "type": vm_type,
-        "source": "cloud", "restic_id": restic_id,
+        "source": "cloud", "restic_id": restic_id, "backup_time": backup_time,
         "run_backup_after": True,
     })
     assert "job_id" in resp
@@ -398,7 +403,7 @@ def test_cloud_restore_with_backup_after_api(host_id, items):
 
 def test_cloud_restore_ui(real_page, host_id, items):
     """UI: open restore modal, select cloud source, confirm — job must complete."""
-    vmid, vm_type, _ = _find_vm_with_any_cloud_snap(items)
+    vmid, vm_type, _, _ = _find_vm_with_any_cloud_snap(items)
     if vmid is None:
         pytest.skip("No cloud snapshots — skipping cloud restore UI test")
 
@@ -447,7 +452,7 @@ def test_cloud_only_restore_api(host_id, items):
     Skipped if no cloud-only snapshots are present — they appear when local PBS
     retention prunes old snapshots that have already been uploaded to restic.
     """
-    vmid, vm_type, restic_id = _find_vm_with_cloud_only_snap(items)
+    vmid, vm_type, restic_id, backup_time = _find_vm_with_cloud_only_snap(items)
     if vmid is None:
         pytest.skip(
             "No cloud-only snapshots found — these appear after local PBS retention "
@@ -457,7 +462,7 @@ def test_cloud_only_restore_api(host_id, items):
 
     resp = _post(f"/api/host/{host_id}/restore", {
         "vmid": vmid, "type": vm_type,
-        "source": "cloud", "restic_id": restic_id,
+        "source": "cloud", "restic_id": restic_id, "backup_time": backup_time,
         "run_backup_after": False,
     })
     assert "job_id" in resp
