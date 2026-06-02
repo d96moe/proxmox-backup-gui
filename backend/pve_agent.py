@@ -166,6 +166,9 @@ class MQTTPublisher:
         elif cmd == "restore-datastore":
             threading.Thread(target=self._handle_cmd_restore_datastore, args=(body,),
                              daemon=True, name="mqtt-cmd-restore-datastore").start()
+        elif cmd == "settings":
+            threading.Thread(target=self._handle_cmd_settings, args=(body,),
+                             daemon=True, name="mqtt-cmd-settings").start()
         elif cmd == "replay_op_log":
             threading.Thread(target=self._handle_cmd_replay_op_log, args=(body,),
                              daemon=True, name="mqtt-cmd-replay-op-log").start()
@@ -420,6 +423,59 @@ class MQTTPublisher:
             res.restore_datastore(restic_id, op.append_log)
 
         _run_in_background(op, _do)
+
+    def _handle_cmd_settings(self, body: dict) -> None:
+        """Apply editable settings (MQTT port of main's POST /settings).
+
+        Validation lives in the Flask endpoint (so it can return 400 synchronously);
+        here we just apply whatever recognized keys are present, then republish the
+        settings + schedules topics so the GUI reflects the change. A corr_id ack
+        lets the GUI know the write was applied (POST→GET roundtrip).
+        """
+        corr_id = body.get("corr_id")
+        if not _cfg:
+            return
+        log.info("MQTT cmd/settings: keys=%s", sorted(k for k in body if k != "corr_id"))
+        res = LocalResticClient(_cfg)
+
+        if isinstance(body.get("retention"), dict):
+            try: res.set_retention(body["retention"])
+            except Exception as exc: log.warning("set_retention failed: %s", exc)
+
+        if "restic_schedule" in body:
+            try: res.set_restic_schedule(body["restic_schedule"])
+            except Exception as exc: log.warning("set_restic_schedule failed: %s", exc)
+
+        if isinstance(body.get("pbs_schedule"), dict):
+            sched = body["pbs_schedule"]
+            if sched.get("id") and sched.get("schedule"):
+                try: PVEClient(_host()).set_backup_schedule(sched["id"], sched["schedule"])
+                except Exception as exc: log.warning("set_backup_schedule failed: %s", exc)
+
+        if isinstance(body.get("pbs_prune"), dict):
+            pp = body["pbs_prune"]
+            if pp.get("id") and isinstance(pp.get("retention"), dict):
+                try: res.set_pbs_prune_job(pp["id"], pp["retention"])
+                except Exception as exc: log.warning("set_pbs_prune_job failed: %s", exc)
+
+        if isinstance(body.get("vm_selection"), dict):
+            vs = body["vm_selection"]
+            try:
+                pve  = PVEClient(_host())
+                jobs = pve.get_backup_schedules()
+                if jobs:
+                    pve.set_backup_vm_selection(jobs[0]["id"],
+                                                vs.get("mode", "exclude"),
+                                                vs.get("vmids", []))
+            except Exception as exc:
+                log.warning("set_backup_vm_selection failed: %s", exc)
+
+        # Republish so the GUI's settings/schedules reflect the write immediately.
+        if _poller:
+            _poller._scan_settings()
+            _poller._scan_schedules()
+        if corr_id:
+            self._ack(corr_id, "settings-applied")
 
     def _handle_cmd_replay_op_log(self, body: dict) -> None:
         op_id = body.get("op_id")
@@ -1078,6 +1134,7 @@ class StatePoller:
         while not self._stop.is_set():
             try:
                 self._scan_schedules()
+                self._scan_settings()
             except Exception as exc:
                 log.warning("Schedules poll error: %s", exc)
             self._stop.wait(self.SCHEDULES_INTERVAL)
@@ -1388,6 +1445,46 @@ class StatePoller:
             except Exception as exc:
                 log.warning("Schedule restic fetch failed: %s", exc)
         self._pub_if_changed("schedules", result)
+
+    def _scan_settings(self) -> None:
+        """Assemble + publish the editable settings (retention, schedules, PBS prune,
+        VM selection) as a retained topic. MQTT port of main's GET /settings."""
+        cfg = self._cfg
+        result: dict = {
+            "retention":       {},
+            "pbs_schedule":    None,
+            "restic_schedule": None,
+            "vm_selection":    {"mode": "exclude", "vmids": []},
+            "pbs_prune":       None,
+        }
+        try:
+            pve = PVEClient(_host())
+            pbs_jobs = pve.get_backup_schedules()
+            pbs_job  = pbs_jobs[0] if pbs_jobs else None
+            if pbs_job:
+                result["pbs_schedule"] = {"id": pbs_job["id"], "schedule": pbs_job["schedule"]}
+                try:
+                    result["vm_selection"] = pve.get_backup_vm_selection(pbs_job["id"])
+                except Exception as exc:
+                    log.warning("Settings vm_selection fetch failed: %s", exc)
+        except Exception as exc:
+            log.warning("Settings PVE fetch failed: %s", exc)
+        if cfg and cfg.restic_repo:
+            try:
+                res = LocalResticClient(cfg)
+                result["retention"]       = res.get_retention()
+                result["restic_schedule"] = res.get_restic_schedule()
+                prune_jobs = res.get_pbs_prune_jobs()
+                result["pbs_prune"] = next(
+                    ({"id": j["id"],
+                      "retention": {k: int(j[k]) if str(j[k]).isdigit() else j[k]
+                                    for k in LocalResticClient._PBS_PRUNE_KEYS if k in j}}
+                     for j in prune_jobs if j.get("store") == (cfg.pbs_datastore or "")),
+                    None,
+                )
+            except Exception as exc:
+                log.warning("Settings restic fetch failed: %s", exc)
+        self._pub_if_changed("settings", result)
 
     def _scan_pbs_tasks(self) -> None:
         """Poll PBS for running tasks and publish via MQTT."""

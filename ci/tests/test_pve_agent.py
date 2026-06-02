@@ -167,6 +167,35 @@ class TestMQTTPublisher:
             
             mock_pbs.delete_all_snapshots_for_vm.assert_called_once_with("qemu", "104", ANY)
 
+    @patch("pve_agent._cfg")
+    @patch("pve_agent.threading.Thread")
+    def test_on_message_routes_settings_to_handler(self, mock_thread, mock_global_cfg, mock_cfg, mock_mqtt_client):
+        pub = MQTTPublisher("127.0.0.1", hostname="test-node")
+        msg = MagicMock()
+        msg.topic = "proxmox/test-node/cmd/settings"
+        msg.payload = b'{"retention": {"keep-last": 5}}'
+        pub._on_message(mock_mqtt_client, None, msg)
+        mock_thread.assert_called_once()
+        _, kwargs = mock_thread.call_args
+        assert kwargs["target"] == pub._handle_cmd_settings
+
+    @patch("pve_agent.LocalResticClient")
+    def test_handle_cmd_settings_applies_retention_and_acks(self, mock_restic_cls, mock_cfg, mock_mqtt_client):
+        with patch("pve_agent._cfg", new=mock_cfg), \
+             patch("pve_agent._poller") as mock_poller:
+            pub = MQTTPublisher("127.0.0.1", hostname="test-node")
+            pub._handle_cmd_settings({"retention": {"keep-last": 7}, "corr_id": "c-set"})
+
+            mock_restic_cls.return_value.set_retention.assert_called_once_with({"keep-last": 7})
+            # republishes settings + schedules so the GUI reflects the write
+            mock_poller._scan_settings.assert_called_once()
+            mock_poller._scan_schedules.assert_called_once()
+            # acks the corr_id so the GUI stops waiting
+            ack_calls = [c for c in mock_mqtt_client.publish.call_args_list
+                         if "job/c-set/ack" in c[0][0]]
+            assert ack_calls, "settings write must ack the corr_id"
+
+
 class TestStatePoller:
     
     @patch("pve_agent.PVEClient")
@@ -197,3 +226,27 @@ class TestStatePoller:
         meta_100 = [c for c in call_args_list if "vm/100/meta" in c[0][0]]
         assert len(meta_100) > 0
         assert "VM100" in meta_100[0][0][1]
+
+    @patch("pve_agent.LocalResticClient")
+    @patch("pve_agent.PVEClient")
+    def test_scan_settings_publishes_settings_topic(self, mock_pve_cls, mock_restic_cls, mock_cfg, mock_mqtt_client):
+        pub = MQTTPublisher("127.0.0.1", hostname="test-node")
+        poller = StatePoller(mock_cfg, pub)
+
+        mock_pve = mock_pve_cls.return_value
+        mock_pve.get_backup_schedules.return_value = [{"id": "backup-1", "schedule": "02:00"}]
+        mock_pve.get_backup_vm_selection.return_value = {"mode": "exclude", "vmids": [105]}
+
+        mock_res = mock_restic_cls.return_value
+        mock_res.get_retention.return_value = {"keep-last": 5}
+        mock_res.get_restic_schedule.return_value = "03:00"
+        mock_res.get_pbs_prune_jobs.return_value = []
+
+        with patch("pve_agent._host", return_value=mock_cfg):
+            poller._scan_settings()
+
+        settings_pub = [c for c in mock_mqtt_client.publish.call_args_list
+                        if c[0][0] == "proxmox/test-node/settings"]
+        assert settings_pub, "_scan_settings must publish the settings topic"
+        payload = settings_pub[0][0][1]
+        assert "keep-last" in payload and "backup-1" in payload

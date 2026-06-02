@@ -36,7 +36,7 @@ pipeline {
                 sh '''
                     python3 -m venv .venv
                     .venv/bin/pip install -q -r requirements.txt
-                    .venv/bin/pip install -q pytest playwright
+                    .venv/bin/pip install -q pytest pytest-cov playwright
                     .venv/bin/playwright install chromium
                 '''
             }
@@ -44,6 +44,10 @@ pipeline {
 
         stage('Unit tests') {
             steps {
+                // Coverage gate: unit tests must keep backend coverage above the
+                // threshold (ratchet). Catches untested code paths — e.g. an agent
+                // feature added without a unit test (which is how the settings
+                // MQTT port slipped through before). Raise COV_MIN as coverage grows.
                 sh '''
                     mkdir -p test-results
                     PYTHONUNBUFFERED=1 \
@@ -52,7 +56,12 @@ pipeline {
                         ci/tests/test_mqtt.py \
                         ci/tests/test_mqtt_manager.py \
                         -v --tb=short --no-header --color=yes \
-                        --junit-xml=test-results/unit.xml
+                        --junit-xml=test-results/unit.xml \
+                        --cov=backend \
+                        --cov-report=term-missing:skip-covered \
+                        --cov-report=xml:test-results/coverage.xml \
+                        --cov-report=html:test-results/htmlcov \
+                        --cov-fail-under=50
                 '''
             }
         }
@@ -72,6 +81,10 @@ pipeline {
     post {
         always {
             junit 'test-results/unit.xml, test-results/frontend-mock.xml'
+            // Coverage report (HTML for humans, Cobertura XML for trend graphs if
+            // the Cobertura/Coverage plugin is installed). Archived before cleanup.
+            archiveArtifacts artifacts: 'test-results/coverage.xml, test-results/htmlcov/**',
+                             allowEmptyArchive: true, fingerprint: false
             cleanWs()
         }
         success { echo "All tests passed — safe to merge" }

@@ -589,9 +589,37 @@ class AgentClient:
         with MQTT_CACHE_LOCK:
             return MQTT_CACHE.get(f"{self._base}/settings", {})
 
+    _SETTINGS_KEYS = {"retention", "restic_schedule", "pbs_schedule", "pbs_prune", "vm_selection"}
+
     def set_settings(self, settings: dict) -> dict:
-        publish_cmd(f"{self._base}/cmd/settings", settings)
-        return settings
+        """Validate synchronously (so the API can 400), publish cmd/settings, then
+        wait for the agent to apply + republish so a GET reflects the change.
+
+        Raises ValueError on invalid input — the Flask endpoint maps that to 400.
+        """
+        if not any(k in settings for k in self._SETTINGS_KEYS):
+            raise ValueError("body must contain at least one recognized key")
+        if "retention" in settings and not isinstance(settings["retention"], dict):
+            raise ValueError("retention must be a dict")
+        if "pbs_schedule" in settings:
+            s = settings["pbs_schedule"]
+            if not isinstance(s, dict) or not s.get("id") or not s.get("schedule"):
+                raise ValueError("pbs_schedule requires {id, schedule}")
+        if "pbs_prune" in settings:
+            pp = settings["pbs_prune"]
+            if not isinstance(pp, dict) or not pp.get("id") or not isinstance(pp.get("retention"), dict):
+                raise ValueError("pbs_prune requires {id, retention: dict}")
+            bad = {k: v for k, v in pp["retention"].items() if not isinstance(v, int)}
+            if bad:
+                raise ValueError(f"pbs_prune retention values must be integers: {bad}")
+        if "vm_selection" in settings and not isinstance(settings["vm_selection"], dict):
+            raise ValueError("vm_selection must be a dict")
+
+        corr_id = str(uuid.uuid4())
+        publish_cmd(f"{self._base}/cmd/settings", {**settings, "corr_id": corr_id})
+        # Wait for the agent to apply + ack so the subsequent GET sees fresh data.
+        self._wait_for_ack(corr_id, timeout=10)
+        return self.get_settings()
 
     def get_connection(self) -> dict:
         return {}

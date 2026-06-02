@@ -608,6 +608,9 @@ def post_host_settings(host_id: str):
     body = request.get_json(silent=True) or {}
     try:
         return jsonify(AgentClient(host).set_settings(body))
+    except ValueError as exc:
+        # Synchronous validation failure → 400 with a readable message.
+        return jsonify({"error": str(exc)}), 400
     except RuntimeError as exc:
         import re as _re
         m = _re.search(r"→ (\d+):", str(exc))
