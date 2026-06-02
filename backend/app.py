@@ -711,9 +711,11 @@ def stream_restic_log(host_id: str):
     from mqtt_manager import MQTT_CACHE, MQTT_CACHE_LOCK
     import time as _t
 
-    # Trigger a log replay on the agent
+    # Clear the topic + trigger a fresh replay. Clearing is essential: a stale
+    # '__done__' from a prior replay would make generate() return immediately
+    # before the agent republishes the current log lines.
     try:
-        AgentClient(host).get_restic_log()
+        AgentClient(host).trigger_restic_log_replay()
     except Exception:
         pass
 

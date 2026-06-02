@@ -711,12 +711,33 @@ class AgentClient:
                         lines.append(item)
             return lines
 
-    def get_restic_log(self) -> dict:
+    def trigger_restic_log_replay(self) -> None:
+        """Clear the restic/log topic and ask the agent to republish it. Clearing
+        first is essential — a stale '__done__' from a prior replay would make the
+        SSE stream return immediately before the fresh lines arrive."""
+        with MQTT_CACHE_LOCK:
+            MQTT_CACHE.pop(f"{self._base}/restic/log", None)
         publish_cmd(f"{self._base}/cmd/replay_restic_log", {})
+
+    def get_restic_log(self, timeout: int = 10) -> dict:
+        """Replay the restic log over MQTT and wait for the agent's '__done__'
+        marker (request-reply — reading the cache immediately races the agent)."""
+        topic = f"{self._base}/restic/log"
+        self.trigger_restic_log_replay()
+        start = time.time()
+        lines: list = []
+        while time.time() - start < timeout:
+            with MQTT_CACHE_LOCK:
+                raw = MQTT_CACHE.get(topic, [])
+                if isinstance(raw, list) and raw and raw[-1] == "__done__":
+                    lines = [l for l in raw if l != "__done__"]
+                    break
+            time.sleep(0.1)
+        else:
+            with MQTT_CACHE_LOCK:
+                raw = MQTT_CACHE.get(topic, [])
+                lines = [l for l in (raw if isinstance(raw, list) else []) if l != "__done__"]
         with MQTT_CACHE_LOCK:
             schedules = MQTT_CACHE.get(f"{self._base}/schedules", {})
             running = schedules.get("restic_running", False)
-            lines = MQTT_CACHE.get(f"{self._base}/restic/log", [])
-            if isinstance(lines, str):
-                lines = [lines]
         return {"lines": lines, "running": running}
