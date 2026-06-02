@@ -2237,20 +2237,24 @@ def _run_in_background(op: Operation, fn, rescan_restic: bool = False) -> None:
             op.status = "failed"
         finally:
             op.finished_at = time.time()
+            # Refresh + republish the affected state SYNCHRONOUSLY *before*
+            # announcing the op is done. The agent publishes vm/*/pbs|restic then
+            # ops/<id>/status=done on the same MQTT connection, so a client that
+            # reacts to 'done' (GUI or test) is guaranteed to read the fresh state
+            # — no eventual-consistency lag where a just-deleted snapshot lingers.
+            if _poller:
+                try:
+                    if rescan_restic:
+                        _poller._scan_restic()          # refresh _restic_snaps (cloud)
+                    if op.type == "delete":
+                        _poller.invalidate_vm_cache(op.vmid)
+                    _poller._scan_pve_pbs()             # synchronous republish
+                except Exception as exc:
+                    log.warning("post-op rescan failed: %s", exc)
             if _mqtt:
                 _mqtt.publish_op_done(op.op_id, op.vmid,
                                       ok=(op.status == "ok"),
                                       finished_at=op.finished_at)
-            # Re-scan immediately so updated snapshot list + storage are published.
-            # For restic ops: refresh _restic_snaps first so new cloud snapshots
-            # are visible; _scan_restic() calls rescan_now() internally.
-            if _poller:
-                if rescan_restic:
-                    _poller._scan_restic()   # updates cache → triggers rescan_now()
-                elif op.type in ("backup", "restore", "delete"):
-                    if op.type == "delete":
-                        _poller.invalidate_vm_cache(op.vmid)
-                    _poller.rescan_now()
 
     t = threading.Thread(target=_worker, daemon=True)
     t.start()

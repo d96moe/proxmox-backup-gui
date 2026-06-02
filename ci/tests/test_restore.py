@@ -827,8 +827,9 @@ def test_reseed_restic_to_pristine_state(host_id):
     for s in snaps_sorted[2:]:
         resp = _post(f"/api/host/{host_id}/delete/restic", {"restic_id": s["id"]})
         if isinstance(resp, dict) and resp.get("job_id"):
+            # The agent republishes the refreshed restic state synchronously before
+            # the op is reported done, so the cache is current when this returns.
             _poll_job(resp["job_id"], timeout=300)
-    _rescan(host_id)
 
 
 def test_seeded_cloud_only_covered_by_multiple_restic_snapshots(host_id, items):

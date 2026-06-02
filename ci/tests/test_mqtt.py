@@ -336,16 +336,18 @@ class TestResticRescanAfterBackup:
             "rescan_now() must not be called separately when rescan_restic=True"
 
     def test_rescan_restic_false_calls_rescan_now(self):
-        """Default (rescan_restic=False) must call rescan_now for PBS backup."""
+        """Default (rescan_restic=False) must refresh PBS state synchronously
+        (via _scan_pve_pbs) before the op is reported done, so a client reacting
+        to 'done' reads fresh data."""
         poller = MagicMock()
         called = threading.Event()
-        poller.rescan_now.side_effect = lambda: called.set()
+        poller._scan_pve_pbs.side_effect = lambda: called.set()
 
         op = ag._new_op("backup", vmid=301)
         with patch("pve_agent._poller", poller), patch("pve_agent._mqtt", None):
             ag._run_in_background(op, lambda o: None, rescan_restic=False)
 
-        assert self._wait(called), "rescan_now() not called after PBS backup"
+        assert self._wait(called), "_scan_pve_pbs() not called after PBS backup"
 
     def test_rescan_restic_false_does_not_call_scan_restic(self):
         """PBS backup must NOT trigger _scan_restic (slow restic operation)."""
