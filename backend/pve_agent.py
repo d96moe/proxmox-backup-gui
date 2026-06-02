@@ -198,6 +198,14 @@ class MQTTPublisher:
             json.dumps({"op_id": op_id}), retain=False, qos=1,
         )
 
+    def _ack_error(self, corr_id: str, code: int, msg: str) -> None:
+        """Ack a failed write (settings/connection) so the API can return the
+        right status synchronously."""
+        self._client.publish(
+            f"{self._base}/job/{corr_id}/ack",
+            json.dumps({"op_id": "", "error": msg, "code": code}), retain=False, qos=1,
+        )
+
     def _node(self) -> str:
         if _cfg and _cfg.pve_node:
             return _cfg.pve_node
@@ -440,26 +448,27 @@ class MQTTPublisher:
             return
         log.info("MQTT cmd/settings: keys=%s", sorted(k for k in body if k != "corr_id"))
         res = LocalResticClient(_cfg)
+        errors: list[str] = []
 
         if isinstance(body.get("retention"), dict):
             try: res.set_retention(body["retention"])
-            except Exception as exc: log.warning("set_retention failed: %s", exc)
+            except Exception as exc: errors.append(f"retention: {exc}")
 
         if "restic_schedule" in body:
             try: res.set_restic_schedule(body["restic_schedule"])
-            except Exception as exc: log.warning("set_restic_schedule failed: %s", exc)
+            except Exception as exc: errors.append(f"restic_schedule: {exc}")
 
         if isinstance(body.get("pbs_schedule"), dict):
             sched = body["pbs_schedule"]
             if sched.get("id") and sched.get("schedule"):
                 try: PVEClient(_host()).set_backup_schedule(sched["id"], sched["schedule"])
-                except Exception as exc: log.warning("set_backup_schedule failed: %s", exc)
+                except Exception as exc: errors.append(f"pbs_schedule: {exc}")
 
         if isinstance(body.get("pbs_prune"), dict):
             pp = body["pbs_prune"]
             if pp.get("id") and isinstance(pp.get("retention"), dict):
                 try: res.set_pbs_prune_job(pp["id"], pp["retention"])
-                except Exception as exc: log.warning("set_pbs_prune_job failed: %s", exc)
+                except Exception as exc: errors.append(f"pbs_prune: {exc}")
 
         if isinstance(body.get("vm_selection"), dict):
             vs = body["vm_selection"]
@@ -471,14 +480,19 @@ class MQTTPublisher:
                                                 vs.get("mode", "exclude"),
                                                 vs.get("vmids", []))
             except Exception as exc:
-                log.warning("set_backup_vm_selection failed: %s", exc)
+                errors.append(f"vm_selection: {exc}")
 
         # Republish so the GUI's settings/schedules reflect the write immediately.
         if _poller:
             _poller._scan_settings()
             _poller._scan_schedules()
         if corr_id:
-            self._ack(corr_id, "settings-applied")
+            if errors:
+                # A write to a non-existent PVE/PBS job etc. → report 500 so the API
+                # surfaces it (the snapshot of valid keys was still applied).
+                self._ack_error(corr_id, 500, "; ".join(errors))
+            else:
+                self._ack(corr_id, "settings-applied")
 
     def _handle_cmd_connection(self, body: dict) -> None:
         """Write the agent's own config.json (MQTT port of main's POST /connection).

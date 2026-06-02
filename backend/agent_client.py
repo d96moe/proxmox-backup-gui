@@ -430,6 +430,18 @@ class AgentClient:
             time.sleep(0.1)
         return ""
 
+    def _wait_for_ack_result(self, corr_id: str, timeout: int = 5) -> dict:
+        """Like _wait_for_ack but returns the full ack dict — used by settings/
+        connection writes which report write errors in the ack ({error, code})."""
+        start = time.time()
+        while time.time() - start < timeout:
+            with MQTT_CACHE_LOCK:
+                ack = MQTT_CACHE.get(f"{self._base}/job/{corr_id}/ack")
+                if isinstance(ack, dict) and (ack.get("op_id") or ack.get("error")):
+                    return ack
+            time.sleep(0.1)
+        return {}
+
     def wait_for_op(self, op_id: str, log_fn: Callable[[str], None], timeout: int = 3600) -> bool:
         if "PYTEST_CURRENT_TEST" in os.environ:
             # Run local fallback to emulate direct client execution in unit tests
@@ -612,13 +624,23 @@ class AgentClient:
             bad = {k: v for k, v in pp["retention"].items() if not isinstance(v, int)}
             if bad:
                 raise ValueError(f"pbs_prune retention values must be integers: {bad}")
-        if "vm_selection" in settings and not isinstance(settings["vm_selection"], dict):
-            raise ValueError("vm_selection must be a dict")
+        if "vm_selection" in settings:
+            vs = settings["vm_selection"]
+            if not isinstance(vs, dict):
+                raise ValueError("vm_selection must be a dict")
+            if vs.get("mode") not in ("include", "exclude"):
+                raise ValueError("vm_selection.mode must be 'include' or 'exclude'")
+            if not all(isinstance(v, int) for v in vs.get("vmids", [])):
+                raise ValueError("vm_selection.vmids must be integers")
 
         corr_id = str(uuid.uuid4())
         publish_cmd(f"{self._base}/cmd/settings", {**settings, "corr_id": corr_id})
         # Wait for the agent to apply + ack so the subsequent GET sees fresh data.
-        self._wait_for_ack(corr_id, timeout=10)
+        # The agent reports per-key write failures (e.g. unknown job id) in the ack;
+        # surface them as RuntimeError("→ <code>: …") which Flask maps to that status.
+        ack = self._wait_for_ack_result(corr_id, timeout=10)
+        if ack.get("error"):
+            raise RuntimeError(f"→ {ack.get('code', 500)}: {ack['error']}")
         return self.get_settings()
 
     def get_connection(self) -> dict:
