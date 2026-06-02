@@ -353,7 +353,24 @@ class MQTTPublisher:
                     raise RuntimeError("Another restic operation is already running — try again later")
                 try:
                     res = LocalResticClient(_cfg)
-                    res.forget_snapshots([restic_id], op.append_log)
+                    flat = res.get_snapshots_flat()
+                    existing = {s["id"] for s in flat}
+                    # Forget EVERY restic snapshot covering this (vmid, backup_time):
+                    # one PBS time can be covered by multiple backups (e.g. R1 covers
+                    # only T1, R2 covers T1+T2) — forgetting just one leaves coverage.
+                    ids = []
+                    for s in flat:
+                        for cov in s.get("covers", []):
+                            if str(cov.get("vmid")) == str(vmid) and cov.get("pbs_time") == int(backup_time):
+                                ids.append(s["id"])
+                                break
+                    if not ids:
+                        # Old-style tag fallback: forget the explicit id, but it must
+                        # actually exist — otherwise fail loudly (no silent no-op).
+                        if restic_id not in existing:
+                            raise RuntimeError(f"restic snapshot {str(restic_id)[:8]} not found in repo")
+                        ids = [restic_id]
+                    res.forget_snapshots(list(dict.fromkeys(ids)), op.append_log)
                     op.append_log("Cloud copy deleted.")
                 finally:
                     _restic_op_lock.release()
