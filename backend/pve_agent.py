@@ -1163,6 +1163,19 @@ class StatePoller:
                 self._hashes.pop(suffix, None)
         log.debug("invalidated MQTT cache for vm/%s", vmid)
 
+    def invalidate_restic_cache(self) -> None:
+        """Force the next _scan_restic to republish the authoritative restic list.
+
+        Without this, _pub_if_changed gates the post-mutation republish whenever
+        self._hashes['restic/snapshots'] already equals the (correct) post-forget
+        payload — e.g. an earlier scan published it but the GUI's MQTT client
+        missed that one message. Clearing the hash guarantees the retained topic
+        is re-sent after every restic mutation so a forgotten snapshot can never
+        linger in a downstream cache (the recurring restic ghost)."""
+        with self._hash_lock:
+            self._hashes.pop("restic/snapshots", None)
+        log.debug("invalidated MQTT cache for restic/snapshots")
+
     def rescan_storage_now(self) -> None:
         """Trigger immediate storage-only rescan (e.g. after delete)."""
         threading.Thread(target=self._scan_storage, daemon=True, name="rescan-storage").start()
@@ -2293,6 +2306,9 @@ def _run_in_background(op: Operation, fn, rescan_restic: bool = False) -> None:
             if _poller:
                 try:
                     if rescan_restic:
+                        # Force-republish even if the payload hash is unchanged, so a
+                        # downstream cache that missed an earlier publish is corrected.
+                        _poller.invalidate_restic_cache()
                         _poller._scan_restic()          # refresh _restic_snaps (cloud)
                     if op.type == "delete":
                         _poller.invalidate_vm_cache(op.vmid)
