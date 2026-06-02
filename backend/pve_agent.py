@@ -1087,6 +1087,13 @@ class StatePoller:
         # Keep latest restic state so PBS poll can cross-reference
         self._restic_snaps: list[dict] = []
         self._restic_lock  = threading.Lock()
+        # Serialize each scan's READ+PUBLISH so a slow scan that read pre-mutation
+        # state can never publish AFTER a post-mutation scan and clobber it with
+        # stale data (last-writer-wins race on retained topics). These MUST block
+        # (never skip) — skipping drops the guaranteed post-mutation rescan and
+        # reintroduces ghosts. The scan that acquires last always reads fresh.
+        self._restic_scan_lock = threading.Lock()  # guards _scan_restic read+publish
+        self._pve_scan_lock    = threading.Lock()  # guards _scan_pve_pbs read+publish
         # Track VMIDs seen in previous scan so we can clear retained topics for
         # VMIDs that have disappeared (e.g. restic-only VM whose snapshots were deleted).
         # Lazily seeded from broker's retained vms/index on first scan so stale
@@ -1096,9 +1103,10 @@ class StatePoller:
         # Last known local PBS storage stats — merged with cloud stats in storage topic
         self._local_storage: dict = {}
         self._storage_lock  = threading.Lock()
-        # Persistent memory of partial PBS backup times per vmid.
-        # Accumulated (never cleared) so that after a partial is pruned locally it
-        # can still be flagged as partial in cloud-only entries.
+        # Persistent memory of partial PBS backup times per vmid so that after a
+        # partial is pruned locally it can still be flagged as partial in cloud-only
+        # entries. Pruned in _do_scan_pve_pbs to times that still exist (local or
+        # restic) so a fully-deleted partial stops being flagged.
         self._partial_pbs_times: dict[str, set[int]] = {}
         self._partial_lock = threading.Lock()
 
@@ -1222,6 +1230,13 @@ class StatePoller:
     # ── scan implementations ──────────────────────────────────────────────────
 
     def _scan_pve_pbs(self) -> None:
+        # Serialize read+publish (same last-writer-wins protection as _scan_restic):
+        # a scan that read PBS before a delete must not republish stale per-VM
+        # topics after the post-delete scan. Blocking — never skip.
+        with self._pve_scan_lock:
+            self._do_scan_pve_pbs()
+
+    def _do_scan_pve_pbs(self) -> None:
         cfg = self._cfg
 
         # ── PVE: get all VMs/LXCs ────────────────────────────────────────────
@@ -1309,6 +1324,11 @@ class StatePoller:
                 known = self._partial_pbs_times.setdefault(vmid, set())
                 known.update(partial_times)
                 known -= completed_times
+                # Prune times that no longer exist anywhere — a partial that was
+                # DELETED (not completed) leaves neither a completed nor a partial
+                # marker, so without this it would stay flagged forever (ghost).
+                # Keep only times still present locally or still covered by restic.
+                known &= (local_times | set(vm_restic.keys()))
                 all_partial_times = set(known)
 
             # Add cloud-only entries: restic covers a PBS time that no longer
@@ -1591,24 +1611,29 @@ class StatePoller:
         cfg = self._cfg
         if not cfg or not cfg.restic_repo:
             return
-        try:
-            res   = LocalResticClient(cfg)
-            snaps = res.get_snapshots_flat()
-        except Exception as exc:
-            log.warning("Restic scan failed: %s", exc)
-            return
+        # Hold the lock across read AND publish: a concurrent scan that read the
+        # repo before a forget/backup must not publish its stale list after this
+        # one. The scan that acquires last reads the current repo and wins.
+        with self._restic_scan_lock:
+            try:
+                res   = LocalResticClient(cfg)
+                snaps = res.get_snapshots_flat()
+            except Exception as exc:
+                log.warning("Restic scan failed: %s", exc)
+                return
 
-        with self._restic_lock:
-            self._restic_snaps = snaps
+            with self._restic_lock:
+                self._restic_snaps = snaps
 
-        # Authoritative flat restic list — the GUI/API reads THIS instead of
-        # aggregating the per-VM vm/<id>/restic topics, which can resurrect a
-        # forgotten snapshot via a stale ghost-VMID topic (e.g. a destroyed LXC
-        # that a full backup once covered). This topic always mirrors the repo.
-        self._pub_if_changed("restic/snapshots", snaps)
+            # Authoritative flat restic list — the GUI/API reads THIS instead of
+            # aggregating the per-VM vm/<id>/restic topics, which can resurrect a
+            # forgotten snapshot via a stale ghost-VMID topic (e.g. a destroyed LXC
+            # that a full backup once covered). This topic always mirrors the repo.
+            self._pub_if_changed("restic/snapshots", snaps)
 
         # Trigger a PBS re-scan — _scan_pve_pbs publishes vm/<id>/restic with
         # proper local-annotation (whether each PBS snapshot still exists in PBS).
+        # Outside the lock so the (potentially slow) PBS scan never blocks restic.
         self.rescan_now()
 
     # ── helpers ───────────────────────────────────────────────────────────────
