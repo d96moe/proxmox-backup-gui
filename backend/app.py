@@ -362,7 +362,10 @@ def get_hosts():
     return jsonify([
         {"id": h.id, "label": h.label, "self_vmid": SELF_VMID,
          "pbs_datastore": h.pbs_datastore or "",
-         "pbs_storage_id": h.pbs_storage_id or ""}
+         "pbs_storage_id": h.pbs_storage_id or "",
+         # mqtt_user (not the password) signals the host is reachable via the
+         # MQTT agent — the GUI/tests use it to gate agent-only features.
+         "mqtt_user": h.mqtt_user or ""}
         for h in HOSTS.values()
     ])
 
