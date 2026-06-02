@@ -803,6 +803,34 @@ def test_seeded_has_local_only_snap(host_id, items):
         "No local-only snapshot found — seed may be missing PBS backup #3 (T3)."
 
 
+def test_reseed_restic_to_pristine_state(host_id):
+    """State guard: restore the pristine restic repo (only the seed's R1+R2) before
+    the live restic-state assertions below.
+
+    The cloud-restore tests above run a *working* backup_after that takes a fresh
+    full-datastore restic backup (R3+). R3 covers every PBS time, which would
+    otherwise: inflate test_seeded_restic_snapshot_count (>2), make T3 appear
+    cloud-covered (test_seeded_local_only_has_no_restic_coverage), and leave the
+    delete tests unable to fully drop a snapshot's cloud coverage. Forget every
+    restic snapshot except the two oldest (R1, R2) to re-establish seed state.
+    No-op when only R1/R2 exist.
+    """
+    try:
+        body = _get(f"/api/host/{host_id}/restic/snapshots")
+    except Exception as e:
+        pytest.skip(f"restic/snapshots endpoint error: {e}")
+    snaps = body.get("snaps", body) if isinstance(body, dict) else body
+    if not snaps or len(snaps) <= 2:
+        return  # already pristine
+    # Oldest two are the seed's R1, R2; forget everything newer.
+    snaps_sorted = sorted(snaps, key=lambda s: s.get("ts", 0))
+    for s in snaps_sorted[2:]:
+        resp = _post(f"/api/host/{host_id}/delete/restic", {"restic_id": s["id"]})
+        if isinstance(resp, dict) and resp.get("job_id"):
+            _poll_job(resp["job_id"], timeout=300)
+    _rescan(host_id)
+
+
 def test_seeded_cloud_only_covered_by_multiple_restic_snapshots(host_id, items):
     """The cloud-only snapshot must be covered by >=2 restic snapshots.
 
