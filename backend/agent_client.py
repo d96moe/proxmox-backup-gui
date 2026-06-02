@@ -669,9 +669,47 @@ class AgentClient:
                 tasks = [t for t in tasks if not t.get("endtime")]
             return tasks
 
-    def get_pbs_task_log(self, upid: str) -> list[str]:
+    def get_pbs_task_log(self, upid: str, timeout: int = 10) -> list[str]:
+        topic = f"{self._base}/pbs/tasks/{upid}/log"
+        with MQTT_CACHE_LOCK:
+            MQTT_CACHE.pop(topic, None)
+
         publish_cmd(f"{self._base}/cmd/replay_pbs_log", {"upid": upid})
-        return []
+        
+        start = time.time()
+        while time.time() - start < timeout:
+            with MQTT_CACHE_LOCK:
+                log_list = MQTT_CACHE.get(topic, [])
+                if isinstance(log_list, list) and log_list:
+                    # Check if the last item is the "done" marker
+                    try:
+                        last_item = json.loads(log_list[-1])
+                        if isinstance(last_item, dict) and last_item.get("done"):
+                            # Filter out the 'done' marker and parse the strings
+                            lines = []
+                            for item in log_list[:-1]:
+                                try:
+                                    lines.append(json.loads(item))
+                                except Exception:
+                                    lines.append(item)
+                            return lines
+                    except Exception:
+                        pass
+            time.sleep(0.1)
+
+        # On timeout, return whatever we collected so far
+        with MQTT_CACHE_LOCK:
+            log_list = MQTT_CACHE.get(topic, [])
+            lines = []
+            if isinstance(log_list, list):
+                for item in log_list:
+                    try:
+                        parsed = json.loads(item)
+                        if not (isinstance(parsed, dict) and parsed.get("done")):
+                            lines.append(parsed)
+                    except Exception:
+                        lines.append(item)
+            return lines
 
     def get_restic_log(self) -> dict:
         publish_cmd(f"{self._base}/cmd/replay_restic_log", {})
