@@ -622,10 +622,18 @@ class AgentClient:
         return self.get_settings()
 
     def get_connection(self) -> dict:
-        return {}
+        with MQTT_CACHE_LOCK:
+            return MQTT_CACHE.get(f"{self._base}/connection", {})
 
     def set_connection(self, settings: dict) -> dict:
-        return {}
+        """Write agent connection config via MQTT. Empty secrets mean 'unchanged'.
+        Waits for the agent to apply + republish so a follow-up GET sees fresh data."""
+        if not settings:
+            raise ValueError("empty body")
+        corr_id = str(uuid.uuid4())
+        publish_cmd(f"{self._base}/cmd/connection", {**settings, "corr_id": corr_id})
+        self._wait_for_ack(corr_id, timeout=10)
+        return {"ok": True}
         
     def get_schedules(self) -> dict:
         with MQTT_CACHE_LOCK:

@@ -195,6 +195,38 @@ class TestMQTTPublisher:
                          if "job/c-set/ack" in c[0][0]]
             assert ack_calls, "settings write must ack the corr_id"
 
+    @patch("pve_agent._cfg")
+    @patch("pve_agent.threading.Thread")
+    def test_on_message_routes_connection_to_handler(self, mock_thread, mock_global_cfg, mock_cfg, mock_mqtt_client):
+        pub = MQTTPublisher("127.0.0.1", hostname="test-node")
+        msg = MagicMock()
+        msg.topic = "proxmox/test-node/cmd/connection"
+        msg.payload = b'{"pbs_user": "x"}'
+        pub._on_message(mock_mqtt_client, None, msg)
+        mock_thread.assert_called_once()
+        _, kwargs = mock_thread.call_args
+        assert kwargs["target"] == pub._handle_cmd_connection
+
+    @patch("pve_agent.AgentConfig")
+    def test_handle_cmd_connection_writes_keeps_empty_secret_and_acks(
+            self, mock_agentcfg, mock_cfg, mock_mqtt_client, tmp_path):
+        cfgfile = tmp_path / "config.json"
+        cfgfile.write_text(json.dumps(
+            {"pve_url": "http://old", "pbs_user": "u", "pbs_password": "secret"}))
+        with patch("pve_agent._cfg", new=mock_cfg), \
+             patch("pve_agent._config_path", str(cfgfile)), \
+             patch("pve_agent._poller") as mock_poller:
+            pub = MQTTPublisher("127.0.0.1", hostname="test-node")
+            pub._handle_cmd_connection(
+                {"pbs_user": "newuser", "pbs_password": "", "corr_id": "c-con"})
+
+        written = json.loads(cfgfile.read_text())
+        assert written["pbs_user"] == "newuser"
+        assert written["pbs_password"] == "secret"   # empty posted secret = unchanged
+        mock_poller._scan_connection.assert_called_once()
+        ack = [c for c in mock_mqtt_client.publish.call_args_list if "job/c-con/ack" in c[0][0]]
+        assert ack, "connection write must ack the corr_id"
+
 
 class TestStatePoller:
     
@@ -250,3 +282,18 @@ class TestStatePoller:
         assert settings_pub, "_scan_settings must publish the settings topic"
         payload = settings_pub[0][0][1]
         assert "keep-last" in payload and "backup-1" in payload
+
+    def test_scan_connection_publishes_redacted(self, mock_cfg, mock_mqtt_client, tmp_path):
+        cfgfile = tmp_path / "config.json"
+        cfgfile.write_text(json.dumps(
+            {"pve_url": "http://pve", "pbs_user": "u", "pbs_password": "secret"}))
+        with patch("pve_agent._config_path", str(cfgfile)):
+            pub = MQTTPublisher("127.0.0.1", hostname="test-node")
+            poller = StatePoller(mock_cfg, pub)
+            poller._scan_connection()
+        conn_pub = [c for c in mock_mqtt_client.publish.call_args_list
+                    if c[0][0] == "proxmox/test-node/connection"]
+        assert conn_pub, "_scan_connection must publish the connection topic"
+        payload = conn_pub[0][0][1]
+        assert "http://pve" in payload      # non-secret fields present
+        assert "secret" not in payload      # secret redacted

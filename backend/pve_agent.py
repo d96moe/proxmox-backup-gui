@@ -169,6 +169,9 @@ class MQTTPublisher:
         elif cmd == "settings":
             threading.Thread(target=self._handle_cmd_settings, args=(body,),
                              daemon=True, name="mqtt-cmd-settings").start()
+        elif cmd == "connection":
+            threading.Thread(target=self._handle_cmd_connection, args=(body,),
+                             daemon=True, name="mqtt-cmd-connection").start()
         elif cmd == "replay_op_log":
             threading.Thread(target=self._handle_cmd_replay_op_log, args=(body,),
                              daemon=True, name="mqtt-cmd-replay-op-log").start()
@@ -476,6 +479,43 @@ class MQTTPublisher:
             _poller._scan_schedules()
         if corr_id:
             self._ack(corr_id, "settings-applied")
+
+    def _handle_cmd_connection(self, body: dict) -> None:
+        """Write the agent's own config.json (MQTT port of main's POST /connection).
+
+        Empty sensitive fields mean 'unchanged'. Reloads _cfg in-process and
+        republishes the (redacted) connection topic + acks the corr_id.
+        """
+        global _cfg
+        corr_id = body.pop("corr_id", None)
+        if not body:
+            return
+        log.info("MQTT cmd/connection: keys=%s", sorted(body))
+        try:
+            with open(_config_path) as f:
+                current = json.load(f)
+        except Exception as exc:
+            log.warning("connection read failed: %s", exc)
+            return
+        for k, v in body.items():
+            if k in _SENSITIVE and v == "":
+                continue   # empty secret = leave unchanged
+            current[k] = v
+        try:
+            with open(_config_path, "w") as f:
+                json.dump(current, f, indent=2)
+                f.write("\n")
+        except Exception as exc:
+            log.warning("connection write failed: %s", exc)
+            return
+        try:
+            _cfg = AgentConfig(**current)
+        except Exception as exc:
+            log.warning("connection written but reload failed: %s", exc)
+        if _poller:
+            _poller._scan_connection()
+        if corr_id:
+            self._ack(corr_id, "connection-applied")
 
     def _handle_cmd_replay_op_log(self, body: dict) -> None:
         op_id = body.get("op_id")
@@ -1135,6 +1175,7 @@ class StatePoller:
             try:
                 self._scan_schedules()
                 self._scan_settings()
+                self._scan_connection()
             except Exception as exc:
                 log.warning("Schedules poll error: %s", exc)
             self._stop.wait(self.SCHEDULES_INTERVAL)
@@ -1485,6 +1526,20 @@ class StatePoller:
             except Exception as exc:
                 log.warning("Settings restic fetch failed: %s", exc)
         self._pub_if_changed("settings", result)
+
+    def _scan_connection(self) -> None:
+        """Publish the agent's connection config (secrets redacted) as a retained
+        topic. MQTT port of main's GET /connection."""
+        try:
+            with open(_config_path) as f:
+                raw = json.load(f)
+        except Exception as exc:
+            log.warning("Connection config read failed: %s", exc)
+            return
+        for key in _SENSITIVE:
+            if key in raw:
+                raw[key] = ""   # redact — UI shows placeholder, only sends back if changed
+        self._pub_if_changed("connection", raw)
 
     def _scan_pbs_tasks(self) -> None:
         """Poll PBS for running tasks and publish via MQTT."""
