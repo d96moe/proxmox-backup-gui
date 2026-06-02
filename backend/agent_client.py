@@ -665,7 +665,8 @@ class AgentClient:
         with MQTT_CACHE_LOCK:
             tasks = MQTT_CACHE.get(f"{self._base}/pbs/tasks", [])
             if running_only:
-                tasks = [t for t in tasks if t.get("status") == "running"]
+                # A task is running iff it has no endtime (matches the agent's filter).
+                tasks = [t for t in tasks if not t.get("endtime")]
             return tasks
 
     def get_pbs_task_log(self, upid: str) -> list[str]:

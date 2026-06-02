@@ -1054,7 +1054,7 @@ class StatePoller:
     CLOUD_STORAGE_INTERVAL = 60   # seconds — cloud quota/usage (just 2 rclone calls)
     INFO_INTERVAL         = 3600  # seconds — version strings (rarely change)
     SCHEDULES_INTERVAL    = 120   # seconds — next scheduled backup
-    PBS_TASKS_INTERVAL    = 15    # seconds — running PBS task poll
+    PBS_TASKS_INTERVAL    = 5     # seconds — PBS task poll (short so brief GC/backup tasks are caught)
 
     PBS_TASK_TYPES = {"backup", "prune", "prunejob", "garbage_collection", "verify"}
 
@@ -1556,13 +1556,19 @@ class StatePoller:
         self._pub_if_changed("connection", raw)
 
     def _scan_pbs_tasks(self) -> None:
-        """Poll PBS for running tasks and publish via MQTT."""
+        """Poll PBS and publish tasks via MQTT.
+
+        Publishes ALL recent tasks to 'pbs/tasks' (the API reads this; completed
+        tasks linger in PBS history so short GC/backup tasks remain visible) and
+        the running subset to 'pbs/tasks/running' (the sidebar live indicator)."""
         try:
-            tasks = _get_pbs_tasks(running_only=True)
+            tasks = _get_pbs_tasks(running_only=False)
         except Exception as exc:
             log.warning("PBS task scan failed: %s", exc)
             return
-        self._pub_if_changed("pbs/tasks/running", tasks)
+        running = [t for t in tasks if not t.get("endtime")]
+        self._pub_if_changed("pbs/tasks", tasks)
+        self._pub_if_changed("pbs/tasks/running", running)
 
     def _scan_restic(self) -> None:
         cfg = self._cfg
