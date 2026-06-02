@@ -323,8 +323,14 @@ class MQTTPublisher:
                 if deleted:
                     op.append_log("PBS snapshot deleted.")
                     op.append_log("Starting datastore GC…")
-                    pbs.start_gc()
-                    op.append_log("GC started (runs in background on PBS).")
+                    # GC is best-effort cleanup — the snapshot is already gone. PBS
+                    # returns 400 if a GC is already running on the datastore, which
+                    # must NOT fail the delete operation.
+                    try:
+                        pbs.start_gc()
+                        op.append_log("GC started (runs in background on PBS).")
+                    except Exception as gc_exc:
+                        op.append_log(f"GC not started (non-fatal): {gc_exc}")
                 else:
                     op.append_log("PBS snapshot already gone (400/404 — check agent log for PBS response body).")
             if do_restic:
