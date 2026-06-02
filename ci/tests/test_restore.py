@@ -1079,9 +1079,18 @@ def test_delete_cloud_only_all_restic_snapshots_forgotten(host_id):
         pytest.skip("delete/cloud vmid/backup_time not recorded — skipping")
 
     covers_after = _restic_covers_for(host_id, vmid, backup_time)
+    if covers_after:
+        # Diagnostic: dump the full /restic/snapshots payload + its source so the
+        # build log shows whether a forgotten snapshot is lingering in the
+        # authoritative MQTT topic, the per-VM aggregation, or the sticky cache.
+        dbg = _get(f"/api/host/{host_id}/restic/snapshots")
+        dbg_snaps = dbg.get("snaps", dbg) if isinstance(dbg, dict) else dbg
+        dbg_ids = [(s.get("short_id"), s.get("covers")) for s in dbg_snaps]
+        src = dbg.get("_source") if isinstance(dbg, dict) else "?"
     assert len(covers_after) == 0, (
         f"Restic snapshot(s) still cover cloud-only vmid={vmid} "
-        f"at pbs_time={backup_time} after delete/cloud: {covers_after}"
+        f"at pbs_time={backup_time} after delete/cloud: {covers_after}\n"
+        f"source={src}\nall snaps={dbg_ids}"
     )
 
 

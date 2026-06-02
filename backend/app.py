@@ -1083,6 +1083,7 @@ def restic_snapshot_list(host_id: str):
             pass
 
     snaps = []
+    _dbg_source = "none"
     with MQTT_CACHE_LOCK:
         # Prefer the authoritative flat list the agent publishes (mirrors the
         # actual restic repo). Falls back to aggregating per-VM topics for
@@ -1090,6 +1091,7 @@ def restic_snapshot_list(host_id: str):
         authoritative = MQTT_CACHE.get(f"proxmox/{host_id}/restic/snapshots")
         if isinstance(authoritative, list):
             snaps = [s.copy() for s in authoritative]
+            _dbg_source = "authoritative"
         else:
             for t, p in MQTT_CACHE.items():
                 if t.startswith(f"proxmox/{host_id}/vm/") and t.endswith("/restic"):
@@ -1107,11 +1109,15 @@ def restic_snapshot_list(host_id: str):
                                 }]
                             if s_copy not in snaps:
                                 snaps.append(s_copy)
+            if snaps:
+                _dbg_source = "aggregation"
 
     if "PYTEST_CURRENT_TEST" in os.environ and not snaps:
         try:
             res = ResticClient(host)
             snaps = [s.copy() for s in res.get_snapshots_flat()]
+            if snaps:
+                _dbg_source = "pytest-direct"
         except Exception:
             pass
 
@@ -1119,6 +1125,7 @@ def restic_snapshot_list(host_id: str):
     cache_key = f"flat:{host_id}"
     if not snaps and cache_key in _restic_snap_cache:
         snaps = _restic_snap_cache[cache_key]
+        _dbg_source = "sticky-cache"
 
     if restic_busy and not snaps:
         return jsonify({"busy": True}), 503
@@ -1162,7 +1169,10 @@ def restic_snapshot_list(host_id: str):
         else:
             snap["size"] = "—"
 
-    return jsonify({"snaps": snaps, "restic_busy": restic_busy})
+    resp = {"snaps": snaps, "restic_busy": restic_busy}
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        resp["_source"] = _dbg_source
+    return jsonify(resp)
 
 
 @app.post("/api/host/<host_id>/delete/restic")

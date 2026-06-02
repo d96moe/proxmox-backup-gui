@@ -1154,10 +1154,9 @@ function openPbsTaskModal(upid, title) {
 
   if (_jobPollInterval) { clearInterval(_jobPollInterval); _jobPollInterval = null; }
 
+  // Agent replays the task log to proxmox/<host>/pbs/tasks/<upid>/log,
+  // which _onMessage routes into #job-log.
   MQTTBus.triggerAction('replay_pbs_log', {upid: upid});
-
-  // Stream new lines via MQTT
-  MQTTBus.triggerAction('replay_restic_log', {});
 }
 
 function _reopenLastJob() {
@@ -2632,18 +2631,24 @@ const MQTTBus = (() => {
       return;
     }
 
-    if (parts[2] === 'log' && parts[3] === 'pbs') {
+    // proxmox/<host>/pbs/tasks/<upid>/log — PBS task log lines (replay_pbs_log).
+    // The agent publishes each line as json.dumps(line) and a {"done": true}
+    // terminator (NOT a bare __done__), so parse the payload accordingly.
+    if (parts[2] === 'pbs' && parts[3] === 'tasks' && parts[5] === 'log') {
       const modal = document.getElementById('job-modal');
       if (!modal.classList.contains('open')) return;
       const logEl = document.getElementById('job-log');
-      if (msg === '__done__') {
+      let val;
+      try { val = JSON.parse(msg); } catch (_) { val = msg; }
+      if (val && typeof val === 'object' && val.done) {
         document.getElementById('job-badge').textContent = 'done';
         document.getElementById('job-badge').className = 'job-status-badge ok';
-        document.getElementById('job-close-btn').disabled = false;
+        const cb = document.getElementById('job-close-btn');
+        if (cb) cb.disabled = false;
       } else {
         const line = document.createElement('div');
         line.className = 'log-line';
-        line.textContent = msg;
+        line.textContent = String(val);
         logEl.appendChild(line);
         logEl.scrollTop = logEl.scrollHeight;
       }
