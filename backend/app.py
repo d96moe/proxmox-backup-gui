@@ -1170,8 +1170,20 @@ def restic_snapshot_list(host_id: str):
             snap["size"] = "—"
 
     resp = {"snaps": snaps, "restic_busy": restic_busy}
-    if "PYTEST_CURRENT_TEST" in os.environ:
+    # Always-on diagnostics (cheap, harmless): where the list came from, whether
+    # the authoritative topic is present in the cache, and whether the global
+    # MQTT subscriber is actually connected. Flask runs as its own service (not
+    # under pytest), so a PYTEST gate would never fire in integration.
+    try:
+        import mqtt_manager as _mm
+        with _mm.MQTT_CACHE_LOCK:
+            _auth = _mm.MQTT_CACHE.get(f"proxmox/{host_id}/restic/snapshots")
         resp["_source"] = _dbg_source
+        resp["_auth_present"] = isinstance(_auth, list)
+        resp["_auth_count"] = len(_auth) if isinstance(_auth, list) else None
+        resp["_mqtt_connected"] = bool(_mm._global_client and _mm._global_client.is_connected())
+    except Exception as exc:
+        resp["_source"] = f"{_dbg_source} (dbg err: {exc})"
     return jsonify(resp)
 
 
