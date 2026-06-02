@@ -1584,6 +1584,12 @@ class StatePoller:
         with self._restic_lock:
             self._restic_snaps = snaps
 
+        # Authoritative flat restic list — the GUI/API reads THIS instead of
+        # aggregating the per-VM vm/<id>/restic topics, which can resurrect a
+        # forgotten snapshot via a stale ghost-VMID topic (e.g. a destroyed LXC
+        # that a full backup once covered). This topic always mirrors the repo.
+        self._pub_if_changed("restic/snapshots", snaps)
+
         # Trigger a PBS re-scan — _scan_pve_pbs publishes vm/<id>/restic with
         # proper local-annotation (whether each PBS snapshot still exists in PBS).
         self.rescan_now()

@@ -1084,22 +1084,29 @@ def restic_snapshot_list(host_id: str):
 
     snaps = []
     with MQTT_CACHE_LOCK:
-        for t, p in MQTT_CACHE.items():
-            if t.startswith(f"proxmox/{host_id}/vm/") and t.endswith("/restic"):
-                vmid = t.split("/")[3]
-                if isinstance(p, dict) and "snapshots" in p:
-                    for s in p["snapshots"]:
-                        s_copy = s.copy()
-                        if "covers" not in s_copy:
-                            meta = MQTT_CACHE.get(f"proxmox/{host_id}/vm/{vmid}/meta", {})
-                            vm_type = meta.get("type", "vm")
-                            s_copy["covers"] = [{
-                                "vmid": int(vmid),
-                                "type": "ct" if vm_type == "lxc" else "vm",
-                                "pbs_time": s_copy.get("pbs_time"),
-                            }]
-                        if s_copy not in snaps:
-                            snaps.append(s_copy)
+        # Prefer the authoritative flat list the agent publishes (mirrors the
+        # actual restic repo). Falls back to aggregating per-VM topics for
+        # agents that predate the restic/snapshots topic.
+        authoritative = MQTT_CACHE.get(f"proxmox/{host_id}/restic/snapshots")
+        if isinstance(authoritative, list):
+            snaps = [s.copy() for s in authoritative]
+        else:
+            for t, p in MQTT_CACHE.items():
+                if t.startswith(f"proxmox/{host_id}/vm/") and t.endswith("/restic"):
+                    vmid = t.split("/")[3]
+                    if isinstance(p, dict) and "snapshots" in p:
+                        for s in p["snapshots"]:
+                            s_copy = s.copy()
+                            if "covers" not in s_copy:
+                                meta = MQTT_CACHE.get(f"proxmox/{host_id}/vm/{vmid}/meta", {})
+                                vm_type = meta.get("type", "vm")
+                                s_copy["covers"] = [{
+                                    "vmid": int(vmid),
+                                    "type": "ct" if vm_type == "lxc" else "vm",
+                                    "pbs_time": s_copy.get("pbs_time"),
+                                }]
+                            if s_copy not in snaps:
+                                snaps.append(s_copy)
 
     if "PYTEST_CURRENT_TEST" in os.environ and not snaps:
         try:
