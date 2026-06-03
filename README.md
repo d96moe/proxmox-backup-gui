@@ -81,26 +81,52 @@ Each agent publishes under `proxmox/<mqtt_hostname>/`. The GUI subscribes to `pr
 | `vms/index` | yes | Sorted list of all VMIDs: `["101", "200", "301"]` |
 | `vm/<id>/meta` | yes | `{vmid, name, type, status, os, template, in_pve}` |
 | `vm/<id>/pbs` | yes | `{snapshots: [{backup_time, date, local, cloud, incremental, size, size_bytes, restic_id, restic_short_id}]}` — cloud-only entries have `local=false, cloud=true` |
-| `vm/<id>/restic` | yes | `{snapshots: [{id, short_id, time, covers: [{vmid, pbs_time, pbs_date, local, cloud}]}]}` |
+| `vm/<id>/restic` | yes | `{snapshots: [{id, short_id, time, covers: [{vmid, pbs_time, pbs_date, local, cloud}]}]}` — per-VM view (legacy/aggregation) |
+| `restic/snapshots` | yes | Authoritative flat list of **all** restic snapshots in the repo: `[{id, short_id, ts, size_bytes, covers: [{type, vmid, pbs_time}]}]`. The GUI reads this (not the per-VM aggregation) so a forgotten snapshot can never be resurrected from a stale per-VM topic |
 | `vm/<id>/backup/progress` | no | `{line: "…"}` — live log lines during a backup job |
+| `ops/<op_id>/status` | yes | `running` / `ok` / `failed` — operation lifecycle |
+| `ops/<op_id>/log` | no | live op log lines; `__done__` terminator |
 | `storage` | yes | `{local_used, local_total, cloud_used, cloud_total, cloud_quota_used, dedup_factor}` |
 | `summary` | yes | `{vm_count, protected_vm_count, unprotected_count, all_protected, last_pbs_backup_iso, last_pbs_backup_age_h, restic_snapshot_count, last_restic_backup_iso, last_restic_backup_age_h}` — host-level protection summary; also forwarded to HA MQTT if configured |
 | `info` | yes | `{pbs: "4.1.4", pve: "9.0.0", restic: "0.18.0"}` — version strings |
 | `schedules` | yes | `{pbs_jobs, pbs_running, restic_next, restic_running, pbs_retention, restic_retention}` |
-| `pbs/tasks/running` | yes | `[{upid, worker_type, worker_id, starttime}]` — running PBS tasks (GC, backup, prune); polled every 15 s |
-| `job/<corr_id>/ack` | no | `{op_id: "…"}` — correlation-ID response after the agent accepts a command |
+| `settings` | yes | `{retention, pbs_schedule, restic_schedule, vm_selection, pbs_prune}` — current host settings |
+| `connection` | yes | agent connection config with **passwords redacted** |
+| `pbs/tasks` | yes | all recent PBS tasks (GC, backup, prune, verify) |
+| `pbs/tasks/running` | yes | running subset of `pbs/tasks`; polled every 5 s so brief GC/backup tasks are caught |
+| `pbs/tasks/<upid>/log` | no | PBS task log lines (replayed on demand via `cmd/replay_pbs_log`); each line is `json.dumps(line)`, terminated by `{"done": true}` |
+| `restic/log` | no | restic nightly log lines (replayed via `cmd/replay_restic_log`); `__done__` terminator |
+| `job/<corr_id>/ack` | no | `{op_id: "…"}` on success, or `{error, code}` on rejection — correlation-ID response after the agent accepts/rejects a command |
 
 #### Published by browser → received by agent
 
 | Topic suffix | Content |
 |---|---|
 | `cmd/rescan` | `{}` — request a full rescan and republish |
-| `cmd/backup/pbs` | `{vmid, vmtype, corr_id}` — trigger PBS backup of a VM/LXC |
-| `cmd/backup/restic` | `{vmid, corr_id}` — trigger restic cloud sync |
-| `cmd/restore` | `{vmid, vmtype, backup_time, source, backup_after, corr_id}` — trigger restore |
+| `cmd/backup` | `{vmid, vmtype, restic, corr_id}` — PBS backup (optionally +restic cloud) |
+| `cmd/backup-restic` | `{vmid, corr_id}` — standalone restic cloud sync |
+| `cmd/restore` | `{vmid, vmtype, backup_time, source, backup_after, corr_id}` — restore from PBS or cloud |
+| `cmd/restore-datastore` | `{corr_id}` — whole-datastore self-restore from restic |
+| `cmd/delete` | `{vmid, vmtype, backup_time, scope, restic_id, corr_id}` — delete a snapshot (`scope`: `pbs` / `cloud` / `both`) |
+| `cmd/delete-all` | `{vmid, vmtype, corr_id}` — delete all snapshots for a VM |
+| `cmd/settings` | `{retention, pbs_schedule, restic_schedule, vm_selection, pbs_prune, corr_id}` — write settings |
+| `cmd/connection` | `{…credentials…, corr_id}` — write agent connection config |
+| `cmd/replay_pbs_log` | `{upid}` — replay a PBS task log to `pbs/tasks/<upid>/log` |
+| `cmd/replay_restic_log` | `{}` — replay the restic nightly log to `restic/log` |
+| `cmd/replay_op_log` | `{op_id}` — replay an op log to `ops/<op_id>/log` |
+
+Every mutating command carries a `corr_id`; the agent answers on `job/<corr_id>/ack` with the `op_id` (success) or `{error, code}` (rejection), so the browser can open the right job modal or surface the error.
 
 > **`mqtt_hostname` must match the `id` field in `hosts.json`.**  
 > If the agent's `mqtt_hostname` is different (e.g. the OS hostname), the GUI shows "Connecting…" forever. Set `mqtt_hostname` explicitly in the agent's `config.json` and verify with `journalctl -u pve-agent` on the PVE host.
+
+### Cache consistency
+
+Retained MQTT topics are an eventually-consistent mirror of the agent's view of PBS + restic. Three measures keep that mirror from showing stale "ghosts" (e.g. a snapshot that was just forgotten):
+
+1. **Synchronous rescan before "done".** After a mutating op (backup/restore/delete), the agent re-scans and republishes the affected state *before* it publishes `ops/<op_id>/status=done`, on the same MQTT connection. A client that reacts to `done` is guaranteed to read fresh state.
+2. **Serialized scans + forced republish.** `_scan_restic` / `_scan_pve_pbs` hold a per-scan lock across read **and** publish, so a slow scan that read pre-mutation state can never clobber a post-mutation scan (last-writer-wins). After a restic mutation the agent also force-republishes `restic/snapshots` (clearing the change-hash) so a downstream cache that missed an earlier message is corrected.
+3. **Authoritative read, no resurrection.** The GUI reads the flat `restic/snapshots` topic; the per-VM aggregation and the backend's sticky cache are only consulted when that topic is genuinely *absent* — never when it is present-but-empty, so a fully-forgotten snapshot stays gone.
 
 ## Installation
 
@@ -208,20 +234,18 @@ Edit `backend/hosts.json` in your GUI install directory:
 [
   {
     "id": "home",
-    "label": "pve · home",
-    "agent_url": "http://192.168.0.200:8099",
-    "agent_token": "your-token"
+    "label": "pve · home"
   },
   {
     "id": "cabin",
-    "label": "pve · cabin",
-    "agent_url": "http://192.168.1.200:8099",
-    "agent_token": "your-token"
+    "label": "pve · cabin"
   }
 ]
 ```
 
 The `id` field **must match** `mqtt_hostname` in the agent's `config.json` on each PVE host.
+
+> **No agent URL / token.** The GUI and the agents communicate **only over MQTT** — there is no REST API between them anymore (the old `agent_url` / `agent_token` fields are gone). Each agent publishes to the shared Mosquitto broker (co-located with the GUI in LXC 199, reached by the GUI at `MQTT_BROKER_HOST`, default `localhost:1883`); the browser talks to Flask over HTTP + the `/mqtt-ws` WebSocket. All PVE/PBS/restic credentials live in each agent's own `config.json`. If your broker requires authentication, set `mqtt_user` / `mqtt_password` per host.
 
 ### Agent `config.json` (on each PVE host)
 
@@ -260,6 +284,8 @@ The `mqtt_ha_*` fields are optional. When `mqtt_ha_host` is set, the agent publi
 
 ## API Endpoints
 
+These are **browser-facing** HTTP endpoints served by Flask. Read endpoints return data straight from the MQTT cache (the mirror of the agents' retained topics); write endpoints publish an MQTT command to the agent and wait for its `job/<corr_id>/ack`. There is no HTTP call from Flask to the agents — that path is entirely MQTT.
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/hosts` | List configured hosts |
@@ -288,8 +314,15 @@ The GUI uses `rclone lsjson locks/` to check if a restic backup is in progress b
 
 ## Roadmap
 
-- **Delete backup (cloud)** — guided workflow to remove a specific VM's backup from the restic repo: restore full datastore → delete from PBS → re-backup → forget old snapshot. Expensive but correct given the whole-datastore restic architecture.
-- **Host/connection settings** — PBS credentials, restic repo/password, agent URL editable in GUI (currently requires editing config files on the host).
+Recently shipped (previously on this list):
+
+- ✅ **Host/connection settings** — PBS/restic credentials and schedules editable from the GUI (`settings` + `connection`), written back to the agent's `config.json`.
+
+### A note on "delete a VM's cloud backup"
+
+This is **inherently awkward with the whole-datastore restic model** and is *not* cleanly solvable. restic backs up the **entire PBS datastore** as one snapshot, so a single VM appears inside *many* restic snapshots (every nightly run that included it). Truly "removing just that VM from the cloud" would mean iterating over **every** restic snapshot the VM appears in and rewriting each one — expensive and error-prone.
+
+What the GUI implements instead is the tractable subset: deleting a **cloud-only PBS snapshot** (a point-in-time of the whole store). It restores the datastore from restic → deletes that snapshot from PBS → re-backs up → forgets every restic snapshot covering that `(vmid, pbs_time)`. Because forgetting a whole-datastore restic snapshot also drops other VMs' coverage at that time, this is coarse by nature. Genuine per-VM cloud deletion would require **per-VM restic repos** — a larger change, still open.
 
 ## Related
 

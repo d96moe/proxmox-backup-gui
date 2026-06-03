@@ -33,6 +33,17 @@ Three Jenkins pipelines test the GUI at different levels:
 
 The fast pipeline gives rapid feedback on every push. The integration pipeline verifies end-to-end behaviour against a real Proxmox environment.
 
+**Other integration parameters:**
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `BRANCH` | `main` | Branch to check out and test |
+| `TEST_FILTER` | (empty) | Extra `pytest -k` expression |
+| `FAIL_FAST` | off | Adds `-x` — stop on first failure (handy when bisecting) |
+| `DEBUG` | off | Verbose per-job log streaming in the console (`CI_DEBUG=1`) |
+
+> **Console output & the `[ NN%]` progress.** With `DEBUG` **off** (the default) pytest keeps output capturing on, so the terminal shows the normal progress percentage. With `DEBUG` **on**, the runner adds `pytest -s` (no capture) so live agent/job logs stream into the console — this is what disrupts the `[ NN%]` column, which is the intended trade-off (readable progress by default, full live logs on demand). The full per-job trace is always written to the `job-debug.log` artifact regardless of `DEBUG`.
+
 ---
 
 ## How It Works
@@ -106,9 +117,15 @@ Playwright tests against an in-process mock server. Cover:
 - **MQTT BUS** — host isolation (`_onMessage` filter drops messages from non-current hosts); `resubscribe()` on host switch sends a `replay` request to `/mqtt-ws` so the Flask proxy re-delivers retained messages for the new host without JS errors
 - **SORT ORDER** — VM cards appear in ascending VMID order; LXC cards in ascending VMID order; VM section always before LXC section regardless of MQTT message arrival order
 
-### Unit tests (`ci/tests/test_mqtt.py`)
+### Unit tests (`ci/tests/test_mqtt.py`, `test_mqtt_manager.py`, `test_pve_agent.py`, `test_unit.py`)
 
-Pure Python unit tests (no VM, no network). Run in both the fast pipeline and as the `mqtt` suite in the integration pipeline. Cover the MQTT agent logic:
+Pure Python unit tests (no VM, no network). Run in both the fast pipeline and as the `mqtt` suite in the integration pipeline. The fast pipeline runs them under **`pytest-cov` with `--cov-fail-under`**, so a drop in backend coverage fails the build (settings/connection logic was added here after an integration-only gap let a regression through).
+
+- `test_mqtt_manager.py` — the Flask global MQTT client: `_on_message` cache mirror (empty payload clears a topic, `/log` topics append), `clean_session=False`, reconnect-before-publish in `publish_cmd`.
+- `test_pve_agent.py` — agent command routing for `cmd/settings` / `cmd/connection` (write-applies-and-acks, per-key error → `_ack_error`, scan publishes a **redacted** `connection` topic).
+- `test_unit.py::TestDeleteCloudStep4` — delete/cloud forgets **every** restic snapshot covering the `(vmid, pbs_time)`, and errors loudly when an explicit `restic_id` is missing.
+
+`test_mqtt.py` covers the MQTT agent logic:
 
 - **STORAGE_MERGE** — `_scan_storage` preserves `cloud_used`/`cloud_total` across scans
 - **RESTIC_COVERS** — PBS snapshots annotated with `local`/`cloud` flags and `pbs_date` for hover tooltips
@@ -149,6 +166,10 @@ Playwright + `requests` against the real Flask backend. Cover:
 - **Settings — VM selection** — exclude mode (all=1 + exclude field), include mode (all=0 + vmid field), mode switch, PVE verification, error cases
 - **PBS tasks** — GC, external backup (`vzdump`), and prune job (`ci-prune`) triggered synchronously via SSH to PVE host; tasks appear in `/pbs/tasks` API (worker types: `garbage_collection`, `backup`, `prunejob`); GC/backup complete in <1s (PBS deduplication) — sidebar tests inject real task data directly via `page.evaluate()` to test the rendering pipeline; GUI backup suppresses duplicate PBS card for same VMID (dedup logic verified via injected `_activeJobs`)
 - **Restic nightly log** — API returns lines + running flag; seeded log file used for SSE stream tests; `__done__` emitted when no process active; `openResticLogModal()` opens job modal with log content
+- **Delete cloud-only** — delete a cloud-only snapshot via `/delete/cloud`; verify it is gone from `/items` and that **no** restic snapshot still covers that `(vmid, pbs_time)` (the whole-datastore forget-all path), plus the old-style-tag fallback
+- **Cloud-only restore** — self-establishes the state instead of depending on seed ordering: take a local+cloud snapshot, delete only its **local** PBS copy (`/delete/pbs`), confirm it is now cloud-only (`local=false, cloud=true`), then restore it from the cloud (the restore brings it back, preserving net seed state)
+- **PBS task log modal** — clicking a PBS task card opens the job modal and streams the task log; verifies the browser routes the agent's `pbs/tasks/<upid>/log` topic (JSON lines + `{"done": true}`) into `#job-log`
+- **Cache consistency / no ghosts** — after delete/forget, a forgotten restic snapshot must not linger in `/restic/snapshots`; covers the eventual-consistency guarantees (synchronous rescan before `done`, serialized scans, authoritative-topic read). `/restic/snapshots` exposes `_source` / `_auth_present` / `_mqtt_connected` diagnostics to pinpoint where any stale entry came from
 
 ---
 
