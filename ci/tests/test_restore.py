@@ -469,19 +469,38 @@ def test_cloud_restore_ui(real_page, host_id, items):
 # This is the primary disaster-recovery scenario.
 # ─────────────────────────────────────────────────────────────────────────────
 
-def test_cloud_only_restore_api(host_id, items):
-    """Restore from a cloud-only restic snapshot (local PBS copy has been pruned).
+def test_cloud_only_restore_api(host_id):
+    """Restore from a cloud-only restic snapshot (local PBS copy pruned).
 
-    Skipped if no cloud-only snapshots are present — they appear when local PBS
-    retention prunes old snapshots that have already been uploaded to restic.
+    Establishes the cloud-only state deterministically instead of depending on
+    incidental seed state: take a local+cloud snapshot, delete only its LOCAL
+    PBS copy (the restic copy stays), confirm it is now cloud-only, then restore
+    it from the cloud. The restore brings the snapshot back, so the net seed
+    state is preserved for the seed-validation tests that follow.
     """
-    vmid, vm_type, restic_id, backup_time = _find_vm_with_cloud_only_snap(_items(host_id))
+    vmid, vm_type, snap = _find_snap(_items(host_id), local=True, cloud=True)
     if vmid is None:
-        pytest.skip(
-            "No cloud-only snapshots found — these appear after local PBS retention "
-            "prunes old snapshots that were already uploaded to restic. "
-            "Run the nightly backup+prune cycle first."
-        )
+        # Fall back to any pre-existing cloud-only snapshot (e.g. seed T1).
+        vmid, vm_type, restic_id, backup_time = _find_vm_with_cloud_only_snap(_items(host_id))
+        if vmid is None:
+            pytest.skip("No local+cloud or cloud-only snapshot available to restore")
+    else:
+        backup_time = snap["backup_time"]
+        restic_id = snap["restic_id"]
+        # Delete ONLY the local PBS copy → the snapshot becomes cloud-only.
+        d = _post(f"/api/host/{host_id}/delete/pbs", {
+            "vmid": vmid, "type": vm_type, "backup_time": backup_time,
+        })
+        assert "job_id" in d, f"No job_id in delete/pbs response: {d}"
+        derr = _job_ok(_poll_job(d["job_id"], timeout=300))
+        assert not derr, f"delete/pbs (to derive cloud-only) failed:\n{derr}"
+        # Confirm it is now cloud-only (local copy gone, restic copy remains).
+        for _ in range(5):
+            if not _snap_exists_in_items(host_id, vmid, backup_time):
+                break
+            time.sleep(3)
+        assert not _snap_exists_in_items(host_id, vmid, backup_time), \
+            f"Snapshot vmid={vmid} @ {backup_time} still local after delete/pbs — not cloud-only"
 
     resp = _post(f"/api/host/{host_id}/restore", {
         "vmid": vmid, "type": vm_type,
