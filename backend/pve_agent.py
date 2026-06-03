@@ -478,8 +478,15 @@ class MQTTPublisher:
         if isinstance(body.get("pbs_schedule"), dict):
             sched = body["pbs_schedule"]
             if sched.get("id") and sched.get("schedule"):
-                try: PVEClient(_host()).set_backup_schedule(sched["id"], sched["schedule"])
-                except Exception as exc: errors.append(f"pbs_schedule: {exc}")
+                try:
+                    try:
+                        PVEClient(_host()).set_backup_schedule(sched["id"], sched["schedule"])
+                    except Exception:
+                        # PVE 9.0.x on ARM drops HTTP PUT /cluster/backup/<id>;
+                        # pvesh runs locally on the node and is reliable.
+                        _pvesh_set_backup_schedule(sched["id"], sched["schedule"])
+                except Exception as exc:
+                    errors.append(f"pbs_schedule: {exc}")
 
         if isinstance(body.get("pbs_prune"), dict):
             pp = body["pbs_prune"]
@@ -493,9 +500,14 @@ class MQTTPublisher:
                 pve  = PVEClient(_host())
                 jobs = pve.get_backup_schedules()
                 if jobs:
-                    pve.set_backup_vm_selection(jobs[0]["id"],
-                                                vs.get("mode", "exclude"),
-                                                vs.get("vmids", []))
+                    job_id = jobs[0]["id"]
+                    mode   = vs.get("mode", "exclude")
+                    vmids  = vs.get("vmids", [])
+                    try:
+                        pve.set_backup_vm_selection(job_id, mode, vmids)
+                    except Exception:
+                        # Same ARM PVE HTTP-PUT-drop fallback as pbs_schedule.
+                        _pvesh_set_backup_vm_selection(job_id, mode, vmids)
             except Exception as exc:
                 errors.append(f"vm_selection: {exc}")
 
@@ -2351,6 +2363,31 @@ def _get_pbs_task_log(upid: str) -> list[str]:
         return PBSClient(_cfg).get_task_log(upid)
     except Exception:
         return []
+
+
+# ── pvesh fallbacks for PVE versions that drop HTTP PUT /cluster/backup/<id> ──
+# PVE 9.0.x on ARM (e.g. the cabin Pi 5) closes the connection on HTTP PUT to a
+# backup job (RemoteDisconnected). pvesh runs locally on the node and is reliable
+# on every PVE version. These mirror the REST-era fallback (commit 4fb9aaf) that
+# was lost when settings moved from POST /settings to the MQTT cmd handler.
+
+def _pvesh_set_backup_schedule(job_id: str, schedule: str) -> None:
+    subprocess.run(["pvesh", "set", f"/cluster/backup/{job_id}", "--schedule", schedule],
+                   check=True, timeout=20, capture_output=True, text=True)
+
+
+def _pvesh_set_backup_vm_selection(job_id: str, mode: str, vmids: list) -> None:
+    ids = ",".join(str(v) for v in vmids)
+    cmd = ["pvesh", "set", f"/cluster/backup/{job_id}"]
+    if mode == "include":
+        cmd += ["--all", "0"]
+        if ids:
+            cmd += ["--vmid", ids]
+    else:
+        cmd += ["--all", "1"]
+        if ids:
+            cmd += ["--exclude", ids]
+    subprocess.run(cmd, check=True, timeout=20, capture_output=True, text=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

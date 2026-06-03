@@ -195,6 +195,39 @@ class TestMQTTPublisher:
                          if "job/c-set/ack" in c[0][0]]
             assert ack_calls, "settings write must ack the corr_id"
 
+    @patch("pve_agent._pvesh_set_backup_vm_selection")
+    @patch("pve_agent._pvesh_set_backup_schedule")
+    @patch("pve_agent.PVEClient")
+    @patch("pve_agent.LocalResticClient")
+    def test_handle_cmd_settings_falls_back_to_pvesh_on_arm_put_drop(
+            self, mock_restic_cls, mock_pve_cls, mock_pvesh_sched, mock_pvesh_vmsel,
+            mock_cfg, mock_mqtt_client):
+        """Regression: PVE 9.0.x on ARM (the cabin Pi 5) drops HTTP PUT
+        /cluster/backup/<id> (RemoteDisconnected). The settings handler must fall
+        back to pvesh — the REST-era fallback (4fb9aaf) that was lost when settings
+        moved to the MQTT cmd handler — and still ack SUCCESS, not 500."""
+        pve = mock_pve_cls.return_value
+        pve.set_backup_schedule.side_effect = Exception("Remote end closed connection")
+        pve.set_backup_vm_selection.side_effect = Exception("Remote end closed connection")
+        pve.get_backup_schedules.return_value = [{"id": "nightly-backup"}]
+        with patch("pve_agent._cfg", new=mock_cfg), patch("pve_agent._poller"):
+            pub = MQTTPublisher("127.0.0.1", hostname="test-node")
+            pub._handle_cmd_settings({
+                "pbs_schedule": {"id": "nightly-backup", "schedule": "02:00"},
+                "vm_selection": {"mode": "exclude", "vmids": []},
+                "corr_id": "c-arm",
+            })
+        # HTTP PUT raised → fell back to pvesh for both writes
+        mock_pvesh_sched.assert_called_once_with("nightly-backup", "02:00")
+        mock_pvesh_vmsel.assert_called_once_with("nightly-backup", "exclude", [])
+        # …and acked SUCCESS (no error), because the fallback handled the drop
+        ack_calls = [c for c in mock_mqtt_client.publish.call_args_list
+                     if "job/c-arm/ack" in c[0][0]]
+        assert ack_calls, "must ack the corr_id"
+        payload = ack_calls[-1][0][1]
+        assert "error" not in payload, \
+            f"settings must succeed via pvesh fallback, got: {payload}"
+
     @patch("pve_agent._cfg")
     @patch("pve_agent.threading.Thread")
     def test_on_message_routes_connection_to_handler(self, mock_thread, mock_global_cfg, mock_cfg, mock_mqtt_client):
