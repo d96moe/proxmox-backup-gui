@@ -1091,8 +1091,12 @@ for s in snaps:
                         BACKEND_URL=http://10.10.0.100:5000 \
                         CI_ADMIN_PASSWORD=proxmox-ci-2024 \
                         PYTHONUNBUFFERED=1 \
+                        # -s (no capture) only in DEBUG mode for live job-log streaming.
+                        # Without DEBUG, capturing stays on so pytest can render the
+                        # [ NN%] progress column (it gets disrupted by interleaved -s output).
                         pytest ${PYTEST_TARGET} \
-                            -v --tb=short --no-header --color=no -s \
+                            -v --tb=short --no-header --color=no \
+                            $( [ "${CI_DEBUG}" = "1" ] && echo "-s" ) \
                             ${PYTEST_FILTER_ARG:+-k "${PYTEST_FILTER_ARG}"} \
                             $( [ "${FAIL_FAST_FLAG}" = "true" ] && echo "-x" ) \
                             --junit-xml=/tmp/test-results/integration.xml \
