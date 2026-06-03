@@ -1088,12 +1088,16 @@ for s in snaps:
 
                         echo "Running: pytest ${PYTEST_TARGET} ${PYTEST_FILTER_ARG:+-k} ${PYTEST_FILTER_ARG}${FAIL_FAST_FLAG:+ -x}"
                         cd /opt/ci/proxmox-backup-gui
+                        # -s (no capture) only in DEBUG mode for live job-log streaming;
+                        # without DEBUG, capturing stays on so pytest renders the [ NN%]
+                        # progress column (interleaved -s output otherwise disrupts it).
+                        # NOTE: the env-var prefix and `pytest` MUST stay on consecutive
+                        # backslash-continued lines — a comment between them breaks the
+                        # line continuation and drops BACKEND_URL, which silently skips
+                        # every live test (test_restore / test_self_restore).
                         BACKEND_URL=http://10.10.0.100:5000 \
                         CI_ADMIN_PASSWORD=proxmox-ci-2024 \
                         PYTHONUNBUFFERED=1 \
-                        # -s (no capture) only in DEBUG mode for live job-log streaming.
-                        # Without DEBUG, capturing stays on so pytest can render the
-                        # [ NN%] progress column (it gets disrupted by interleaved -s output).
                         pytest ${PYTEST_TARGET} \
                             -v --tb=short --no-header --color=no \
                             $( [ "${CI_DEBUG}" = "1" ] && echo "-s" ) \
@@ -1118,6 +1122,19 @@ EOF
                     ssh ${SSH_OPTS} -i ${SSH_KEY} root@${VM_IP} \
                         "journalctl -u pve-agent --no-pager -n 200" \
                         > test-results/pve-agent-journal.log 2>&1 || true
+
+                    # ── ZERO-SKIP GATE ──────────────────────────────────────────
+                    # A healthy integration run skips NOTHING. A skip here means the
+                    # live suite silently did not run (e.g. BACKEND_URL was dropped),
+                    # i.e. a false green. Fail the build so it can never pass on skips.
+                    # Artifacts above are already pulled, so diagnosis is preserved.
+                    SKIPPED=$(grep -oP 'testsuite[^>]*\\bskipped="\\K[0-9]+' test-results/integration.xml | head -1 || echo 0)
+                    echo "Integration skipped count: ${SKIPPED:-0}"
+                    if [ "${SKIPPED:-0}" -gt 0 ]; then
+                        echo "ERROR: ${SKIPPED} skipped test(s) — the integration suite must have ZERO skips."
+                        echo "A skip means live tests did not run (false green). Failing the build."
+                        exit 1
+                    fi
                 '''
             }
         }
