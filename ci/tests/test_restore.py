@@ -2625,6 +2625,50 @@ def test_pbs_gc_task_card_disappears_when_done(real_page, host_id, running_gc_ta
     assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
 
 
+def test_mqtt_ws_replay_redelivers_host_state(real_page, host_id):
+    """Regression (multi-host): selecting/switching a host makes the frontend send
+    {type:"replay", prefix:"proxmox/<host>"} over /mqtt-ws, and the server must
+    re-deliver that host's retained topics. The server used to ignore the request,
+    so a second host stayed stuck on "Connecting…" with 0 snapshots.
+
+    Opens a fresh (cookie-authenticated) WebSocket in the page context, requests a
+    replay for the host, and asserts its retained vms/index + at least one
+    vm/<id>/pbs (the snapshots that were missing) come back, with no other host's
+    topics leaking. Also asserts an unknown-host replay returns nothing — proof the
+    server filters by prefix instead of dumping the whole cache."""
+    result = real_page.evaluate(
+        """async (host) => {
+            function replay(prefix) {
+                return new Promise((resolve) => {
+                    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                    const ws = new WebSocket(`${proto}//${location.host}/mqtt-ws`);
+                    const got = [];
+                    let done = false;
+                    const finish = () => { if (!done) { done = true; try { ws.close(); } catch (_) {} resolve(got); } };
+                    ws.onopen = () => ws.send(JSON.stringify({ type: 'replay', prefix }));
+                    ws.onmessage = (e) => {
+                        try { const m = JSON.parse(e.data); if (m.topic) got.push(m.topic); } catch (_) {}
+                    };
+                    ws.onerror = finish;
+                    setTimeout(finish, 5000);
+                });
+            }
+            return { host: await replay(`proxmox/${host}`),
+                     bogus: await replay('proxmox/__nohost__') };
+        }""",
+        host_id,
+    )
+    topics = result["host"]
+    assert any(t.endswith("/vms/index") for t in topics), \
+        f"replay returned no vms/index for {host_id}: {topics[:25]}"
+    assert any("/vm/" in t and t.endswith("/pbs") for t in topics), \
+        f"replay returned no vm/<id>/pbs (snapshots) for {host_id}: {topics[:25]}"
+    leaked = [t for t in topics if not t.startswith(f"proxmox/{host_id}/")]
+    assert not leaked, f"replay leaked topics from another host: {leaked[:25]}"
+    assert result["bogus"] == [], \
+        f"replay for an unknown host returned topics (no prefix isolation): {result['bogus'][:25]}"
+
+
 @pytest.fixture
 def running_backup_task(host_id, items):
     """Trigger an external PBS backup (via vzdump, not via agent) and yield the task.

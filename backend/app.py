@@ -294,6 +294,26 @@ def api_delete_user(username: str):
 # API
 # ──────────────────────────────────────────────
 
+def _replay_items_for_prefix(prefix: str):
+    """Return [(topic, payload-as-JSON-string), …] from MQTT_CACHE under `prefix`.
+
+    Powers the /mqtt-ws {type:"replay"} handler: a host switch must re-deliver
+    exactly the selected host's retained topics. Host isolation is critical —
+    a `proxmox/cabin` replay must NOT leak `proxmox/home/*` (nor match a sibling
+    like `proxmox/cabin2/*`), or one host's data bleeds into another's view.
+    """
+    from mqtt_manager import MQTT_CACHE, MQTT_CACHE_LOCK
+    prefix = (prefix or "").rstrip("/")
+    if not prefix:
+        return []
+    out = []
+    with MQTT_CACHE_LOCK:
+        for t, p in MQTT_CACHE.items():
+            if t == prefix or t.startswith(prefix + "/"):
+                out.append((t, p if isinstance(p, str) else json.dumps(p)))
+    return out
+
+
 @sock.route('/mqtt-ws')
 def mqtt_proxy(ws):
     if not current_user.is_authenticated:
@@ -348,17 +368,11 @@ def mqtt_proxy(ws):
                     # newly selected host (on connect and on host switch). Without
                     # this, switching to a second host never gets its retained
                     # state and the UI stays on "Connecting…".
-                    prefix = (msg.get("prefix") or "").rstrip("/")
-                    if prefix:
-                        with MQTT_CACHE_LOCK:
-                            items = [(t, p) for t, p in MQTT_CACHE.items()
-                                     if t == prefix or t.startswith(prefix + "/")]
-                        for topic, payload in items:
-                            try:
-                                p = payload if isinstance(payload, str) else json.dumps(payload)
-                                msg_q.put_nowait({"topic": topic, "payload": p})
-                            except queue.Full:
-                                break
+                    for topic, p in _replay_items_for_prefix(msg.get("prefix")):
+                        try:
+                            msg_q.put_nowait({"topic": topic, "payload": p})
+                        except queue.Full:
+                            break
                 elif msg.get("topic"):
                     from mqtt_manager import publish_cmd
                     publish_cmd(msg["topic"], msg.get("payload", ""))
