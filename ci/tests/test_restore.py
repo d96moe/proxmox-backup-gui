@@ -494,13 +494,24 @@ def test_cloud_only_restore_api(host_id):
         assert "job_id" in d, f"No job_id in delete/pbs response: {d}"
         derr = _job_ok(_poll_job(d["job_id"], timeout=300))
         assert not derr, f"delete/pbs (to derive cloud-only) failed:\n{derr}"
-        # Confirm it is now cloud-only (local copy gone, restic copy remains).
+
+        # Confirm it is now cloud-only: the backup_time still appears in items
+        # (the restic copy remains) but its local flag is now False.
+        def _is_cloud_only():
+            fresh = _items(host_id)
+            for key in ("lxcs", "vms"):
+                for item in fresh.get(key, []):
+                    if item["id"] == vmid:
+                        for s in item["snapshots"]:
+                            if s.get("backup_time") == backup_time:
+                                return (not s.get("local")) and bool(s.get("cloud"))
+            return False
         for _ in range(5):
-            if not _snap_exists_in_items(host_id, vmid, backup_time):
+            if _is_cloud_only():
                 break
             time.sleep(3)
-        assert not _snap_exists_in_items(host_id, vmid, backup_time), \
-            f"Snapshot vmid={vmid} @ {backup_time} still local after delete/pbs — not cloud-only"
+        assert _is_cloud_only(), \
+            f"Snapshot vmid={vmid} @ {backup_time} not cloud-only after delete/pbs"
 
     resp = _post(f"/api/host/{host_id}/restore", {
         "vmid": vmid, "type": vm_type,
