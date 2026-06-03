@@ -1089,7 +1089,8 @@ def restic_snapshot_list(host_id: str):
         # actual restic repo). Falls back to aggregating per-VM topics for
         # agents that predate the restic/snapshots topic.
         authoritative = MQTT_CACHE.get(f"proxmox/{host_id}/restic/snapshots")
-        if isinstance(authoritative, list):
+        auth_is_list = isinstance(authoritative, list)
+        if auth_is_list:
             snaps = [s.copy() for s in authoritative]
             _dbg_source = "authoritative"
         else:
@@ -1121,9 +1122,14 @@ def restic_snapshot_list(host_id: str):
         except Exception:
             pass
 
-    # Backward compatibility with older tests that check/populate _restic_snap_cache
+    # Sticky fallback for older agents that don't publish the authoritative
+    # restic/snapshots topic. CRITICAL: only use it when the authoritative topic
+    # is genuinely ABSENT — never when it's present-but-empty. An empty
+    # authoritative list means "the repo really has no (matching) snapshots"
+    # (e.g. the last covering snapshot was just forgotten); falling back to the
+    # sticky cache there resurrects the forgotten snapshot — the restic ghost.
     cache_key = f"flat:{host_id}"
-    if not snaps and cache_key in _restic_snap_cache:
+    if not snaps and not auth_is_list and cache_key in _restic_snap_cache:
         snaps = _restic_snap_cache[cache_key]
         _dbg_source = "sticky-cache"
 
