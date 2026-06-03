@@ -304,16 +304,14 @@ def mqtt_proxy(ws):
     with WS_LOCK:
         WS_CLIENTS.add(msg_q)
 
-    # Send initial replay — serialize payload as JSON string to match
-    # the format of live MQTT messages (payload.toString() in _onMessage).
+    # Retained state is delivered ON DEMAND: the frontend sends
+    # {type:"replay", prefix:"proxmox/<host>"} on connect and on every host
+    # switch, and the receiver loop below replays exactly that host's topics.
+    # We deliberately do NOT dump the whole cache on connect — doing so sent
+    # every host's topics at once (filtered away client-side) and the queue
+    # pressure/ordering could drop a second host's per-VM topics, leaving it
+    # stuck on "Connecting…" with 0 snapshots.
     from mqtt_manager import MQTT_CACHE, MQTT_CACHE_LOCK
-    with MQTT_CACHE_LOCK:
-        for topic, payload in MQTT_CACHE.items():
-            try:
-                p = payload if isinstance(payload, str) else json.dumps(payload)
-                msg_q.put_nowait({"topic": topic, "payload": p})
-            except queue.Full:
-                break
 
     try:
         # Sender thread
@@ -345,6 +343,22 @@ def mqtt_proxy(ws):
                 mtype = msg.get("type")
                 if mtype == "pong":
                     continue
+                elif mtype == "replay":
+                    # Frontend requests a re-delivery of retained topics for the
+                    # newly selected host (on connect and on host switch). Without
+                    # this, switching to a second host never gets its retained
+                    # state and the UI stays on "Connecting…".
+                    prefix = (msg.get("prefix") or "").rstrip("/")
+                    if prefix:
+                        with MQTT_CACHE_LOCK:
+                            items = [(t, p) for t, p in MQTT_CACHE.items()
+                                     if t == prefix or t.startswith(prefix + "/")]
+                        for topic, payload in items:
+                            try:
+                                p = payload if isinstance(payload, str) else json.dumps(payload)
+                                msg_q.put_nowait({"topic": topic, "payload": p})
+                            except queue.Full:
+                                break
                 elif msg.get("topic"):
                     from mqtt_manager import publish_cmd
                     publish_cmd(msg["topic"], msg.get("payload", ""))
