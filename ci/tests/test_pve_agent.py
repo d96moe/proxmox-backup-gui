@@ -46,7 +46,7 @@ class TestMQTTPublisher:
         mock_global_cfg.return_value = mock_cfg
         pub = MQTTPublisher("127.0.0.1", hostname="test-node")
         
-        pub._on_connect(mock_mqtt_client, None, None, 0)
+        pub._on_connect(mock_mqtt_client, None, None, 0, None)
         
         mock_mqtt_client.publish.assert_any_call("proxmox/test-node/agent/status", "online", retain=True, qos=1)
         mock_mqtt_client.subscribe.assert_any_call("proxmox/test-node/cmd/+", qos=1)
