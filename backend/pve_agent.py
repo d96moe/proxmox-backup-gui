@@ -209,7 +209,10 @@ class MQTTPublisher:
     def _node(self) -> str:
         if _cfg and _cfg.pve_node:
             return _cfg.pve_node
-        return _cfg.mqtt_hostname if _cfg and _cfg.mqtt_hostname else socket.gethostname()
+        # The PVE node name is the host's own hostname. mqtt_hostname is the GUI
+        # host-id (e.g. "cabin"/"home") and is NOT the node name ("raspmox"/"pve")
+        # — using it pointed backup/restore at /nodes/<wrong>/… and failed.
+        return socket.gethostname().split(".")[0]
 
     def _handle_cmd_backup(self, body: dict) -> None:
         vmid    = body.get("vmid")

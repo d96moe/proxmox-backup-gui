@@ -228,6 +228,17 @@ class TestMQTTPublisher:
         assert "error" not in payload, \
             f"settings must succeed via pvesh fallback, got: {payload}"
 
+    @patch("pve_agent.socket.gethostname", return_value="raspmox.local")
+    def test_node_uses_hostname_not_mqtt_hostname(self, mock_hostname, mock_cfg, mock_mqtt_client):
+        """Regression: _node() must return the PVE node name (= the host's own
+        hostname, "raspmox"), NOT mqtt_hostname ("cabin", the GUI host-id). Using
+        mqtt_hostname pointed backup/restore at /nodes/<wrong>/… and failed."""
+        mock_cfg.pve_node = ""          # not explicitly configured
+        mock_cfg.mqtt_hostname = "cabin"
+        with patch("pve_agent._cfg", new=mock_cfg):
+            pub = MQTTPublisher("127.0.0.1", hostname="cabin")
+            assert pub._node() == "raspmox"   # short hostname, not "cabin"
+
     @patch("pve_agent._cfg")
     @patch("pve_agent.threading.Thread")
     def test_on_message_routes_connection_to_handler(self, mock_thread, mock_global_cfg, mock_cfg, mock_mqtt_client):

@@ -1,12 +1,63 @@
 """Proxmox VE API client — fetches VM/LXC names and status."""
 from __future__ import annotations
 
+import json
+import subprocess
+
 import requests
 import urllib3
 
 from config import HostConfig
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+def _pvesh_create(path: str, data: dict):
+    """Run an API POST via the local `pvesh` CLI — fallback for PVE versions that
+    intermittently drop HTTP POSTs proxied to pvedaemon (PVE 9.0.x on ARM under
+    memory pressure → RemoteDisconnected). pvesh talks to pvedaemon locally and is
+    reliable. pvesh paths map 1:1 to API paths, so this covers backup/restore/
+    stop/start. Returns the endpoint's data (a UPID string for task endpoints)."""
+    import re
+    cmd = ["pvesh", "create", path, "--output-format", "json"]
+    for k, v in data.items():
+        if v is None:
+            continue
+        cmd += [f"--{k}", str(v)]
+    # Task endpoints (vzdump/qmrestore) run SYNCHRONOUSLY under pvesh and stream
+    # the whole task log to stdout, ending with the UPID — so a 12s incremental or
+    # a multi-minute full backup both run here. Allow a long timeout.
+    out = subprocess.run(cmd, check=True, timeout=7200,
+                         capture_output=True, text=True).stdout.strip()
+    if not out:
+        return {}
+    # Extract just the UPID so callers can poll the (already-finished) task as
+    # usual — without this the streamed log was mistaken for the UPID.
+    m = re.search(r'UPID:[^\s"]+', out)
+    if m:
+        return m.group(0)
+    try:
+        return json.loads(out)
+    except Exception:
+        return out.strip().strip('"')
+
+
+def _pvesh_get(path: str):
+    """Run an API GET via the local `pvesh` CLI — fallback for ARM PVE that
+    intermittently drops HTTP GETs forwarded to pvedaemon. Returns parsed data.
+
+    The HTTP layer URL-encodes path segments (e.g. the task UPID in
+    wait_for_task); pvesh wants the raw API path, so unquote it first."""
+    from urllib.parse import unquote
+    path = unquote(path)
+    out = subprocess.run(["pvesh", "get", path, "--output-format", "json"],
+                         check=True, timeout=30, capture_output=True, text=True).stdout.strip()
+    if not out:
+        return []
+    try:
+        return json.loads(out)
+    except Exception:
+        return out
 
 
 class PVEClient:
@@ -29,14 +80,25 @@ class PVEClient:
         return d["ticket"], d["CSRFPreventionToken"]
 
     def _get(self, path: str, timeout: int | None = None) -> list | dict:
-        resp = self._session.get(f"{self._base}/api2/json{path}", timeout=timeout)
-        resp.raise_for_status()
-        return resp.json().get("data", [])
+        try:
+            resp = self._session.get(f"{self._base}/api2/json{path}", timeout=timeout)
+            resp.raise_for_status()
+            return resp.json().get("data", [])
+        except requests.exceptions.ConnectionError:
+            # ARM PVE intermittently drops GETs forwarded to pvedaemon too — this
+            # matters most for wait_for_task's status polls during a long backup
+            # (one dropped poll would otherwise fail an op whose task succeeded).
+            return _pvesh_get(path)
 
     def _post(self, path: str, **data) -> dict:
-        resp = self._session.post(f"{self._base}/api2/json{path}", json=data)
-        resp.raise_for_status()
-        return resp.json().get("data", {})
+        try:
+            resp = self._session.post(f"{self._base}/api2/json{path}", json=data)
+            resp.raise_for_status()
+            return resp.json().get("data", {})
+        except requests.exceptions.ConnectionError:
+            # ARM PVE intermittently drops POSTs forwarded to pvedaemon; pvesh is
+            # local and reliable. Covers backup_vm/restore_vm/stop_vm/start_vm.
+            return _pvesh_create(path, data)
 
     def _put(self, path: str, **data) -> dict:
         resp = self._session.put(f"{self._base}/api2/json{path}", data=data)
