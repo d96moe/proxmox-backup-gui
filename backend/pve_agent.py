@@ -846,7 +846,10 @@ class HAMQTTPublisher:
         self._hostname = hostname or socket.gethostname()
         self._base     = f"proxmox/{self._hostname}"
 
-        self._client = mqtt.Client(client_id=f"pve-agent-ha-{self._hostname}")
+        self._client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id=f"pve-agent-ha-{self._hostname}"
+        )
         self._client.will_set(f"{self._base}/agent/status", "offline",
                               retain=True, qos=1)
         if user:
@@ -861,7 +864,8 @@ class HAMQTTPublisher:
         except Exception as exc:
             log.warning("HA MQTT connect_async failed: %s", exc)
 
-    def _on_connect(self, client, userdata, flags, rc):
+    def _on_connect(self, client, userdata, flags, reason_code, properties):
+        rc = reason_code.value if hasattr(reason_code, 'value') else reason_code
         if rc == 0:
             log.info("HA MQTT connected — publishing discovery + online status")
             client.publish(f"{self._base}/agent/status", "online",
@@ -870,7 +874,8 @@ class HAMQTTPublisher:
         else:
             log.warning("HA MQTT connect failed rc=%s", rc)
 
-    def _on_disconnect(self, client, userdata, rc):
+    def _on_disconnect(self, client, userdata, flags, reason_code, properties):
+        rc = reason_code.value if hasattr(reason_code, 'value') else reason_code
         if rc != 0:
             log.warning("HA MQTT unexpected disconnect rc=%s — will auto-reconnect", rc)
 
