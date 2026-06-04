@@ -603,14 +603,22 @@ class TestMQTTTopicBase:
         pub = self._make_pub("")
         assert pub._base == f"proxmox/{socket.gethostname()}"
 
-    def test_node_uses_mqtt_hostname_from_global_cfg(self, agent_cfg):
-        """MQTTPublisher._node() reads global _cfg.mqtt_hostname.
-        If this returns OS hostname, topic won't match hosts.json id → 'connecting'."""
-        agent_cfg.mqtt_hostname = "cabin"
+    def test_node_returns_pve_node_or_hostname_not_mqtt_hostname(self, agent_cfg):
+        """_node() is the PVE NODE name (used in /nodes/<node>/… API paths): it must
+        be pve_node, else the host's own hostname — NEVER mqtt_hostname. mqtt_hostname
+        is the GUI host-id (drives the MQTT topic base _base, not the node name);
+        using it here pointed backup/restore at /nodes/<wrong>/… and failed on the
+        cabin Pi 5 (node 'raspmox', mqtt_hostname 'cabin')."""
+        import socket
+        agent_cfg.mqtt_hostname = "cabin"      # GUI host-id — must NOT be the node
+        agent_cfg.pve_node = "raspmox"         # explicit node wins
         pub = self._make_pub("cabin")
         with patch("pve_agent._cfg", agent_cfg):
-            assert pub._node() == "cabin", \
-                "_node() must return cfg.mqtt_hostname when set"
+            assert pub._node() == "raspmox"
+        agent_cfg.pve_node = ""                # else fall back to the OS hostname
+        with patch("pve_agent._cfg", agent_cfg):
+            assert pub._node() == socket.gethostname().split(".")[0]
+            assert pub._node() != "cabin"
 
     def test_node_falls_back_to_socket_when_not_configured(self, agent_cfg):
         """_node() must fall back to socket.gethostname() when mqtt_hostname is empty."""
