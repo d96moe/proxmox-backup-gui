@@ -66,7 +66,10 @@ class MQTTPublisher:
 
         lwt_topic = f"{self._base}/agent/status"
 
-        self._client = mqtt.Client(client_id=f"pve-agent-{self._hostname}")
+        self._client = mqtt.Client(
+            mqtt.CallbackAPIVersion.VERSION2,
+            client_id=f"pve-agent-{self._hostname}"
+        )
         self._client.will_set(lwt_topic, "offline", retain=True, qos=1)
 
         if user:
@@ -88,8 +91,8 @@ class MQTTPublisher:
 
     # ── internal callbacks ────────────────────────────────────────────────────
 
-    def _on_connect(self, client, userdata, flags, rc):
-        if rc == 0:
+    def _on_connect(self, client, userdata, flags, reason_code, properties):
+        if reason_code == 0:
             log.info("MQTT connected — publishing online status")
             client.publish(f"{self._base}/agent/status", "online",
                            retain=True, qos=1)
@@ -104,7 +107,7 @@ class MQTTPublisher:
             client.subscribe(f"{self._base}/vm/+/meta", qos=0)
             client.subscribe(f"{self._base}/vms/index", qos=1)
         else:
-            log.warning("MQTT connect failed rc=%s", rc)
+            log.warning("MQTT connect failed rc=%s", reason_code)
 
     def _on_message_bootstrap(self, client, userdata, msg):
         """Collect VMIDs from retained broker messages on startup."""
@@ -634,9 +637,9 @@ class MQTTPublisher:
     def setup_message_handler(self) -> None:
         self._client.on_message = self._on_message
 
-    def _on_disconnect(self, client, userdata, rc):
-        if rc != 0:
-            log.warning("MQTT unexpected disconnect rc=%s — will auto-reconnect", rc)
+    def _on_disconnect(self, client, userdata, disconnect_flags, reason_code, properties):
+        if reason_code != 0:
+            log.warning("MQTT unexpected disconnect rc=%s — will auto-reconnect", reason_code)
 
     # ── public API ────────────────────────────────────────────────────────────
 

@@ -15,12 +15,12 @@ WS_LOCK = threading.Lock()
 _global_client = None
 
 def _on_connect(prefix):
-    def callback(c, _u, _f, rc):
-        if rc == 0:
-            c.subscribe(f"{prefix}/#", qos=1)
+    def callback(client, userdata, flags, reason_code, properties):
+        if reason_code == 0:
+            client.subscribe(f"{prefix}/#", qos=1)
             log.info("MQTT Global Client connected and subscribed to %s/#", prefix)
         else:
-            log.error("MQTT Global Client failed to connect, rc=%s", rc)
+            log.error("MQTT Global Client failed to connect, rc=%s", reason_code)
     return callback
 
 def _on_message(c, _u, msg):
@@ -84,6 +84,7 @@ def init_mqtt(host: str, port: int, user: str, password: str, prefix: str):
     # a reconnect (with clean_session=True the broker drops the session and any
     # in-flight messages are lost — this caused cmd/restore to vanish in CI).
     client = paho_mqtt.Client(
+        paho_mqtt.CallbackAPIVersion.VERSION2,
         client_id="gui-backend-global",
         protocol=paho_mqtt.MQTTv311,
         clean_session=False,
