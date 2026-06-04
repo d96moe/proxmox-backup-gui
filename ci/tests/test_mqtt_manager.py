@@ -85,14 +85,13 @@ def test_replay_items_for_prefix_host_isolation(clear_cache):
     "Connecting…" with 0 snapshots. A 'proxmox/cabin' replay must include
     cabin's vms/index + per-VM pbs, must NOT leak 'proxmox/home/*', and must
     NOT match a sibling prefix like 'proxmox/cabin2/*'."""
-    import app
     MQTT_CACHE["proxmox/home/vms/index"]   = ["100"]
     MQTT_CACHE["proxmox/home/vm/100/pbs"]  = {"snapshots": [{"backup_time": 1}]}
     MQTT_CACHE["proxmox/cabin/vms/index"]  = ["200"]
     MQTT_CACHE["proxmox/cabin/vm/200/pbs"] = {"snapshots": [{"backup_time": 2}]}
     MQTT_CACHE["proxmox/cabin2/vms/index"] = ["999"]  # sibling — must NOT match
 
-    items = dict(app._replay_items_for_prefix("proxmox/cabin"))
+    items = dict(mqtt_manager._replay_items_for_prefix("proxmox/cabin"))
 
     assert set(items) == {"proxmox/cabin/vms/index", "proxmox/cabin/vm/200/pbs"}
     assert not any(t.startswith("proxmox/home/") for t in items)
@@ -105,11 +104,10 @@ def test_replay_items_for_prefix_host_isolation(clear_cache):
 def test_replay_items_for_prefix_empty_or_unknown(clear_cache):
     """A blank prefix returns nothing (no accidental full-cache dump), and an
     unknown host returns nothing (not a single leaked topic)."""
-    import app
     MQTT_CACHE["proxmox/home/vms/index"] = ["100"]
-    assert app._replay_items_for_prefix("") == []
-    assert app._replay_items_for_prefix(None) == []
-    assert app._replay_items_for_prefix("proxmox/__nohost__") == []
+    assert mqtt_manager._replay_items_for_prefix("") == []
+    assert mqtt_manager._replay_items_for_prefix(None) == []
+    assert mqtt_manager._replay_items_for_prefix("proxmox/__nohost__") == []
 
 
 @patch("agent_client.publish_cmd")

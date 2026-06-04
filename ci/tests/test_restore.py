@@ -2633,40 +2633,34 @@ def test_mqtt_ws_replay_redelivers_host_state(real_page, host_id):
 
     Opens a fresh (cookie-authenticated) WebSocket in the page context, requests a
     replay for the host, and asserts its retained vms/index + at least one
-    vm/<id>/pbs (the snapshots that were missing) come back, with no other host's
-    topics leaking. Also asserts an unknown-host replay returns nothing — proof the
-    server filters by prefix instead of dumping the whole cache."""
-    result = real_page.evaluate(
+    vm/<id>/pbs (the snapshots that were missing) come back. (Prefix isolation of
+    the replay itself is covered by the unit test in test_mqtt_manager — here a WS
+    also receives live broadcasts, so an unknown-prefix WS is not necessarily
+    silent.)"""
+    topics = real_page.evaluate(
         """async (host) => {
-            function replay(prefix) {
-                return new Promise((resolve) => {
-                    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-                    const ws = new WebSocket(`${proto}//${location.host}/mqtt-ws`);
-                    const got = [];
-                    let done = false;
-                    const finish = () => { if (!done) { done = true; try { ws.close(); } catch (_) {} resolve(got); } };
-                    ws.onopen = () => ws.send(JSON.stringify({ type: 'replay', prefix }));
-                    ws.onmessage = (e) => {
-                        try { const m = JSON.parse(e.data); if (m.topic) got.push(m.topic); } catch (_) {}
-                    };
-                    ws.onerror = finish;
-                    setTimeout(finish, 5000);
-                });
-            }
-            return { host: await replay(`proxmox/${host}`),
-                     bogus: await replay('proxmox/__nohost__') };
+            return await new Promise((resolve) => {
+                const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+                const ws = new WebSocket(`${proto}//${location.host}/mqtt-ws`);
+                const got = [];
+                let done = false;
+                const finish = () => { if (!done) { done = true; try { ws.close(); } catch (_) {} resolve(got); } };
+                ws.onopen = () => ws.send(JSON.stringify({ type: 'replay', prefix: `proxmox/${host}` }));
+                ws.onmessage = (e) => {
+                    try { const m = JSON.parse(e.data); if (m.topic) got.push(m.topic); } catch (_) {}
+                };
+                ws.onerror = finish;
+                setTimeout(finish, 5000);
+            });
         }""",
         host_id,
     )
-    topics = result["host"]
     assert any(t.endswith("/vms/index") for t in topics), \
         f"replay returned no vms/index for {host_id}: {topics[:25]}"
     assert any("/vm/" in t and t.endswith("/pbs") for t in topics), \
         f"replay returned no vm/<id>/pbs (snapshots) for {host_id}: {topics[:25]}"
     leaked = [t for t in topics if not t.startswith(f"proxmox/{host_id}/")]
-    assert not leaked, f"replay leaked topics from another host: {leaked[:25]}"
-    assert result["bogus"] == [], \
-        f"replay for an unknown host returned topics (no prefix isolation): {result['bogus'][:25]}"
+    assert not leaked, f"replay/live delivered another host's topics: {leaked[:25]}"
 
 
 @pytest.fixture

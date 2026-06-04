@@ -21,7 +21,7 @@ from flask import Flask, Response, jsonify, send_from_directory, abort, request,
 from flask_cors import CORS
 from flask_login import login_user, logout_user, login_required, current_user
 from flask_sock import Sock
-from mqtt_manager import init_mqtt, WS_CLIENTS, WS_LOCK
+from mqtt_manager import init_mqtt, WS_CLIENTS, WS_LOCK, _replay_items_for_prefix
 
 from config import load_hosts, save_hosts, HostConfig
 from pbs_client import PBSClient
@@ -293,26 +293,6 @@ def api_delete_user(username: str):
 # ──────────────────────────────────────────────
 # API
 # ──────────────────────────────────────────────
-
-def _replay_items_for_prefix(prefix: str):
-    """Return [(topic, payload-as-JSON-string), …] from MQTT_CACHE under `prefix`.
-
-    Powers the /mqtt-ws {type:"replay"} handler: a host switch must re-deliver
-    exactly the selected host's retained topics. Host isolation is critical —
-    a `proxmox/cabin` replay must NOT leak `proxmox/home/*` (nor match a sibling
-    like `proxmox/cabin2/*`), or one host's data bleeds into another's view.
-    """
-    from mqtt_manager import MQTT_CACHE, MQTT_CACHE_LOCK
-    prefix = (prefix or "").rstrip("/")
-    if not prefix:
-        return []
-    out = []
-    with MQTT_CACHE_LOCK:
-        for t, p in MQTT_CACHE.items():
-            if t == prefix or t.startswith(prefix + "/"):
-                out.append((t, p if isinstance(p, str) else json.dumps(p)))
-    return out
-
 
 @sock.route('/mqtt-ws')
 def mqtt_proxy(ws):

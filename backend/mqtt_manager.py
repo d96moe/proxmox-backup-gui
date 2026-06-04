@@ -55,6 +55,26 @@ def _on_message(c, _u, msg):
         for q in dead:
             WS_CLIENTS.discard(q)
 
+
+def _replay_items_for_prefix(prefix: str):
+    """Return [(topic, payload-as-JSON-string), …] from MQTT_CACHE under `prefix`.
+
+    Powers the /mqtt-ws {type:"replay"} handler: a host switch must re-deliver
+    exactly the selected host's retained topics. Host isolation is critical — a
+    `proxmox/cabin` replay must NOT leak `proxmox/home/*` (nor match a sibling like
+    `proxmox/cabin2/*`). Lives here (not app.py) so it is importable without the
+    Flask stack — e.g. from the agent-side test host in integration CI."""
+    prefix = (prefix or "").rstrip("/")
+    if not prefix:
+        return []
+    out = []
+    with MQTT_CACHE_LOCK:
+        for t, p in MQTT_CACHE.items():
+            if t == prefix or t.startswith(prefix + "/"):
+                out.append((t, p if isinstance(p, str) else json.dumps(p)))
+    return out
+
+
 def init_mqtt(host: str, port: int, user: str, password: str, prefix: str):
     global _global_client
     if _global_client is not None:
