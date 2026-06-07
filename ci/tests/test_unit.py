@@ -2080,3 +2080,21 @@ class TestComputeHostSummary:
             exclude=["100", "999"],  # 999 not in all_vmids
         )
         assert s["protected_vm_count"] >= 0
+
+
+def test_load_hosts_ignores_unknown_keys(monkeypatch):
+    """Regression: a stale/obsolete key in hosts.json (e.g. the removed
+    agent_url/agent_token) must NOT crash the GUI on boot — load_hosts drops
+    unknown keys instead of raising TypeError. This is the fresh-install crash
+    the install-test caught (setup-lxc.sh installed an example with agent_url)."""
+    import json as _json
+    from config import load_hosts
+    monkeypatch.setenv("HOSTS_CONFIG", _json.dumps([
+        {"id": "home", "label": "pve · home",
+         "agent_url": "http://x:8099", "agent_token": "t"},
+    ]))
+    hosts = load_hosts()
+    assert len(hosts) == 1
+    assert hosts[0].id == "home"
+    assert hosts[0].label == "pve · home"
+    assert not hasattr(hosts[0], "agent_url")

@@ -1,8 +1,11 @@
 """Host configuration loaded from environment or config file."""
 import os
 import json
-from dataclasses import dataclass, field, asdict
+import logging
+from dataclasses import dataclass, field, asdict, fields
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,7 +41,17 @@ def load_hosts() -> list[HostConfig]:
             return []
 
     data = json.loads(raw)
-    return [HostConfig(**h) for h in data]
+    valid = {f.name for f in fields(HostConfig)}
+    hosts = []
+    for h in data:
+        unknown = set(h) - valid
+        if unknown:
+            # Tolerate (and warn about) stale/obsolete keys such as the removed
+            # agent_url/agent_token — a leftover key must never crash the GUI on boot.
+            log.warning("hosts.json: ignoring unknown key(s) for host %r: %s",
+                        h.get("id", "?"), ", ".join(sorted(unknown)))
+        hosts.append(HostConfig(**{k: v for k, v in h.items() if k in valid}))
+    return hosts
 
 
 def save_hosts(hosts: list[HostConfig], path: Path) -> None:
