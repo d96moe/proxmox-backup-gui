@@ -2616,11 +2616,13 @@ def test_pbs_gc_task_card_disappears_when_done(real_page, host_id, running_gc_ta
     # Wait for GC to finish via API
     _wait_for_pbs_task_done(host_id, upid, timeout=120)
 
-    # Agent publishes updated (empty) running task list via MQTT —
-    # card must disappear within the next poll cycle (15s)
+    # Agent publishes updated (empty) running task list via MQTT — the card must
+    # disappear once that arrives. The chain is GC-done(API) → agent pbs-tasks poll
+    # (5s) → MQTT publish → GUI re-render, which can lag under nightly CI load, so
+    # allow a generous margin (was 25s; #288 flaked there with everything working).
     real_page.wait_for_function(
         "() => document.getElementById('pbs-task-cards').children.length === 0",
-        timeout=25000,
+        timeout=40000,
     )
     assert real_page._js_errors == [], f"JS errors: {real_page._js_errors}"
 

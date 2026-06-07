@@ -55,11 +55,10 @@ Tests the full fresh-install story weekly (Saturday ~21:00) and on demand. No te
 1. Clones template 9001 to a fresh VM
 2. Starts the VM, waits for SSH, sets up pve-cluster and NAT (vmbr0 → uplink masquerade so LXC containers can reach the internet)
 3. Copies the current repo checkout to the VM
-4. Runs `setup-agent.sh` with `MQTT_HOST=127.0.0.1` and a test token; verifies the `pve-agent` systemd unit starts and `/health` responds (HTTPS then HTTP fallback)
-5. Verifies token rejection: no token → 401, wrong token → 401
-6. Runs `setup-lxc.sh` with a static IP on the NAT'd subnet (`10.10.0.100/24`) and a test admin password; verifies LXC 199 is running, the GUI serves the login page, and Mosquitto is active
-7. Verifies GUI login: correct credentials return 200 + `role` field; wrong password is rejected
-8. Runs `add-user.sh` inside the LXC (viewer + admin); verifies duplicate user rejection
+4. Runs `setup-agent.sh` with `MQTT_HOST=127.0.0.1`; verifies the `pve-agent` systemd unit starts cleanly — active, no crash-restarts, reaches its StatePoller main loop, and logs no Python traceback (the agent is pure MQTT — there is no HTTP endpoint to probe)
+5. Runs `setup-lxc.sh` with a static IP on the NAT'd subnet (`10.10.0.100/24`) and a test admin password; verifies LXC 199 is running, the GUI serves the login page, and Mosquitto is active
+6. Verifies GUI login: correct credentials return 200 + `role` field; wrong password is rejected
+7. Runs `add-user.sh` inside the LXC (viewer + admin); verifies duplicate user rejection
 
 Post-always: destroys the cloned VM.
 
@@ -145,8 +144,7 @@ Pure Python unit tests (no VM, no network). Run in both the fast pipeline and as
 
 Shell-level tests that verify the fresh-install scripts work end-to-end on a clean VM. Cover:
 
-- **setup-agent.sh** — agent installs, `pve-agent` systemd unit starts, `/health` responds (HTTPS or HTTP)
-- **Agent token auth** — no-token request rejected (401), wrong-token request rejected (401)
+- **setup-agent.sh** — agent installs and the `pve-agent` systemd unit starts cleanly (active, no crash-restarts, reaches its StatePoller main loop, no Python traceback). The agent is pure MQTT — no HTTP endpoint.
 - **setup-lxc.sh** — LXC 199 created and running, login page served at `:5000`, Mosquitto active
 - **GUI login auth** — correct credentials return 200 + `role` field; wrong password rejected (401)
 - **add-user.sh** — viewer and admin users created; duplicate user rejected with "already exists"

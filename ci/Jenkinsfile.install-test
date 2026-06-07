@@ -7,7 +7,7 @@
 //
 // 1. Clone template 9001
 // 2. Copy repo to VM
-// 3. Run setup-agent.sh — verify pve-agent starts and HTTP health responds
+// 3. Run setup-agent.sh — verify pve-agent installs and starts cleanly (pure MQTT, no HTTP)
 // 4. Run setup-lxc.sh  — verify LXC 199 created, GUI service starts, login page served
 // 5. Run add-user.sh   — verify user creation works
 //
@@ -122,7 +122,9 @@ ENDSSH
                     ssh ${SSH_OPTS} root@${VM_IP} bash -s << 'ENDSSH'
 set -euo pipefail
 cd ${REPO_DIR}
-# Use loopback as MQTT host — agent will fail to connect but HTTP API stays up
+# Use loopback as MQTT host — no broker here, so the agent won't connect to MQTT.
+# That's fine: this stage only verifies the install scripts produce an agent that
+# starts cleanly (pure MQTT, no HTTP API to probe).
 MQTT_HOST=127.0.0.1 MQTT_HOSTNAME=install-ci AGENT_TOKEN=ci-install-test-token \
     bash setup-agent.sh
 ENDSSH
@@ -133,35 +135,30 @@ ENDSSH
 set -euo pipefail
 # setup-agent.sh does not auto-start when config has CHANGE_ME placeholders
 # (correct for real installs — users must fill credentials first).
-# Start explicitly here to verify the service unit and HTTP API work.
+# Start explicitly here to verify the service unit + clean startup.
 systemctl start pve-agent
-sleep 3
+sleep 5
+# The agent is PURE MQTT — it serves NO HTTP endpoint (the REST API was removed).
+# There is also no broker in this VM during this stage, so we verify a clean
+# install without HTTP or MQTT: the unit is active, it did not crash-loop, it
+# reached its StatePoller main loop, and it logged no Python traceback.
 systemctl is-active pve-agent \
     && echo "pve-agent: active" \
-    || { echo "ERROR: pve-agent not running"; journalctl -u pve-agent -n 30 --no-pager; exit 1; }
-if curl -sfk -H "Authorization: Bearer ci-install-test-token" https://127.0.0.1:8099/health 2>/dev/null; then
-    echo "Agent HTTPS health: OK"
-    AGENT_URL="https://127.0.0.1:8099"
-    CURL_INSECURE="-k"
-elif curl -sf -H "Authorization: Bearer ci-install-test-token" http://127.0.0.1:8099/health 2>/dev/null; then
-    echo "Agent HTTP health: OK"
-    AGENT_URL="http://127.0.0.1:8099"
-    CURL_INSECURE=""
-else
-    echo "ERROR: Agent /health failed"
-    journalctl -u pve-agent -n 20 --no-pager
-    exit 1
-fi
+    || { echo "ERROR: pve-agent not running"; journalctl -u pve-agent -n 40 --no-pager; exit 1; }
 
-# Verify token rejection: no token → 401
-curl -sf \${CURL_INSECURE} "\${AGENT_URL}/health" 2>/dev/null \
-    && { echo "ERROR: Agent accepted request with no token"; exit 1; } \
-    || echo "Agent no-token rejection: OK"
+NRESTARTS=\$(systemctl show pve-agent -p NRestarts --value)
+[ "\${NRESTARTS:-0}" = "0" ] \
+    && echo "pve-agent no crash-restarts: OK" \
+    || { echo "ERROR: pve-agent restarted \${NRESTARTS}x (crash-loop)"; journalctl -u pve-agent -n 40 --no-pager; exit 1; }
 
-# Verify token rejection: wrong token → 401
-curl -sf \${CURL_INSECURE} -H "Authorization: Bearer wrongtoken" "\${AGENT_URL}/health" 2>/dev/null \
-    && { echo "ERROR: Agent accepted wrong token"; exit 1; } \
-    || echo "Agent wrong-token rejection: OK"
+LOG=\$(journalctl -u pve-agent -n 80 --no-pager)
+echo "\$LOG" | grep -q "StatePoller started" \
+    && echo "Agent reached main loop: OK" \
+    || { echo "ERROR: agent did not reach StatePoller main loop"; echo "\$LOG"; exit 1; }
+
+echo "\$LOG" | grep -q "Traceback (most recent call last)" \
+    && { echo "ERROR: agent logged a Python traceback"; echo "\$LOG"; exit 1; } \
+    || echo "Agent startup clean (no traceback): OK"
 ENDSSH
                 """
             }
