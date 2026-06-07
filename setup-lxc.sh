@@ -95,7 +95,7 @@ pct exec "${LXC_ID}" -- mkdir -p /opt/proxmox-backup-gui/backend /opt/proxmox-ba
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-for f in app.py config.py pbs_client.py pve_client.py restic_client.py agent_client.py jobs.py auth.py; do
+for f in app.py mqtt_manager.py config.py pbs_client.py pve_client.py restic_client.py agent_client.py jobs.py auth.py; do
     [ -f "${SCRIPT_DIR}/backend/${f}" ] && \
         pct push "${LXC_ID}" "${SCRIPT_DIR}/backend/${f}" "/opt/proxmox-backup-gui/backend/${f}"
 done
