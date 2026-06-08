@@ -1913,13 +1913,15 @@ def test_job_indicator_disappears_when_job_completes(page: Page):
     page.evaluate("closeJobModal()")
     # Now let the job finish
     cfg.job_status = "done"
-    # Indicator should disappear when poll detects done. Detection is via the
-    # 2s HTTP poll, so 8s only allows ~4 attempts — too tight under CI load or
-    # a transient blip. 15s (~7 attempts) absorbs that without masking a real hang.
+    # Indicator should disappear when poll detects done. Detection is via the 2s
+    # HTTP poll, but under nightly CI load the browser event loop gets starved and
+    # even ~7 attempts (15s) flaked (#289). Match the GC-card test's 40s margin —
+    # the UI does update, it just lags under load; this absorbs it without masking
+    # a real hang.
     page.wait_for_function(
         "() => !document.getElementById('vm-job-101') || "
         "      document.getElementById('vm-job-101').style.display === 'none'",
-        timeout=15000,
+        timeout=40000,
     )
     assert page._js_errors == []
 
