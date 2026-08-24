@@ -350,7 +350,7 @@ def schedule_interval_hours(schedule: str) -> float | None:
     """
     import re
 
-    if not schedule:
+    if not isinstance(schedule, str) or not schedule:
         return None
     s = schedule.strip().lower()
     s = re.sub(r"^daily\s+", "", s)

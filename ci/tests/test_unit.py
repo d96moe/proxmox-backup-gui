@@ -1721,6 +1721,12 @@ class TestScheduleIntervalHours:
     def test_unrecognised_day_abbreviation_returns_none(self):
         assert self._hours("xyz 02:00") is None
 
+    def test_non_string_input_returns_none(self):
+        """Regression: a MagicMock (truthy but not a string) — e.g. from a
+        test fixture mocking get_backup_schedules() without a real schedule
+        value — must not raise TypeError from .strip()/re.match()."""
+        assert self._hours(MagicMock()) is None
+
 
 class TestGetRetention:
     """ResticClient.get_retention() parses RESTIC_RETENTION_KEEP_* from config.env."""
