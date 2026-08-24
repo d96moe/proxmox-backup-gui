@@ -35,7 +35,7 @@ from typing import Iterator
 
 # Re-use existing client code — agent runs on PVE host alongside them.
 from pbs_client import PBSClient
-from pve_client import PVEClient
+from pve_client import PVEClient, schedule_interval_hours
 
 VERSION = "0.1.0"
 _start_time = time.monotonic()
@@ -834,6 +834,7 @@ class HAMQTTPublisher:
       proxmox/<hn>/agent/status  — LWT online/offline
       proxmox/<hn>/summary        — all_protected, unprotected_count
       proxmox/<hn>/storage        — local/cloud usage
+      proxmox/<hn>/vm_list        — per-VM/LXC backup status list (for the HA "all backups" popup)
 
     All other topics (progress, per-VM raw, ops logs, …) stay on the GUI broker.
     """
@@ -1000,6 +1001,21 @@ class HAMQTTPublisher:
             "device": dev,
         })
 
+        # vm_list — state is just the job count (informational); the full
+        # per-VM/LXC list rides along as an attribute for the dashboard card
+        # to read (states['sensor...'].attributes.jobs), same pattern as the
+        # Jenkins-popup card design.
+        vm_list_topic = f"{self._base}/vm_list"
+        _pub("sensor", "vm_list", {
+            "name": "VM Backup List",
+            "state_topic": vm_list_topic,
+            "value_template": "{{ value_json.jobs | length }}",
+            "json_attributes_topic": vm_list_topic,
+            "unique_id": f"proxmox_{hn}_vm_list",
+            "icon": "mdi:format-list-bulleted",
+            "device": dev,
+        })
+
     def shutdown(self) -> None:
         try:
             self._client.publish(f"{self._base}/agent/status", "offline",
@@ -1018,6 +1034,68 @@ _ha_mqtt: HAMQTTPublisher | None = None
 # ─────────────────────────────────────────────────────────────────────────────
 # State poller — maintains current VM/PBS/restic state, publishes diffs
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _build_vm_list_row(
+    vmid: str,
+    meta: dict,
+    raw_snaps: list,
+    vm_restic: dict,
+    schedule_threshold_h: float | None,
+    now: float | None = None,
+) -> dict:
+    """Pure function: build one vm_list row (HA "all backups" popup) for a
+    single VM/LXC. raw_snaps/vm_restic are the same per-vmid PBS-groups /
+    restic-by-pbstime slices already computed in the scan loop — no new
+    fetching or grouping here, just reshaping + a status verdict.
+
+    status:
+      "none"    — no PBS backup exists for this VM at all
+      "ok"      — most recent PBS backup is within the schedule threshold
+      "stale"   — most recent PBS backup is older than the threshold
+      "unknown" — no schedule_threshold_h available (unparseable/missing
+                  schedule) — deliberately not guessed as ok/stale
+    """
+    if now is None:
+        now = time.time()
+
+    pbs_times = [s.get("backup_time") for s in raw_snaps if s.get("backup_time")]
+    pbs_last_ts = max(pbs_times) if pbs_times else None
+    restic_times = [t for t in vm_restic.keys() if t]
+    restic_last_ts = max(restic_times) if restic_times else None
+
+    def _iso(ts: float | None) -> str | None:
+        if ts is None:
+            return None
+        return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00")
+
+    def _age_h(ts: float | None) -> float | None:
+        if ts is None:
+            return None
+        return round(max(0.0, now - ts) / 3600, 1)
+
+    pbs_age_h = _age_h(pbs_last_ts)
+    if pbs_last_ts is None:
+        status = "none"
+    elif schedule_threshold_h is None:
+        status = "unknown"
+    elif pbs_age_h is not None and pbs_age_h > schedule_threshold_h:
+        status = "stale"
+    else:
+        status = "ok"
+
+    return {
+        "vmid":            vmid,
+        "name":            meta.get("name", f"vm-{vmid}"),
+        "type":            meta.get("type", "vm"),
+        "pbs_count":       len(raw_snaps),
+        "pbs_last_iso":    _iso(pbs_last_ts),
+        "pbs_age_h":       pbs_age_h,
+        "restic_count":    len(vm_restic),
+        "restic_last_iso": _iso(restic_last_ts),
+        "restic_age_h":    _age_h(restic_last_ts),
+        "status":          status,
+    }
 
 
 def _compute_host_summary(
@@ -1279,6 +1357,7 @@ class StatePoller:
         pve_meta: dict = {}
         pve_ok = True
         vm_selection: dict = {"mode": "exclude", "vmids": []}
+        pbs_jobs: list = []
         try:
             pve = PVEClient(_host())
             pve_meta = pve.get_vms_and_lxcs()
@@ -1288,6 +1367,17 @@ class StatePoller:
         except Exception as exc:
             log.warning("PVE fetch failed: %s", exc)
             pve_ok = False
+
+        # Derive an "overdue" threshold from the actual configured backup
+        # schedule (interval + margin) rather than a hardcoded number, so
+        # vm_list status self-adjusts if the schedule changes. None means
+        # "can't tell" — vm_list rows report status "unknown" rather than
+        # guessing red/green from an unparseable/missing schedule.
+        schedule_threshold_h: float | None = None
+        if pbs_jobs:
+            interval_h = schedule_interval_hours(pbs_jobs[0].get("schedule", ""))
+            if interval_h is not None:
+                schedule_threshold_h = interval_h + max(6.0, interval_h * 0.25)
 
         # ── PBS: get all snapshot groups ─────────────────────────────────────
         pbs_groups: dict[str, list] = {}  # vmid_str → [snap, ...]
@@ -1312,6 +1402,9 @@ class StatePoller:
         # still in restic) remain visible in the UI.
         all_vmids = (set(str(k) for k in pve_meta) | set(pbs_groups) | set(restic_by_vm_pbstime))
 
+        vm_list_rows: list = []
+        scan_now = time.time()
+
         for vmid in all_vmids:
             vid_int = int(vmid) if vmid.isdigit() else vmid
             meta = pve_meta.get(vid_int, pve_meta.get(vmid, {}))
@@ -1330,6 +1423,14 @@ class StatePoller:
             # annotate PBS snapshots with cloud coverage
             raw_snaps = pbs_groups.get(vmid, [])
             vm_restic  = restic_by_vm_pbstime.get(vmid, {})
+
+            # vm_list row for the HA "all backups" popup — separate PBS/restic
+            # counts + timestamps, status derived from the schedule threshold
+            # computed above (not a hardcoded age).
+            vm_list_rows.append(_build_vm_list_row(
+                vmid, meta, raw_snaps, vm_restic, schedule_threshold_h, scan_now,
+            ))
+
             annotated  = []
             local_times: set[int] = set()
             partial_times: set[int] = set()
@@ -1485,6 +1586,9 @@ class StatePoller:
             self._cfg.exclude_from_protection,
             now,
         ))
+
+        # vm_list — full per-VM/LXC status list for the HA "all backups" popup
+        self._pub_if_changed("vm_list", {"jobs": vm_list_rows})
 
         # Storage stats change whenever snapshots change — scan in same cycle
         self._scan_storage()
@@ -1675,7 +1779,7 @@ class StatePoller:
     # ── helpers ───────────────────────────────────────────────────────────────
 
     # Topics mirrored to HA's Mosquitto broker (all others stay on GUI broker)
-    _HA_MIRROR_TOPICS = frozenset({"summary", "storage"})
+    _HA_MIRROR_TOPICS = frozenset({"summary", "storage", "vm_list"})
 
     def _pub_if_changed(self, topic_suffix: str,
                         data: dict | list) -> None:

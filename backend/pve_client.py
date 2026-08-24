@@ -338,6 +338,43 @@ def _schedule_left(schedule: str, now=None) -> str | None:
     return None
 
 
+def schedule_interval_hours(schedule: str) -> float | None:
+    """Estimate the max expected gap (hours) between two runs of a vzdump
+    schedule string, for deriving a 'backup is overdue' threshold.
+
+    Same parsing as _schedule_left (HH:MM / 'daily HH:MM' / '<days> HH:MM'),
+    but returns the interval itself rather than time-until-next-run. Returns
+    None if the schedule can't be parsed — callers should treat that as
+    "unknown", not silently assume a default, since a wrong guess here means
+    a wrong red/green status.
+    """
+    import re
+
+    if not schedule:
+        return None
+    s = schedule.strip().lower()
+    s = re.sub(r"^daily\s+", "", s)
+
+    day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+
+    m = re.match(r"^(?:([a-z,]+)\s+)?(\d{1,2}):(\d{2})$", s)
+    if not m:
+        return None
+    days_str = m.group(1)
+    if not days_str:
+        return 24.0
+    target_days = sorted({day_map[d.strip()] for d in days_str.split(",") if d.strip() in day_map})
+    if not target_days:
+        return None
+    if len(target_days) == 7:
+        return 24.0
+    gaps = [
+        (target_days[(i + 1) % len(target_days)] - target_days[i]) % 7 or 7
+        for i in range(len(target_days))
+    ]
+    return max(gaps) * 24.0
+
+
 def _guess_os(name: str) -> str:
     name_lower = name.lower()
     if "win" in name_lower:

@@ -10,10 +10,12 @@ Tests cover every change and corner case found during manual testing:
   ENDPOINT      — 400 / 404 / 409 for new and existing endpoints
   COVERAGE      — /restic/snapshots local-coverage annotation
   DELETE_CLOUD  — step 4 forgets ALL restic IDs that carry the deleted pbs_time
-  SCHEDULES     — _schedule_left, get_retention, get_pbs_prune_jobs, /schedules endpoint
+  SCHEDULES     — _schedule_left, schedule_interval_hours, get_retention, get_pbs_prune_jobs, /schedules endpoint
   AGENT         — pve_agent HTTP API: health, vms, snapshots, operations, schedules, delete
   AGENT_CLIENT  — AgentClient: all methods, error handling, app.py integration
   HOST_MGMT     — POST /api/hosts (add host), GET/POST /api/host/<id>/local, HostConfig defaults
+  HOST_SUMMARY  — _compute_host_summary() pure-function edge cases
+  VM_LIST       — _build_vm_list_row() pure-function edge cases (HA "all backups" popup rows)
 """
 from __future__ import annotations
 
@@ -1671,6 +1673,55 @@ class TestScheduleLeft:
         assert _schedule_left("monthly") is None
 
 
+class TestScheduleIntervalHours:
+    """schedule_interval_hours(schedule): max expected gap between runs, in hours."""
+
+    def _hours(self, schedule):
+        from pve_client import schedule_interval_hours
+        return schedule_interval_hours(schedule)
+
+    # ── daily ────────────────────────────────────────────────────────────────
+
+    def test_bare_hhmm_is_daily(self):
+        assert self._hours("02:00") == 24.0
+
+    def test_daily_prefix_is_daily(self):
+        assert self._hours("daily 02:00") == 24.0
+
+    def test_all_seven_days_is_daily(self):
+        assert self._hours("mon,tue,wed,thu,fri,sat,sun 02:00") == 24.0
+
+    # ── weekly / multi-day ───────────────────────────────────────────────────
+
+    def test_single_day_is_weekly(self):
+        assert self._hours("sat 02:00") == 7 * 24.0
+
+    def test_two_days_evenly_spaced(self):
+        """mon + thu: gaps are 3 and 4 days → max gap 4 days."""
+        assert self._hours("mon,thu 02:00") == 4 * 24.0
+
+    def test_three_days_picks_largest_gap(self):
+        """mon,wed,fri: gaps wed-mon=2, fri-wed=2, mon(next)-fri=3 → max 3 days."""
+        assert self._hours("mon,wed,fri 02:00") == 3 * 24.0
+
+    def test_day_order_in_string_does_not_matter(self):
+        assert self._hours("fri,mon,wed 02:00") == self._hours("mon,wed,fri 02:00")
+
+    # ── unparseable / missing → None, never guessed ─────────────────────────
+
+    def test_empty_string_returns_none(self):
+        assert self._hours("") is None
+
+    def test_none_returns_none(self):
+        assert self._hours(None) is None
+
+    def test_unknown_keyword_returns_none(self):
+        assert self._hours("@weekly") is None
+
+    def test_unrecognised_day_abbreviation_returns_none(self):
+        assert self._hours("xyz 02:00") is None
+
+
 class TestGetRetention:
     """ResticClient.get_retention() parses RESTIC_RETENTION_KEEP_* from config.env."""
 
@@ -2080,6 +2131,141 @@ class TestComputeHostSummary:
             exclude=["100", "999"],  # 999 not in all_vmids
         )
         assert s["protected_vm_count"] >= 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# VM LIST — _build_vm_list_row() pure-function edge cases
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestBuildVmListRow:
+    """Tests for pve_agent._build_vm_list_row (per-row status for the HA
+    'all backups' popup) — reshapes existing pbs_groups/restic-by-pbstime
+    data, no new fetching."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        import pve_agent as _pa
+        self._fn = _pa._build_vm_list_row
+
+    def _call(self, vmid="100", meta=None, raw_snaps=None, vm_restic=None,
+              threshold_h=30.0, now=10_000.0):
+        return self._fn(
+            vmid, meta or {}, raw_snaps or [], vm_restic or {}, threshold_h, now,
+        )
+
+    # ── basic field passthrough ─────────────────────────────────────────────
+
+    def test_vmid_name_type_passthrough(self):
+        r = self._call(vmid="101", meta={"name": "haos", "type": "vm"})
+        assert r["vmid"] == "101"
+        assert r["name"] == "haos"
+        assert r["type"] == "vm"
+
+    def test_missing_name_falls_back_to_vm_prefix(self):
+        r = self._call(vmid="105", meta={})
+        assert r["name"] == "vm-105"
+
+    def test_missing_type_defaults_to_vm(self):
+        r = self._call(meta={"name": "x"})
+        assert r["type"] == "vm"
+
+    def test_lxc_type_passthrough(self):
+        r = self._call(meta={"name": "x", "type": "lxc"})
+        assert r["type"] == "lxc"
+
+    # ── PBS count / timestamp ────────────────────────────────────────────────
+
+    def test_no_pbs_backups_status_none(self):
+        r = self._call(raw_snaps=[], threshold_h=30.0)
+        assert r["pbs_count"] == 0
+        assert r["pbs_last_iso"] is None
+        assert r["pbs_age_h"] is None
+        assert r["status"] == "none"
+
+    def test_pbs_count_and_last_picks_newest(self):
+        raw_snaps = [{"backup_time": 8000}, {"backup_time": 9500}, {"backup_time": 7000}]
+        r = self._call(raw_snaps=raw_snaps, now=10_000.0)
+        assert r["pbs_count"] == 3
+        # 9500 seconds since epoch = 1970-01-01T02:38:20+00:00
+        assert r["pbs_last_iso"] == "1970-01-01T02:38:20+00:00"
+        assert r["pbs_age_h"] == round((10_000.0 - 9500) / 3600, 1)
+
+    def test_pbs_age_floor_at_zero_on_clock_skew(self):
+        r = self._call(raw_snaps=[{"backup_time": 9000}], now=5000.0)
+        assert r["pbs_age_h"] == 0.0
+
+    def test_pbs_backup_time_zero_ignored_like_none(self):
+        # backup_time=0 is falsy — matches _compute_host_summary's own
+        # "ts=0 filtered" convention for consistency across the codebase.
+        r = self._call(raw_snaps=[{"backup_time": 0}])
+        assert r["pbs_last_iso"] is None
+        assert r["pbs_age_h"] is None
+        assert r["pbs_count"] == 1   # count still includes it
+
+    # ── restic count / timestamp (independent of PBS) ───────────────────────
+
+    def test_no_restic_backups(self):
+        r = self._call(vm_restic={})
+        assert r["restic_count"] == 0
+        assert r["restic_last_iso"] is None
+        assert r["restic_age_h"] is None
+
+    def test_restic_count_and_last_picks_newest_key(self):
+        vm_restic = {8000: {"id": "a"}, 9500: {"id": "b"}, 7000: {"id": "c"}}
+        r = self._call(vm_restic=vm_restic, now=10_000.0)
+        assert r["restic_count"] == 3
+        assert r["restic_last_iso"] == "1970-01-01T02:38:20+00:00"
+        assert r["restic_age_h"] == round((10_000.0 - 9500) / 3600, 1)
+
+    def test_restic_and_pbs_tracked_independently(self):
+        # PBS has a backup but restic doesn't (not yet mirrored) — restic
+        # fields must stay null, not fall back to the PBS timestamp.
+        r = self._call(raw_snaps=[{"backup_time": 9000}], vm_restic={})
+        assert r["pbs_count"] == 1
+        assert r["restic_count"] == 0
+        assert r["restic_last_iso"] is None
+
+    # ── status: ok / stale / unknown / none ──────────────────────────────────
+
+    def test_status_ok_within_threshold(self):
+        # age = (10000-9500)/3600 = 0.14h, well within a 30h threshold
+        r = self._call(raw_snaps=[{"backup_time": 9500}], threshold_h=30.0, now=10_000.0)
+        assert r["status"] == "ok"
+
+    def test_status_stale_beyond_threshold(self):
+        now = 200_000.0
+        # age = (200000-9500)/3600 ≈ 52.9h > 30h threshold
+        r = self._call(raw_snaps=[{"backup_time": 9500}], threshold_h=30.0, now=now)
+        assert r["status"] == "stale"
+
+    def test_status_exactly_at_threshold_is_ok(self):
+        # age exactly equals threshold → not > threshold → still ok
+        threshold_h = 10.0
+        now = 9500 + threshold_h * 3600
+        r = self._call(raw_snaps=[{"backup_time": 9500}], threshold_h=threshold_h, now=now)
+        assert r["status"] == "ok"
+
+    def test_status_unknown_when_threshold_none(self):
+        # Unparseable/missing schedule → don't guess red/green
+        r = self._call(raw_snaps=[{"backup_time": 9500}], threshold_h=None, now=10_000.0)
+        assert r["status"] == "unknown"
+
+    def test_status_none_takes_priority_over_unknown_threshold(self):
+        # No backup at all — status is "none" even if threshold is also unknown.
+        r = self._call(raw_snaps=[], threshold_h=None)
+        assert r["status"] == "none"
+
+    def test_status_stale_regardless_of_restic_state(self):
+        # restic being up to date must not mask a stale PBS backup — the
+        # schedule threshold is about the PBS backup specifically.
+        now = 200_000.0
+        r = self._call(
+            raw_snaps=[{"backup_time": 9500}],
+            vm_restic={now - 10: {"id": "fresh"}},
+            threshold_h=30.0,
+            now=now,
+        )
+        assert r["status"] == "stale"
 
 
 def test_load_hosts_ignores_unknown_keys(monkeypatch):
