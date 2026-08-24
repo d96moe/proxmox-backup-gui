@@ -2196,6 +2196,36 @@ class TestBuildVmListRow:
         assert r["pbs_last_iso"] == "1970-01-01T02:38:20+00:00"
         assert r["pbs_age_h"] == round((10_000.0 - 9500) / 3600, 1)
 
+    # ── PBS size (most recent snapshot's size_bytes) ─────────────────────────
+
+    def test_pbs_size_gb_from_newest_snapshot(self):
+        raw_snaps = [
+            {"backup_time": 8000, "size_bytes": 1 * 1024**3},
+            {"backup_time": 9500, "size_bytes": int(4.5 * 1024**3)},
+        ]
+        r = self._call(raw_snaps=raw_snaps, now=10_000.0)
+        assert r["pbs_size_gb"] == 4.5
+
+    def test_pbs_size_gb_none_when_no_backups(self):
+        r = self._call(raw_snaps=[])
+        assert r["pbs_size_gb"] is None
+
+    def test_pbs_size_gb_none_when_size_bytes_missing(self):
+        # A real PBS snapshot always has size_bytes, but don't crash if a
+        # future/partial entry lacks it.
+        raw_snaps = [{"backup_time": 9500}]
+        r = self._call(raw_snaps=raw_snaps)
+        assert r["pbs_size_gb"] is None
+
+    def test_pbs_size_gb_uses_newest_even_if_not_largest(self):
+        # Size tracks the *newest* backup, not the biggest one.
+        raw_snaps = [
+            {"backup_time": 9500, "size_bytes": 1 * 1024**3},
+            {"backup_time": 8000, "size_bytes": int(9.9 * 1024**3)},
+        ]
+        r = self._call(raw_snaps=raw_snaps, now=10_000.0)
+        assert r["pbs_size_gb"] == 1.0
+
     def test_pbs_age_floor_at_zero_on_clock_skew(self):
         r = self._call(raw_snaps=[{"backup_time": 9000}], now=5000.0)
         assert r["pbs_age_h"] == 0.0

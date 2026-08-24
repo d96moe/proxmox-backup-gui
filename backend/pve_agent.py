@@ -1064,6 +1064,17 @@ def _build_vm_list_row(
     restic_times = [t for t in vm_restic.keys() if t]
     restic_last_ts = max(restic_times) if restic_times else None
 
+    # Size of the most recent PBS snapshot — pbs_client.get_snapshots() already
+    # includes size_bytes per snapshot, no new fetching needed.
+    pbs_size_gb = None
+    if pbs_last_ts is not None:
+        for s in raw_snaps:
+            if s.get("backup_time") == pbs_last_ts:
+                size_bytes = s.get("size_bytes")
+                if size_bytes:
+                    pbs_size_gb = round(size_bytes / 1024**3, 2)
+                break
+
     def _iso(ts: float | None) -> str | None:
         if ts is None:
             return None
@@ -1091,6 +1102,7 @@ def _build_vm_list_row(
         "pbs_count":       len(raw_snaps),
         "pbs_last_iso":    _iso(pbs_last_ts),
         "pbs_age_h":       pbs_age_h,
+        "pbs_size_gb":     pbs_size_gb,
         "restic_count":    len(vm_restic),
         "restic_last_iso": _iso(restic_last_ts),
         "restic_age_h":    _age_h(restic_last_ts),
@@ -2551,7 +2563,7 @@ if __name__ == "__main__":
 
         _ha_mqtt = None
         if _cfg.mqtt_ha_host:
-            log.info("HA MQTT publisher starting → %s:%s (discovery + summary/storage only)",
+            log.info("HA MQTT publisher starting → %s:%s (discovery + summary/storage/vm_list only)",
                      _cfg.mqtt_ha_host, _cfg.mqtt_ha_port)
             _ha_mqtt = HAMQTTPublisher(
                 host=_cfg.mqtt_ha_host,
