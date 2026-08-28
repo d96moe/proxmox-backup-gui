@@ -2303,6 +2303,141 @@ class TestBuildVmListRow:
         )
         assert r["status"] == "stale"
 
+    # ── pbs_backup_running override (PBS down for an expected reason) ────────
+
+    def test_pbs_backup_running_overrides_status_regardless_of_snaps(self):
+        # Even with real, fresh-looking snapshot data, the backup-running
+        # override must win — the caller passes pbs_backup_running specifically
+        # because pbs_groups was empty (PBS unreachable), so any raw_snaps here
+        # would be stale/cached, not fresh.
+        r = self._fn(
+            "100", {"name": "x", "type": "vm"},
+            [{"backup_time": 9999, "size_bytes": 123}], {"9999": {"id": "y"}},
+            30.0, 10_000.0, pbs_backup_running="vzdump",
+        )
+        assert r["status"] == "backup_running"
+
+    def test_pbs_backup_running_reason_passed_through(self):
+        # The UI needs to say *which* backup is running ("Paused - restic
+        # backup running" vs a vzdump one), not just a generic "running".
+        r = self._fn(
+            "100", {"name": "x"}, [], {}, 30.0, 10_000.0,
+            pbs_backup_running="restic",
+        )
+        assert r["backup_running_reason"] == "restic"
+
+        r = self._fn(
+            "100", {"name": "x"}, [], {}, 30.0, 10_000.0,
+            pbs_backup_running="vzdump",
+        )
+        assert r["backup_running_reason"] == "vzdump"
+
+    def test_backup_running_reason_none_in_normal_rows(self):
+        # Every row must carry this key (even when not running) so the
+        # dashboard JS can read j.backup_running_reason unconditionally.
+        r = self._fn("100", {"name": "x"}, [{"backup_time": 9500}], {}, 30.0, 10_000.0)
+        assert r["backup_running_reason"] is None
+
+    def test_pbs_backup_running_nulls_pbs_and_restic_timestamps(self):
+        # Timestamps/size must not be reported at all while in this state -
+        # they'd be misleadingly stale (computed from data cached before PBS
+        # went down because a backup is running).
+        r = self._fn(
+            "100", {"name": "x"}, [{"backup_time": 9999, "size_bytes": 123}],
+            {"9999": {"id": "y"}}, 30.0, 10_000.0, pbs_backup_running="restic",
+        )
+        assert r["pbs_last_iso"] is None
+        assert r["pbs_age_h"] is None
+        assert r["pbs_size_gb"] is None
+        assert r["restic_last_iso"] is None
+        assert r["restic_age_h"] is None
+
+    def test_pbs_backup_running_still_reports_counts(self):
+        # Counts (how many snapshots exist) stay meaningful even during the
+        # backup-running window - only the "how fresh" verdict is suppressed.
+        r = self._fn(
+            "100", {"name": "x"}, [{"backup_time": 1}, {"backup_time": 2}],
+            {"1": {"id": "a"}}, 30.0, 10_000.0, pbs_backup_running="restic",
+        )
+        assert r["pbs_count"] == 2
+        assert r["restic_count"] == 1
+
+    def test_pbs_backup_running_none_uses_normal_status(self):
+        # Default/None must not change existing behavior.
+        r = self._fn(
+            "100", {"name": "x"}, [{"backup_time": 9500}], {}, 30.0, 10_000.0,
+            pbs_backup_running=None,
+        )
+        assert r["status"] == "ok"
+
+
+class TestIsPbsBackupRunning:
+    """Tests for pve_agent._is_pbs_backup_running — decides whether a
+    PBS-unreachable error is a known/expected downtime (real vzdump running,
+    or the nightly restic-to-cloud job stopping PBS for a consistent read)
+    rather than a real failure."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        import pve_agent as _pa
+        self._fn = _pa._is_pbs_backup_running
+
+    def test_vzdump_when_pve_backup_running(self):
+        pve = MagicMock()
+        pve.is_backup_running.return_value = True
+        assert self._fn(pve) == "vzdump"
+
+    def test_none_when_neither_running(self, monkeypatch):
+        pve = MagicMock()
+        pve.is_backup_running.return_value = False
+        result = MagicMock(stdout="inactive\n")
+        monkeypatch.setattr("pve_agent.subprocess.run", lambda *a, **k: result)
+        assert self._fn(pve) is None
+
+    def test_restic_when_restic_service_active(self, monkeypatch):
+        pve = MagicMock()
+        pve.is_backup_running.return_value = False
+        result = MagicMock(stdout="active\n")
+        monkeypatch.setattr("pve_agent.subprocess.run", lambda *a, **k: result)
+        assert self._fn(pve) == "restic"
+
+    def test_restic_when_restic_service_activating(self, monkeypatch):
+        # systemd reports "activating" briefly right at service start, before
+        # settling to "active" - must count as running too, not a gap where
+        # the UI flips to red for a few seconds.
+        pve = MagicMock()
+        pve.is_backup_running.return_value = False
+        result = MagicMock(stdout="activating\n")
+        monkeypatch.setattr("pve_agent.subprocess.run", lambda *a, **k: result)
+        assert self._fn(pve) == "restic"
+
+    def test_pve_none_skips_pve_check_without_crashing(self, monkeypatch):
+        # pve is None when PVE itself is also unreachable (not just PBS) -
+        # must fall through to the local systemctl check instead of crashing.
+        result = MagicMock(stdout="active\n")
+        monkeypatch.setattr("pve_agent.subprocess.run", lambda *a, **k: result)
+        assert self._fn(None) == "restic"
+
+    def test_pve_is_backup_running_exception_falls_through(self, monkeypatch):
+        # A PVE API error while checking must not blow up the whole PBS-error
+        # handler - fall through to the local systemctl check.
+        pve = MagicMock()
+        pve.is_backup_running.side_effect = Exception("connection refused")
+        result = MagicMock(stdout="active\n")
+        monkeypatch.setattr("pve_agent.subprocess.run", lambda *a, **k: result)
+        assert self._fn(pve) == "restic"
+
+    def test_systemctl_exception_returns_none(self, monkeypatch):
+        # If systemctl itself can't be run (missing, permission), don't crash
+        # the scan loop - just fall back to "not a known backup-running window".
+        pve = MagicMock()
+        pve.is_backup_running.return_value = False
+
+        def _raise(*a, **k):
+            raise OSError("systemctl not found")
+        monkeypatch.setattr("pve_agent.subprocess.run", _raise)
+        assert self._fn(pve) is None
+
 
 def test_load_hosts_ignores_unknown_keys(monkeypatch):
     """Regression: a stale/obsolete key in hosts.json (e.g. the removed

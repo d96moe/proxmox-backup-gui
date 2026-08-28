@@ -1036,6 +1036,36 @@ _ha_mqtt: HAMQTTPublisher | None = None
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _is_pbs_backup_running(pve: "PVEClient | None") -> str | None:
+    """If PBS being unreachable right now is expected (not a real failure),
+    returns which of the two known causes it is - the caller/UI can then say
+    something accurate instead of a generic "running":
+
+      "vzdump"  — a PVE vzdump task is actively writing to PBS
+      "restic"  — the nightly restic-to-cloud job is active; it stops PBS
+                  itself to read /mnt/pbs as a consistent snapshot
+
+    Returns None if neither is running (PBS being down is unexplained - a
+    real failure). Checked locally via systemctl since the agent runs on the
+    same host as both.
+    """
+    try:
+        if pve is not None and pve.is_backup_running():
+            return "vzdump"
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(
+            ["systemctl", "is-active", "restic-backup.service"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.strip()
+        if out == "active" or out == "activating":
+            return "restic"
+    except Exception:
+        pass
+    return None
+
+
 def _build_vm_list_row(
     vmid: str,
     meta: dict,
@@ -1043,6 +1073,7 @@ def _build_vm_list_row(
     vm_restic: dict,
     schedule_threshold_h: float | None,
     now: float | None = None,
+    pbs_backup_running: str | None = None,
 ) -> dict:
     """Pure function: build one vm_list row (HA "all backups" popup) for a
     single VM/LXC. raw_snaps/vm_restic are the same per-vmid PBS-groups /
@@ -1050,14 +1081,34 @@ def _build_vm_list_row(
     fetching or grouping here, just reshaping + a status verdict.
 
     status:
-      "none"    — no PBS backup exists for this VM at all
-      "ok"      — most recent PBS backup is within the schedule threshold
-      "stale"   — most recent PBS backup is older than the threshold
-      "unknown" — no schedule_threshold_h available (unparseable/missing
-                  schedule) — deliberately not guessed as ok/stale
+      "none"            — no PBS backup exists for this VM at all
+      "ok"              — most recent PBS backup is within the schedule threshold
+      "stale"           — most recent PBS backup is older than the threshold
+      "unknown"         — no schedule_threshold_h available (unparseable/missing
+                          schedule) — deliberately not guessed as ok/stale
+      "backup_running"  — PBS is unreachable, but for a known/expected reason
+                          (see pbs_backup_running_reason: "vzdump" or "restic")
+                          — not a real failure, so callers should render this
+                          like a running job, not red.
     """
     if now is None:
         now = time.time()
+
+    if pbs_backup_running:
+        return {
+            "vmid":            vmid,
+            "name":            meta.get("name", f"vm-{vmid}"),
+            "type":            meta.get("type", "vm"),
+            "pbs_count":       len(raw_snaps),
+            "pbs_last_iso":    None,
+            "pbs_age_h":       None,
+            "pbs_size_gb":     None,
+            "restic_count":    len(vm_restic),
+            "restic_last_iso": None,
+            "restic_age_h":    None,
+            "status":          "backup_running",
+            "backup_running_reason": pbs_backup_running,
+        }
 
     pbs_times = [s.get("backup_time") for s in raw_snaps if s.get("backup_time")]
     pbs_last_ts = max(pbs_times) if pbs_times else None
@@ -1107,6 +1158,7 @@ def _build_vm_list_row(
         "restic_last_iso": _iso(restic_last_ts),
         "restic_age_h":    _age_h(restic_last_ts),
         "status":          status,
+        "backup_running_reason": None,
     }
 
 
@@ -1394,6 +1446,7 @@ class StatePoller:
         # ── PBS: get all snapshot groups ─────────────────────────────────────
         pbs_groups: dict[str, list] = {}  # vmid_str → [snap, ...]
         pbs_ok = True
+        pbs_backup_running = False
         try:
             pbs = PBSClient(_host())
             for group in pbs.get_snapshots():
@@ -1403,6 +1456,14 @@ class StatePoller:
         except Exception as exc:
             log.warning("PBS fetch failed: %s", exc)
             pbs_ok = False
+            # PBS is briefly stopped by design during two known windows: a PVE
+            # vzdump task actively writing to it, or the nightly restic-to-cloud
+            # job (which stops PBS to read /mnt/pbs as a consistent snapshot).
+            # Neither is a real failure - don't let every VM go "stale"/"none"
+            # in the UI just because PBS's API happens to be down right now.
+            pbs_backup_running = _is_pbs_backup_running(pve if pve_ok else None)
+            if pbs_backup_running:
+                log.info("PBS unreachable because a backup is actively running (vzdump or restic)")
 
         # ── cross-reference restic coverage ──────────────────────────────────
         with self._restic_lock:
@@ -1441,6 +1502,7 @@ class StatePoller:
             # computed above (not a hardcoded age).
             vm_list_rows.append(_build_vm_list_row(
                 vmid, meta, raw_snaps, vm_restic, schedule_threshold_h, scan_now,
+                pbs_backup_running=pbs_backup_running,
             ))
 
             annotated  = []
