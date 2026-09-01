@@ -243,14 +243,19 @@ class MQTTPublisher:
                 raise RuntimeError("PBS backup task failed")
             op.append_log("Backup complete.")
             if run_restic_after and _cfg and _cfg.restic_repo:
-                res = LocalResticClient(_cfg)
-                op.append_log("Starting restic cloud backup…")
-                def _prog_backup(pct, speed, eta):
-                    self.publish_progress(op.op_id, str(vmid), pct, speed, eta)
-                pbs_snaps = _fetch_pbs_snaps(_host())
-                res.backup_datastore(_cfg.pbs_datastore_path, op.append_log, pbs_snaps,
-                                     progress_fn=_prog_backup)
-                op.append_log("Cloud backup complete.")
+                if not _restic_op_lock.acquire(blocking=False):
+                    raise RuntimeError("Another restic operation is already running — try again later")
+                try:
+                    res = LocalResticClient(_cfg)
+                    op.append_log("Starting restic cloud backup…")
+                    def _prog_backup(pct, speed, eta):
+                        self.publish_progress(op.op_id, str(vmid), pct, speed, eta)
+                    pbs_snaps = _fetch_pbs_snaps(_host())
+                    res.backup_datastore(_cfg.pbs_datastore_path, op.append_log, pbs_snaps,
+                                         progress_fn=_prog_backup)
+                    op.append_log("Cloud backup complete.")
+                finally:
+                    _restic_op_lock.release()
 
         _run_in_background(op, _do, rescan_restic=run_restic_after)
 
