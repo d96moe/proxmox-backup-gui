@@ -280,7 +280,11 @@ class PVEClient:
             status = self._get(f"/nodes/{node}/tasks/{encoded}/status")
             if status.get("status") == "stopped":
                 exit_status = status.get("exitstatus", "unknown")
-                if exit_status == "OK":
+                # PVE reports "OK" on a clean run and "WARNINGS: N" when the task
+                # still completed successfully but logged non-fatal warnings (e.g.
+                # "no efidisk configured" on a template without one) - only treat
+                # it as a real failure if it's neither of those.
+                if exit_status == "OK" or exit_status.startswith("WARNINGS"):
                     log(f"Task completed: {exit_status}")
                     return True
                 else:
