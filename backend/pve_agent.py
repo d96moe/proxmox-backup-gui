@@ -1054,6 +1054,12 @@ def _is_pbs_backup_running(pve: "PVEClient | None") -> str | None:
             return "vzdump"
     except Exception:
         pass
+    # Covers both the scheduled restic-backup.service/.timer AND any manually
+    # (GUI-)triggered restic op, since both paths acquire this same lock -
+    # checking only the systemd unit would miss manual runs, which stop PBS
+    # exactly the same way but never touch that service.
+    if _restic_op_lock.locked():
+        return "restic"
     try:
         out = subprocess.run(
             ["systemctl", "is-active", "restic-backup.service"],
